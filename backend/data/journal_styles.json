@@ -1,0 +1,2630 @@
+{
+  "journals": [
+    {
+      "name": "Nature",
+      "aliases": [
+        "Nature journal"
+      ],
+      "publisher": "Nature Portfolio",
+      "citation_style": "nature",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 3000,
+        "review": 4000,
+        "brief_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Nature"
+    },
+    {
+      "name": "Nature Medicine",
+      "aliases": [
+        "Nat Med"
+      ],
+      "publisher": "Nature Portfolio",
+      "citation_style": "nature",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 60,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Nature"
+    },
+    {
+      "name": "Nature Communications",
+      "aliases": [
+        "Nat Commun"
+      ],
+      "publisher": "Nature Portfolio",
+      "citation_style": "nature",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": 100,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 6000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Nature"
+    },
+    {
+      "name": "Nature Biotechnology",
+      "aliases": [
+        "Nat Biotechnol"
+      ],
+      "publisher": "Nature Portfolio",
+      "citation_style": "nature",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 60,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 3000,
+        "review": 5000,
+        "brief_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Nature"
+    },
+    {
+      "name": "Nature Climate Change",
+      "aliases": [
+        "Nat Clim Chang"
+      ],
+      "publisher": "Nature Portfolio",
+      "citation_style": "nature",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": 60,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 3000,
+        "review": 5000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Nature"
+    },
+    {
+      "name": "Scientific Reports",
+      "aliases": [
+        "Sci Rep"
+      ],
+      "publisher": "Nature Portfolio",
+      "citation_style": "nature",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 200,
+      "word_limits": {
+        "original_research": 5000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Nature"
+    },
+    {
+      "name": "New England Journal of Medicine",
+      "aliases": [
+        "NEJM",
+        "N Engl J Med",
+        "New Engl J Med"
+      ],
+      "publisher": "Massachusetts Medical Society",
+      "citation_style": "nlm",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "short_communication"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 3500,
+        "review": 4000,
+        "meta_analysis": 3500,
+        "case_report": 1500,
+        "short_communication": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods (Literature Search)",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "References"
+        ],
+        "short_communication": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "NLM"
+    },
+    {
+      "name": "JAMA",
+      "aliases": [
+        "Journal of the American Medical Association"
+      ],
+      "publisher": "American Medical Association",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "short_communication"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 3500,
+        "review": 4500,
+        "meta_analysis": 3500,
+        "case_report": 1500,
+        "short_communication": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods (Literature Search)",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "short_communication": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "JAMA Psychiatry",
+      "aliases": [
+        "JAMA Psych"
+      ],
+      "publisher": "American Medical Association",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 3500,
+        "review": 4500,
+        "meta_analysis": 3500,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods (Literature Search)",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "The Lancet",
+      "aliases": [
+        "Lancet"
+      ],
+      "publisher": "Elsevier",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "short_communication"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "short_communication": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Contributors",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods (Search strategy and selection criteria)",
+          "Results",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "short_communication": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver"
+    },
+    {
+      "name": "Lancet Oncology",
+      "aliases": [
+        "Lancet Oncol"
+      ],
+      "publisher": "Elsevier",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "case_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Contributors",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods (Search strategy and selection criteria)",
+          "Results",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver"
+    },
+    {
+      "name": "Lancet Digital Health",
+      "aliases": [
+        "Lancet Digit Health"
+      ],
+      "publisher": "Elsevier",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "meta_analysis": 4000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver"
+    },
+    {
+      "name": "BMJ",
+      "aliases": [
+        "British Medical Journal"
+      ],
+      "publisher": "BMJ Publishing Group",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "short_communication"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "case_report": 1500,
+        "short_communication": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "Learning Points",
+          "References"
+        ],
+        "short_communication": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver",
+      "csl_id": "bmj"
+    },
+    {
+      "name": "Annals of Internal Medicine",
+      "aliases": [
+        "Ann Intern Med"
+      ],
+      "publisher": "American College of Physicians",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 3500,
+        "review": 4500,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "Journal of Clinical Oncology",
+      "aliases": [
+        "JCO",
+        "J Clin Oncol"
+      ],
+      "publisher": "American Society of Clinical Oncology",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "Annals of Oncology",
+      "aliases": [
+        "Ann Oncol"
+      ],
+      "publisher": "Elsevier",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "case_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver"
+    },
+    {
+      "name": "Circulation",
+      "aliases": [
+        "Circ"
+      ],
+      "publisher": "American Heart Association",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "brief_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4500,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "European Heart Journal",
+      "aliases": [
+        "Eur Heart J",
+        "EHJ"
+      ],
+      "publisher": "Oxford University Press",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "brief_report",
+        "case_report"
+      ],
+      "max_references": 60,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4500,
+        "review": 5000,
+        "meta_analysis": 4000,
+        "brief_report": 2000,
+        "case_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA",
+      "csl_id": "elsevier-harvard"
+    },
+    {
+      "name": "CHEST",
+      "aliases": [
+        "Chest"
+      ],
+      "publisher": "Elsevier",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA",
+      "csl_id": "chest"
+    },
+    {
+      "name": "Gut",
+      "aliases": [],
+      "publisher": "BMJ Publishing Group",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver",
+      "csl_id": "bmj"
+    },
+    {
+      "name": "Thorax",
+      "aliases": [],
+      "publisher": "BMJ Publishing Group",
+      "citation_style": "vancouver",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "case_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Vancouver",
+      "csl_id": "bmj"
+    },
+    {
+      "name": "Brain",
+      "aliases": [
+        "Brain: A Journal of Neurology"
+      ],
+      "publisher": "Oxford University Press",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 80,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 200,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000,
+        "case_report": 2000,
+        "brief_report": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "Journal of Neuroscience",
+      "aliases": [
+        "J Neurosci",
+        "JNeurosci"
+      ],
+      "publisher": "Society for Neuroscience",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 10000,
+        "review": 12000,
+        "brief_report": 4000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "Neuron",
+      "aliases": [],
+      "publisher": "Cell Press",
+      "citation_style": "cell",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 80,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 6000,
+        "review": 10000,
+        "brief_report": 3000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Cell"
+    },
+    {
+      "name": "Cell",
+      "aliases": [],
+      "publisher": "Cell Press",
+      "citation_style": "cell",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": 80,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Cell"
+    },
+    {
+      "name": "Molecular Cell",
+      "aliases": [
+        "Mol Cell"
+      ],
+      "publisher": "Cell Press",
+      "citation_style": "cell",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 80,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000,
+        "brief_report": 3000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Cell"
+    },
+    {
+      "name": "Cell Reports",
+      "aliases": [
+        "Cell Rep"
+      ],
+      "publisher": "Cell Press",
+      "citation_style": "cell",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Cell"
+    },
+    {
+      "name": "Cell Host & Microbe",
+      "aliases": [
+        "Cell Host Microbe"
+      ],
+      "publisher": "Cell Press",
+      "citation_style": "cell",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": 80,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "STAR Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Cell"
+    },
+    {
+      "name": "PLOS ONE",
+      "aliases": [
+        "PLoS ONE",
+        "PLOS One",
+        "PLoS One"
+      ],
+      "publisher": "Public Library of Science",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "short_communication",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 300,
+      "word_limits": {
+        "original_research": null,
+        "short_communication": 4000,
+        "brief_report": 3000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "short_communication": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "PLOS Biology",
+      "aliases": [
+        "PLoS Biology",
+        "PLoS Biol"
+      ],
+      "publisher": "Public Library of Science",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 300,
+      "word_limits": {},
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "PLOS Medicine",
+      "aliases": [
+        "PLoS Medicine",
+        "PLoS Med"
+      ],
+      "publisher": "Public Library of Science",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis"
+      ],
+      "max_references": null,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 300,
+      "word_limits": {},
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "PLOS Computational Biology",
+      "aliases": [
+        "PLoS Comput Biol",
+        "PLoS Comput Biology"
+      ],
+      "publisher": "Public Library of Science",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 300,
+      "word_limits": {},
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "Science",
+      "aliases": [
+        "Science magazine",
+        "Science journal"
+      ],
+      "publisher": "American Association for the Advancement of Science",
+      "citation_style": "science",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 30,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 125,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000,
+        "brief_report": 1500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "Science"
+    },
+    {
+      "name": "Science Advances",
+      "aliases": [
+        "Sci Adv"
+      ],
+      "publisher": "American Association for the Advancement of Science",
+      "citation_style": "science",
+      "in_text_format": "superscript",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "Science"
+    },
+    {
+      "name": "PNAS",
+      "aliases": [
+        "Proceedings of the National Academy of Sciences",
+        "Proc Natl Acad Sci"
+      ],
+      "publisher": "National Academy of Sciences",
+      "citation_style": "nlm",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 6000,
+        "review": 8000,
+        "brief_report": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "NLM"
+    },
+    {
+      "name": "eLife",
+      "aliases": [],
+      "publisher": "eLife Sciences Publications",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": null,
+        "review": null,
+        "brief_report": null
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Results",
+          "Discussion",
+          "Materials and Methods",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA",
+      "csl_id": "elife"
+    },
+    {
+      "name": "Psychological Science",
+      "aliases": [
+        "Psychol Sci"
+      ],
+      "publisher": "SAGE Publications",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 200,
+      "word_limits": {
+        "original_research": 6000,
+        "brief_report": 3000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Method",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Method",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "JAMIA",
+      "aliases": [
+        "Journal of the American Medical Informatics Association",
+        "J Am Med Inform Assoc"
+      ],
+      "publisher": "Oxford University Press",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "brief_report": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "Journal of Medical Internet Research",
+      "aliases": [
+        "JMIR",
+        "J Med Internet Res"
+      ],
+      "publisher": "JMIR Publications",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis"
+      ],
+      "max_references": null,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": null,
+        "review": null,
+        "meta_analysis": null
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "Frontiers in Medicine",
+      "aliases": [
+        "Front Med",
+        "Frontiers Medicine"
+      ],
+      "publisher": "Frontiers Media",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report",
+        "case_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 350,
+      "word_limits": {
+        "original_research": null,
+        "review": null,
+        "brief_report": 2000,
+        "case_report": 3000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "Patient Perspective",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA",
+      "csl_id": "frontiers"
+    },
+    {
+      "name": "Frontiers in Neuroscience",
+      "aliases": [
+        "Front Neurosci",
+        "Frontiers Neuroscience"
+      ],
+      "publisher": "Frontiers Media",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report",
+        "case_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 350,
+      "word_limits": {
+        "original_research": null,
+        "review": null,
+        "brief_report": 2000,
+        "case_report": 3000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "Conclusion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA",
+      "csl_id": "frontiers"
+    },
+    {
+      "name": "F1000Research",
+      "aliases": [
+        "F1000 Research"
+      ],
+      "publisher": "F1000Research",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": null,
+      "word_limits": {},
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "JACC",
+      "aliases": [
+        "Journal of the American College of Cardiology"
+      ],
+      "publisher": "American College of Cardiology",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "JNCI",
+      "aliases": [
+        "Journal of the National Cancer Institute",
+        "Journal of National Cancer Institute"
+      ],
+      "publisher": "Oxford University Press",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis"
+      ],
+      "max_references": 50,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "Bioinformatics",
+      "aliases": [],
+      "publisher": "Oxford University Press",
+      "citation_style": "apa",
+      "in_text_format": "author_year",
+      "reference_sort_order": "alphabetical",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 200,
+      "word_limits": {
+        "original_research": 7000,
+        "review": 10000,
+        "brief_report": 4000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "APA"
+    },
+    {
+      "name": "Clinical Infectious Diseases",
+      "aliases": [
+        "Clin Infect Dis",
+        "CID"
+      ],
+      "publisher": "Oxford University Press",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 3500,
+        "review": 5000,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Report",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "Environmental Science & Technology",
+      "aliases": [
+        "Environ Sci Technol",
+        "ES&T"
+      ],
+      "publisher": "American Chemical Society",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "brief_report"
+      ],
+      "max_references": null,
+      "abstract_structure": "unstructured",
+      "abstract_word_limit": 150,
+      "word_limits": {
+        "original_research": 5000,
+        "review": 8000,
+        "brief_report": 2500
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results and Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Results and Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results and Discussion",
+          "Conclusions",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    },
+    {
+      "name": "Cancer",
+      "aliases": [
+        "Cancer (Wiley)"
+      ],
+      "publisher": "Wiley",
+      "citation_style": "ama",
+      "in_text_format": "numbered",
+      "reference_sort_order": "order_of_appearance",
+      "accepted_article_types": [
+        "original_research",
+        "review",
+        "meta_analysis",
+        "case_report",
+        "brief_report"
+      ],
+      "max_references": 40,
+      "abstract_structure": "structured",
+      "abstract_word_limit": 250,
+      "word_limits": {
+        "original_research": 4000,
+        "review": 5000,
+        "case_report": 1500,
+        "brief_report": 2000
+      },
+      "sections_by_type": {
+        "original_research": [
+          "Abstract",
+          "Introduction",
+          "Materials and Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "review": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "Conclusions",
+          "References"
+        ],
+        "meta_analysis": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ],
+        "case_report": [
+          "Abstract",
+          "Introduction",
+          "Case Presentation",
+          "Discussion",
+          "References"
+        ],
+        "brief_report": [
+          "Abstract",
+          "Introduction",
+          "Methods",
+          "Results",
+          "Discussion",
+          "References"
+        ]
+      },
+      "reference_format_name": "AMA"
+    }
+  ],
+  "publisher_defaults": {
+    "Nature Portfolio": "nature",
+    "Nature Publishing Group": "nature",
+    "Springer Nature": "nature",
+    "American Medical Association": "ama",
+    "American College of Physicians": "ama",
+    "American College of Cardiology": "ama",
+    "American Society of Clinical Oncology": "ama",
+    "American Heart Association": "ama",
+    "American Chemical Society": "ama",
+    "Oxford University Press": "ama",
+    "Society for Neuroscience": "apa",
+    "SAGE Publications": "apa",
+    "JMIR Publications": "apa",
+    "Frontiers Media": "apa",
+    "BMJ Publishing Group": "vancouver",
+    "Massachusetts Medical Society": "nlm",
+    "National Academy of Sciences": "nlm",
+    "Elsevier": "vancouver",
+    "Wiley": "ama",
+    "Cell Press": "cell",
+    "Public Library of Science": "apa",
+    "eLife Sciences Publications": "apa",
+    "American Association for the Advancement of Science": "science",
+    "AAAS": "science",
+    "F1000Research": "apa"
+  }
+}

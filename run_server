@@ -1,0 +1,17 @@
+#!/bin/bash
+# Opens two Terminal tabs: frontend (npm run dev) and backend (uvicorn)
+
+FRONTEND_DIR="$HOME/Documents/gemini/academic-writer-agent/frontend"
+BACKEND_DIR="$HOME/Documents/gemini/academic-writer-agent/backend"
+
+osascript <<EOF
+tell application "Terminal"
+    activate
+    -- First tab: frontend
+    do script "cd '$FRONTEND_DIR' && npm run dev"
+    -- Second tab: backend
+    tell application "System Events" to keystroke "t" using command down
+    delay 0.3
+    do script "cd '$BACKEND_DIR' && .venv/bin/uvicorn main:app --reload --port 8010" in front window
+end tell
+EOF

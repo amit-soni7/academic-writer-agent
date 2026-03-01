@@ -1,0 +1,56 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+*.env
+
+# ── SQLite fallback DB ────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Backend runtime artifacts ─────────────────────────────────────────────────
+backend/sessions/
+backend/tmp/
+backend/output/
+backend/__pycache__/
+backend/**/__pycache__/
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+/tmp/
+
+# ── Secrets (never commit) ────────────────────────────────────────────────────
+*.pem
+*.key
+secrets/
+backend/settings.json
+.claude/
+output/
