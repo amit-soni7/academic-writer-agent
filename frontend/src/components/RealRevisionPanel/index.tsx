@@ -10,6 +10,8 @@ import {
   generateFromPlans,
   getRevisionRounds,
   downloadPointByPointDocx,
+  downloadRevisedManuscriptDocx,
+  downloadTrackChangesDocx,
 } from '../../api/projects';
 
 export type StepId = 'manuscript' | 'comments' | 'edit_comments' | 'responses' | 'download';
@@ -1250,23 +1252,35 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                 <p className="text-sm text-slate-500">
                   Round {activeRound} complete. Download your point-by-point reply document below.
                 </p>
-                <div className="flex justify-center">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <a
                     href={downloadPointByPointDocx(projectId, activeRound)}
                     download
-                    className="flex flex-col items-center gap-4 p-8 rounded-2xl border-2 border-brand-200 bg-brand-50
-                      hover:bg-brand-100 hover:border-brand-500 transition-colors text-center w-full max-w-sm shadow-sm"
+                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 border-brand-200 bg-brand-50 hover:bg-brand-100 hover:border-brand-500 transition-colors text-center shadow-sm"
                   >
-                    <span className="text-5xl">📄</span>
-                    <div className="space-y-1">
-                      <p className="text-base font-bold text-brand-900">Point-by-Point Reply</p>
-                      <p className="text-sm text-brand-700">Landscape · 4-column table</p>
-                      <p className="text-xs text-brand-600 mt-1">
-                        Reviewer comment · Author response · Change instructions
-                        <br/>(ADD / DELETE / CHANGE with section, line number &amp; exact text)
-                      </p>
-                    </div>
-                    <span className="text-sm font-semibold text-brand-700 bg-brand-200 px-3 py-1 rounded-full">.docx</span>
+                    <span className="text-4xl">📄</span>
+                    <p className="text-sm font-bold text-brand-900">Point-by-Point Reply</p>
+                    <p className="text-xs text-brand-700">Comment/Response/Change plan</p>
+                  </a>
+
+                  <a
+                    href={downloadRevisedManuscriptDocx(projectId, activeRound)}
+                    download
+                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 hover:border-emerald-500 transition-colors text-center shadow-sm"
+                  >
+                    <span className="text-4xl">📝</span>
+                    <p className="text-sm font-bold text-emerald-900">Revised Manuscript</p>
+                    <p className="text-xs text-emerald-700">Clean version (.docx)</p>
+                  </a>
+
+                  <a
+                    href={downloadTrackChangesDocx(projectId, activeRound)}
+                    download
+                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 border-violet-200 bg-violet-50 hover:bg-violet-100 hover:border-violet-500 transition-colors text-center shadow-sm"
+                  >
+                    <span className="text-4xl">🔍</span>
+                    <p className="text-sm font-bold text-violet-900">Track Changes</p>
+                    <p className="text-xs text-violet-700">Word tracked changes (.docx)</p>
                   </a>
                 </div>
                 <p className="text-xs text-slate-400 text-center">
