@@ -35,10 +35,85 @@ export interface ProjectMeta {
   project_description?: string | null;
   project_folder?: string | null;
   current_phase?: string | null;
+  project_type?: 'write' | 'revision' | null;
+}
+
+// ── Real peer-review revision types ────────────────────────────────────────────
+
+export interface RevisionIntakeData {
+  manuscript_text: string;
+  manuscript_file: File | null;
+  reviewer_comments_text: string;
+  reviewer_comments_file: File | null;
+  journal_name: string;
+  project_name: string;
+  project_description: string;
+}
+
+export interface RealReviewerComment {
+  reviewer_number: number;
+  comment_number: number;
+  original_comment: string;
+  category: 'major' | 'minor' | 'editorial';
+  severity?: 'major' | 'minor' | 'editorial';
+  domain?: 'writing' | 'methodology' | 'results' | 'references' | 'ethics' | 'statistics' | 'other';
+  requirement_level?: 'mandatory' | 'optional' | 'unclear';
+  ambiguity_flag?: boolean;
+  ambiguity_question?: string;
+  intent_interpretation?: string;
+}
+
+export interface ReviewCommentResponse {
+  reviewer_number: number;
+  comment_number: number;
+  original_comment: string;
+  author_response: string;
+  action_taken: string;
+  manuscript_diff: string;
+}
+
+export interface RevisionRound {
+  round_number: number;
+  journal_name: string;
+  raw_comments: string;
+  parsed_comments: RealReviewerComment[];
+  responses: ReviewCommentResponse[];
+  revised_article: string;
+  point_by_point_md: string;
+  created_at: string;
+}
+
+export interface ImportManuscriptResult {
+  word_count: number;
+  sections_found: string[];
+  references_found: number;
+  manuscript_summary: string;
 }
 
 // Backward-compat alias
 export type SessionMeta = ProjectMeta;
+
+// ── Per-comment discussion types ───────────────────────────────────────────────
+
+export interface DiscussionMessage {
+  role: 'ai' | 'user';
+  content: string;
+}
+
+export interface CommentPlan {
+  reviewer_number: number;
+  comment_number: number;
+  original_comment: string;
+  category: string;
+  discussion: DiscussionMessage[];
+  current_plan: string;
+  doi_references: string[];
+  is_finalized: boolean;
+  // Populated after finalization:
+  author_response: string;
+  action_taken: string;
+  manuscript_changes: string;
+}
 
 // ── Journal style ──────────────────────────────────────────────────────────────
 

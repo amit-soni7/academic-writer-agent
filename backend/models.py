@@ -214,6 +214,7 @@ class ProjectMeta(BaseModel):
     project_description: Optional[str] = None
     project_folder: Optional[str] = None
     current_phase: Optional[str] = 'intake'
+    project_type: Optional[str] = 'write'   # 'write' | 'revision'
 
 
 # Backward-compat alias (used in tests and legacy code)
@@ -226,6 +227,7 @@ class CreateProjectRequest(BaseModel):
     article_type: Optional[str] = None
     project_description: Optional[str] = None
     project_name: Optional[str] = None   # tentative title slug from search strategy
+    project_type: Optional[str] = 'write'  # 'write' | 'revision'
 
 
 # Backward-compat alias
@@ -235,6 +237,22 @@ CreateSessionRequest = CreateProjectRequest
 class SummarizeAllRequest(BaseModel):
     query: str
     papers: list[Paper]
+    skip_excluded: bool = True   # skip papers with screening decision=exclude
+
+
+class ScreenPapersRequest(BaseModel):
+    papers: list[Paper]
+    query: str
+
+
+class ScreeningDecision(BaseModel):
+    paper_key: str
+    decision: str   # include | exclude | uncertain
+    reason: str
+
+
+class OverrideScreeningRequest(BaseModel):
+    decision: str   # include | exclude | uncertain
 
 
 # ── Journal recommendation ─────────────────────────────────────────────────────
@@ -412,9 +430,25 @@ class PaperSummary(BaseModel):
     discussion_insights:  list[DiscussionInsight] = []
     cited_references:     list[CitedReference]    = []  # paper's own reference list
 
+    # ── Sentence bank (flat list of independently citable sentences) ─────────
+    sentence_bank: list["SentenceCitation"] = []
+
     # ── Cross-reference metadata (depth>0 = fetched as a cited paper) ─────────
     depth: int             = 0   # 0=primary, 1=cross-ref depth-1, 2=cross-ref depth-2
     cited_by_keys: list[str] = []  # paper_keys of primary papers that cited this one
+
+
+# ── Sentence bank ─────────────────────────────────────────────────────────────
+
+class SentenceCitation(BaseModel):
+    """One independently citable sentence from any section of a paper."""
+    section: str        = ""   # background | methods | results | discussion | conclusion
+    text: str           = ""   # paraphrased citable statement (clean, active voice)
+    verbatim_quote: str = ""   # exact quote from the paper
+    claim_type: str     = "reported_fact"  # reported_fact | author_interpretation | inference
+    stats: str          = ""   # optional inline stats e.g. "OR=1.8 [1.2, 2.7] p=0.003"
+    importance: str     = "medium"  # high | medium — high = must-cite for the research question
+    use_in: str         = ""   # introduction | methods | results | discussion — target manuscript section
 
 
 # ── Cross-reference & intro/discussion extraction ─────────────────────────────
@@ -524,3 +558,82 @@ class ReviseAfterReviewRequest(BaseModel):
 class RevisionResult(BaseModel):
     revised_article: str = ""
     point_by_point_reply: str = ""
+
+
+# ── Real peer-review revision system ──────────────────────────────────────────
+
+class RealReviewerComment(BaseModel):
+    reviewer_number: int        # 1, 2, 3 …
+    comment_number: int         # sequential within reviewer
+    original_comment: str
+    category: str = "major"     # backward-compat alias: major | minor | editorial
+    severity: str = "major"     # major | minor | editorial
+    domain: str = "other"       # writing | methodology | results | references | ethics | statistics | other
+    requirement_level: str = "unclear"  # mandatory | optional | unclear
+    ambiguity_flag: bool = False
+    ambiguity_question: str = ""
+    intent_interpretation: str = ""
+
+
+class ReviewCommentResponse(BaseModel):
+    reviewer_number: int
+    comment_number: int
+    original_comment: str
+    author_response: str        # AI-drafted reply grounded in manuscript content
+    action_taken: str           # "Introduction, paragraph 3, Lines 45–52 of revised manuscript"
+    manuscript_diff: str = ""   # JSON {"deleted": "...", "added": "..."}
+
+
+class RevisionRound(BaseModel):
+    round_number: int
+    journal_name: str = ""
+    raw_comments: str = ""
+    parsed_comments: list[RealReviewerComment] = []
+    responses: list[ReviewCommentResponse] = []
+    revised_article: str = ""
+    point_by_point_md: str = ""
+    created_at: str = ""
+
+
+class ImportManuscriptResult(BaseModel):
+    word_count: int
+    sections_found: list[str]
+    references_found: int
+    manuscript_summary: str
+
+
+class ParseCommentsRequest(BaseModel):
+    raw_comments: str
+    journal_name: str = ""
+    round_number: int = 1
+
+
+class GenerateRealRevisionRequest(BaseModel):
+    round_number: int
+    parsed_comments: list[RealReviewerComment]
+    journal_name: str = ""
+
+
+class DiscussCommentRequest(BaseModel):
+    original_comment: str
+    reviewer_number: int
+    comment_number: int
+    user_message: str
+    history: list[dict] = []        # [{role: "ai"|"user", content: str}]
+    current_plan: str = ""
+    doi_references: list[str] = []  # raw DOI strings; backend fetches metadata
+    manuscript_text: str = ""       # numbered manuscript for context
+
+
+class FinalizeCommentRequest(BaseModel):
+    original_comment: str
+    reviewer_number: int
+    comment_number: int
+    finalized_plan: str
+    manuscript_text: str = ""
+
+
+class GenerateFromPlansRequest(BaseModel):
+    round_number: int
+    journal_name: str = ""
+    finalized_plans: list[dict]     # list of serialized CommentPlan objects
