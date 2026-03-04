@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import type { CommentPlan, DiscussionMessage, RevisionIntakeData, RealReviewerComment, RevisionRound, ImportManuscriptResult } from '../../types/paper';
+import type { CommentChangeSuggestion, CommentPlan, DiscussionMessage, RevisionIntakeData, RealReviewerComment, RevisionRound, ImportManuscriptResult } from '../../types/paper';
 import {
   importManuscript,
   parseReviewerComments,
   parseReviewerCommentsDocx,
+  suggestChanges,
   discussComment,
   finalizeComment,
   generateFromPlans,
@@ -111,6 +112,9 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   const [parsedComments, setParsedComments] = useState<RealReviewerComment[]>([]);
   const [parseLoading, setParseLoading] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<CommentChangeSuggestion[]>([]);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestError, setSuggestError] = useState<string | null>(null);
 
   // ── Per-comment discussion step ───────────────────────────────────────────
   const [commentPlans, setCommentPlans] = useState<CommentPlan[]>([]);
@@ -269,6 +273,24 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
       setParseError(e.message ?? 'Parse failed');
     } finally {
       setParseLoading(false);
+    }
+  }
+
+  async function handleGenerateSuggestions() {
+    if (parsedComments.length === 0) return;
+    setSuggestLoading(true);
+    setSuggestError(null);
+    try {
+      const out = await suggestChanges(projectId, {
+        manuscript_text: manuscriptText,
+        journal_name: journalName,
+        parsed_comments: parsedComments,
+      });
+      setSuggestions(out);
+    } catch (e: any) {
+      setSuggestError(e.message ?? 'Suggestion generation failed');
+    } finally {
+      setSuggestLoading(false);
     }
   }
 
@@ -884,6 +906,34 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                     </div>
                   );
                 })}
+
+                <div className="space-y-3 pt-2 border-t border-slate-100">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={handleGenerateSuggestions}
+                      disabled={parsedComments.length === 0 || suggestLoading}
+                      className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 transition-colors"
+                    >
+                      {suggestLoading ? 'Generating Suggestions…' : 'Generate AI Change Suggestions'}
+                    </button>
+                    {suggestError && <span className="text-xs text-rose-600">{suggestError}</span>}
+                  </div>
+
+                  {suggestions.length > 0 && (
+                    <div className="space-y-2 max-h-72 overflow-y-auto rounded-xl border border-indigo-100 bg-indigo-50 p-3">
+                      {suggestions.map((s) => (
+                        <div key={`${s.reviewer_number}-${s.comment_number}`} className="rounded-lg border border-indigo-200 bg-white p-3 space-y-1">
+                          <p className="text-xs font-semibold text-indigo-700">R{s.reviewer_number} C{s.comment_number} · {s.action_type}</p>
+                          {s.interpretation && <p className="text-xs text-slate-700"><span className="font-semibold">Interpretation:</span> {s.interpretation}</p>}
+                          {s.copy_paste_text && <p className="text-xs text-slate-700"><span className="font-semibold">Copy-paste text:</span> {s.copy_paste_text}</p>}
+                          {s.response_snippet && <p className="text-xs text-slate-700"><span className="font-semibold">Response snippet:</span> {s.response_snippet}</p>}
+                          <p className="text-[11px] text-slate-500">Evidence: {s.evidence_check_status}{s.citation_needed ? ' · citation needed' : ''}</p>
+                          {s.ambiguity_flag && <p className="text-[11px] text-amber-700">Ambiguity: {s.ambiguity_question || 'Please clarify before editing.'}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 <div className="flex items-center justify-between pt-2">
                   <button

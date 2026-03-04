@@ -637,3 +637,26 @@ class GenerateFromPlansRequest(BaseModel):
     round_number: int
     journal_name: str = ""
     finalized_plans: list[dict]     # list of serialized CommentPlan objects
+
+
+class SuggestChangesRequest(BaseModel):
+    manuscript_text: str = ""
+    journal_name: str = ""
+    parsed_comments: list[RealReviewerComment] = []
+
+
+class CommentChangeSuggestion(BaseModel):
+    reviewer_number: int
+    comment_number: int
+    original_comment: str
+    interpretation: str = ""
+    action_type: str = "other"  # clarify|add_citation|add_analysis|reframe_claim|rewrite_text|rebuttal|no_change|other
+    target_section: str = ""
+    target_line_hint: str = ""
+    copy_paste_text: str = ""
+    citation_needed: bool = False
+    citation_suggestions: list[str] = []
+    evidence_check_status: str = "unclear"  # supported|unsupported|needs_external_evidence|needs_new_experiment|unclear
+    response_snippet: str = ""
+    ambiguity_flag: bool = False
+    ambiguity_question: str = ""

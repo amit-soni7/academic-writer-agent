@@ -1,5 +1,5 @@
 import api from './client';
-import type { JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, RevisionResult, SynthesisResult } from '../types/paper';
+import type { CommentChangeSuggestion, CommentPlan, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, RealReviewerComment, RevisionResult, RevisionRound, SynthesisResult } from '../types/paper';
 
 export async function createProject(
   query: string,
@@ -7,6 +7,7 @@ export async function createProject(
   articleType?: string,
   projectDescription?: string,
   tentativeTitle?: string,
+  projectType?: 'write' | 'revision',
 ): Promise<ProjectMeta> {
   const { data } = await api.post<ProjectMeta>('/api/projects', {
     query,
@@ -14,6 +15,7 @@ export async function createProject(
     ...(articleType ? { article_type: articleType } : {}),
     ...(projectDescription ? { project_description: projectDescription } : {}),
     ...(tentativeTitle ? { project_name: tentativeTitle } : {}),
+    ...(projectType ? { project_type: projectType } : {}),
   });
   return data;
 }
@@ -92,11 +94,13 @@ export async function reviseAfterReview(
 // ── Streaming summarize-all ────────────────────────────────────────────────────
 
 export interface SummarizeAllEvent {
-  type: 'progress' | 'summary_done' | 'paper_error' | 'complete' | 'error';
+  type: 'progress' | 'step_progress' | 'summary_done' | 'paper_error' | 'complete' | 'error';
   current?: number;
   total?: number;
   title?: string;
+  step?: string;         // only for step_progress
   skipped?: boolean;
+  skip_reason?: string;
   paper_key?: string;
   summary?: PaperSummary;
   message?: string;
@@ -216,10 +220,219 @@ export interface ProjectData {
   project_description: string | null;
   project_folder: string | null;
   current_phase: string | null;
+  project_type: 'write' | 'revision' | null;
+  base_manuscript: string | null;
 }
 
 // Backward-compat alias
 export type SessionData = ProjectData;
+
+// ── Real peer-review revision API ─────────────────────────────────────────────
+
+const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8010';
+
+export async function importManuscript(
+  projectId: string,
+  textOrFile: string | File,
+): Promise<ImportManuscriptResult> {
+  const form = new FormData();
+  if (typeof textOrFile === 'string') {
+    form.append('text', textOrFile);
+  } else {
+    form.append('file', textOrFile);
+  }
+  const resp = await fetch(`${API_BASE}/api/projects/${projectId}/import_manuscript`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function parseReviewerComments(
+  projectId: string,
+  req: { raw_comments: string; journal_name?: string; round_number?: number },
+): Promise<RealReviewerComment[]> {
+  const { data } = await api.post<RealReviewerComment[]>(
+    `/api/projects/${projectId}/revision_rounds/parse`,
+    req,
+  );
+  return data;
+}
+
+export async function parseReviewerCommentsDocx(
+  projectId: string,
+  file: File,
+): Promise<RealReviewerComment[]> {
+  const form = new FormData();
+  form.append('file', file);
+  const resp = await fetch(`${API_BASE}/api/projects/${projectId}/revision_rounds/parse_docx`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function generateRealRevision(
+  projectId: string,
+  req: { round_number: number; parsed_comments: RealReviewerComment[]; journal_name?: string },
+): Promise<RevisionRound> {
+  const { data } = await api.post<RevisionRound>(
+    `/api/projects/${projectId}/revision_rounds`,
+    req,
+  );
+  return data;
+}
+
+export async function suggestChanges(
+  projectId: string,
+  req: {
+    manuscript_text?: string;
+    journal_name?: string;
+    parsed_comments: RealReviewerComment[];
+  },
+): Promise<CommentChangeSuggestion[]> {
+  const { data } = await api.post<CommentChangeSuggestion[]>(
+    `/api/projects/${projectId}/revision_rounds/suggest_changes`,
+    req,
+  );
+  return data;
+}
+
+export async function discussComment(
+  projectId: string,
+  req: {
+    original_comment: string;
+    reviewer_number: number;
+    comment_number: number;
+    user_message: string;
+    history?: { role: 'ai' | 'user'; content: string }[];
+    current_plan?: string;
+    doi_references?: string[];
+    manuscript_text?: string;
+  },
+): Promise<{ ai_response: string; updated_plan: string }> {
+  const { data } = await api.post(
+    `/api/projects/${projectId}/revision_rounds/discuss_comment`,
+    req,
+  );
+  return data;
+}
+
+export async function finalizeComment(
+  projectId: string,
+  req: {
+    original_comment: string;
+    reviewer_number: number;
+    comment_number: number;
+    finalized_plan: string;
+    manuscript_text?: string;
+  },
+): Promise<{ author_response: string; action_taken: string; manuscript_changes: string }> {
+  const { data } = await api.post(
+    `/api/projects/${projectId}/revision_rounds/finalize_comment`,
+    req,
+  );
+  return data;
+}
+
+export async function generateFromPlans(
+  projectId: string,
+  req: { round_number: number; journal_name?: string; finalized_plans: CommentPlan[] },
+): Promise<RevisionRound> {
+  const { data } = await api.post<RevisionRound>(
+    `/api/projects/${projectId}/revision_rounds`,
+    req,
+  );
+  return data;
+}
+
+export async function getRevisionRounds(projectId: string): Promise<RevisionRound[]> {
+  const { data } = await api.get<RevisionRound[]>(`/api/projects/${projectId}/revision_rounds`);
+  return data;
+}
+
+export function downloadPointByPointDocx(projectId: string, roundNumber: number): string {
+  return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/point_by_point_docx`;
+}
+
+export function downloadRevisedManuscriptDocx(projectId: string, roundNumber: number): string {
+  return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/revised_manuscript_docx`;
+}
+
+export function downloadTrackChangesDocx(projectId: string, roundNumber: number): string {
+  return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/track_changes_docx`;
+}
+
+// ── Screening ─────────────────────────────────────────────────────────────────
+
+export type ScreenPapersEvent =
+  | { type: 'progress'; current: number; total: number; title: string }
+  | { type: 'screen_done'; paper_key: string; decision: 'include' | 'exclude' | 'uncertain'; reason: string }
+  | { type: 'screen_error'; title: string; message: string }
+  | { type: 'complete'; include: number; exclude: number; uncertain: number; error: number; total: number }
+  | { type: 'error'; message: string };
+
+export async function* streamScreenPapers(
+  projectId: string,
+  papers: Paper[],
+  query: string,
+): AsyncGenerator<ScreenPapersEvent> {
+  const response = await fetch(
+    `${API_BASE}/api/projects/${projectId}/screen_papers`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ query, papers }),
+    }
+  );
+
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status} from screen_papers`);
+  }
+
+  const reader  = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop()!;
+      for (const frame of frames) {
+        const line = frame.split('\n').find((l) => l.startsWith('data: '));
+        if (!line) continue;
+        try {
+          yield JSON.parse(line.slice(6)) as ScreenPapersEvent;
+        } catch { /* skip malformed */ }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function overrideScreening(
+  projectId: string,
+  paperKey: string,
+  decision: string,
+): Promise<void> {
+  await api.patch(`/api/projects/${projectId}/screenings/${encodeURIComponent(paperKey)}`, { decision });
+}
+
+export async function loadScreenings(
+  projectId: string,
+): Promise<Record<string, { decision: string; reason: string; overridden: boolean }>> {
+  const { data } = await api.get(`/api/projects/${projectId}/screenings`);
+  return data;
+}
 
 // ── Backward-compat re-exports (so existing imports from api/sessions still work) ──
 

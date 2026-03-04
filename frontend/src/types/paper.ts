@@ -115,6 +115,23 @@ export interface CommentPlan {
   manuscript_changes: string;
 }
 
+export interface CommentChangeSuggestion {
+  reviewer_number: number;
+  comment_number: number;
+  original_comment: string;
+  interpretation: string;
+  action_type: 'clarify' | 'add_citation' | 'add_analysis' | 'reframe_claim' | 'rewrite_text' | 'rebuttal' | 'no_change' | 'other';
+  target_section: string;
+  target_line_hint: string;
+  copy_paste_text: string;
+  citation_needed: boolean;
+  citation_suggestions: string[];
+  evidence_check_status: 'supported' | 'unsupported' | 'needs_external_evidence' | 'needs_new_experiment' | 'unclear';
+  response_snippet: string;
+  ambiguity_flag: boolean;
+  ambiguity_question: string;
+}
+
 // ── Journal style ──────────────────────────────────────────────────────────────
 
 export type CitationStyleValue =
