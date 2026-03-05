@@ -313,6 +313,13 @@ export async function discussComment(
     current_plan?: string;
     doi_references?: string[];
     manuscript_text?: string;
+    finalized_context?: {
+      reviewer_number: number;
+      comment_number: number;
+      original_comment: string;
+      action_taken?: string;
+      manuscript_changes?: string;
+    }[];
   },
 ): Promise<{ ai_response: string; updated_plan: string }> {
   const { data } = await api.post(

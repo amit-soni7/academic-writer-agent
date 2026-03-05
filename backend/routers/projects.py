@@ -1003,6 +1003,7 @@ async def discuss_comment_endpoint(
         current_plan=payload.current_plan,
         doi_refs=payload.doi_references,
         manuscript_text=manuscript_text,
+        finalized_context=payload.finalized_context,
     )
 
 

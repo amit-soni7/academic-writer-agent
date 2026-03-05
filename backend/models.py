@@ -623,6 +623,7 @@ class DiscussCommentRequest(BaseModel):
     current_plan: str = ""
     doi_references: list[str] = []  # raw DOI strings; backend fetches metadata
     manuscript_text: str = ""       # numbered manuscript for context
+    finalized_context: list[dict] = []  # finalized prior comments to avoid redundant edits
 
 
 class FinalizeCommentRequest(BaseModel):

@@ -13,6 +13,7 @@ import {
   downloadRevisedManuscriptDocx,
   downloadTrackChangesDocx,
 } from '../../api/projects';
+import LoadingLottie from '../LoadingLottie';
 
 export type StepId = 'manuscript' | 'comments' | 'edit_comments' | 'responses' | 'download';
 
@@ -298,6 +299,19 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
 
   // ── Handlers: Discussion ──────────────────────────────────────────────────
 
+  function getFinalizedContext(excludePlan?: CommentPlan) {
+    return commentPlans
+      .filter((p) => p.is_finalized)
+      .filter((p) => !(excludePlan && p.reviewer_number === excludePlan.reviewer_number && p.comment_number === excludePlan.comment_number))
+      .map((p) => ({
+        reviewer_number: p.reviewer_number,
+        comment_number: p.comment_number,
+        original_comment: p.original_comment,
+        action_taken: p.action_taken,
+        manuscript_changes: p.manuscript_changes,
+      }));
+  }
+
   async function triggerInitialPlan(plan: CommentPlan) {
     const initMessage = 'Please analyze this reviewer comment and propose a detailed change plan — what to modify, where in the manuscript (section, paragraph, approximate line numbers), and how.';
     setDiscussLoading(true);
@@ -312,6 +326,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         current_plan: '',
         doi_references: [],
         manuscript_text: manuscriptText,
+        finalized_context: getFinalizedContext(plan),
       });
       setCommentPlans((prev) => prev.map((p) =>
         p.reviewer_number === plan.reviewer_number && p.comment_number === plan.comment_number
@@ -359,6 +374,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         current_plan: plan.current_plan,
         doi_references: plan.doi_references,
         manuscript_text: manuscriptText,
+        finalized_context: getFinalizedContext(plan),
       });
       setCommentPlans((prev) => prev.map((p, i) =>
         i === activeCommentIdx
@@ -582,7 +598,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         {/* Auto-processing banner */}
         {(importLoading || parseLoading) && (
           <div className="flex items-center gap-2 text-sm text-brand-700 bg-brand-50 border border-brand-200 rounded-xl px-4 py-2.5">
-            <div className="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+            <LoadingLottie className="w-6 h-6" />
             Processing your manuscript and parsing reviewer comments…
           </div>
         )}
@@ -620,7 +636,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
 
             {importLoading && (
               <div className="flex items-center gap-2 text-sm text-slate-500 bg-slate-50 rounded-xl p-4 border border-slate-200">
-                <div className="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+                <LoadingLottie className="w-6 h-6" />
                 Processing manuscript…
               </div>
             )}
@@ -1042,7 +1058,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
 
                           {discussLoading && activePlan.discussion.length === 0 && (
                             <div className="flex items-center gap-2 text-sm text-slate-500 py-4">
-                              <div className="w-4 h-4 border-2 border-brand-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                              <LoadingLottie className="w-8 h-8" />
                               Generating initial change plan…
                             </div>
                           )}
@@ -1051,21 +1067,25 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                             {activePlan.discussion.map((msg: DiscussionMessage, i: number) => (
                               <div
                                 key={i}
-                                className={`rounded-xl p-3 text-sm leading-relaxed whitespace-pre-wrap ${
-                                  msg.role === 'ai'
-                                    ? 'bg-brand-50 text-brand-900 border border-brand-100'
-                                    : 'bg-slate-100 text-slate-800'
-                                }`}
+                                className={`flex ${msg.role === 'ai' ? 'justify-start' : 'justify-end'}`}
                               >
-                                <span className={`text-xs font-semibold block mb-1 ${msg.role === 'ai' ? 'text-brand-600' : 'text-slate-500'}`}>
-                                  {msg.role === 'ai' ? 'AI Coach' : 'You'}
-                                </span>
-                                {msg.content}
+                                <div
+                                  className={`max-w-[85%] rounded-2xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap border ${
+                                    msg.role === 'ai'
+                                      ? 'bg-brand-50 text-brand-900 border-brand-100 rounded-bl-md'
+                                      : 'bg-slate-100 text-slate-800 border-slate-200 rounded-br-md'
+                                  }`}
+                                >
+                                  <span className={`text-[11px] font-semibold block mb-1 ${msg.role === 'ai' ? 'text-brand-600' : 'text-slate-500'}`}>
+                                    {msg.role === 'ai' ? 'AI Coach' : 'You'}
+                                  </span>
+                                  {msg.content}
+                                </div>
                               </div>
                             ))}
                             {discussLoading && activePlan.discussion.length > 0 && (
                               <div className="flex items-center gap-2 text-xs text-slate-400 py-1">
-                                <div className="w-3 h-3 border-2 border-brand-400 border-t-transparent rounded-full animate-spin" />
+                                <LoadingLottie className="w-6 h-6" />
                                 Thinking…
                               </div>
                             )}
@@ -1236,7 +1256,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                 </button>
                 {generateLoading && (
                   <div className="text-center py-6 text-slate-500 text-sm">
-                    <div className="w-8 h-8 border-2 border-brand-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+                    <LoadingLottie className="w-12 h-12 mx-auto mb-2" />
                     Applying changes and generating revised manuscript… this may take 1–2 minutes.
                   </div>
                 )}

@@ -205,12 +205,23 @@ You help authors plan precise, effective responses to each reviewer comment.
 2. Propose a RESPONSE STRATEGY: full agreement + change / partial agreement / respectful rebuttal with evidence
 3. Draft a specific CHANGE PLAN: what text to add, rewrite, or remove, and exactly where
 4. If the comment asks for new data or analysis you cannot provide, suggest how to acknowledge the limitation honestly
+5. Avoid redundancy with already finalized comments/changes provided in context
 
 ## Response diplomacy rules:
 - Always open by acknowledging the reviewer's expertise or insight (genuine, not formulaic)
 - For changes: be specific ("We added a paragraph in the Limitations section, lines X–Y")
 - For rebuttals: cite evidence or literature, never just assert disagreement
 - Avoid "we apologize" — use "we clarify" or "we now address"
+
+## Critical constraints:
+- DOI references are for this specific active comment only. Do NOT force DOI citations for every comment.
+- If prior finalized changes already address part of the active comment, reuse/cross-reference them and avoid duplicated edits.
+- Do NOT generate a clean manuscript or track-changes manuscript in this step.
+- In updated_plan, include a strict "Manuscript Change Instructions (what · where · exact text)" block using explicit operations:
+  - CHANGE <section/location>
+  - DELETE: "<exact old text>"
+  - ADD: "<exact new text>"
+  Use CHANGE/DELETE/ADD only when text edits are needed.
 
 ## Output format (JSON only, no markdown fences):
 {"ai_response": "...", "updated_plan": "..."}
@@ -229,7 +240,7 @@ LINE-NUMBERED MANUSCRIPT (first 8000 chars):
 {numbered_manuscript}
 ---
 
-{doi_block}CONVERSATION HISTORY:
+{doi_block}{finalized_block}CONVERSATION HISTORY:
 {history_text}
 
 USER MESSAGE:
@@ -246,6 +257,7 @@ async def discuss_comment(
     current_plan: str,
     doi_refs: list[str],
     manuscript_text: str,
+    finalized_context: list[dict] | None = None,
 ) -> dict:
     """
     One turn of the per-comment discussion.
@@ -281,6 +293,17 @@ async def discuss_comment(
 
     numbered_ms = _number_lines(manuscript_text) if manuscript_text else "(manuscript not provided)"
 
+    finalized_block = ""
+    if finalized_context:
+        ctx_lines: list[str] = []
+        for c in finalized_context[:10]:
+            ctx_lines.append(
+                f"- Reviewer {c.get('reviewer_number')}, Comment {c.get('comment_number')}: "
+                f"{c.get('action_taken', '')} | Changes: {c.get('manuscript_changes', '{}')}"
+            )
+        if ctx_lines:
+            finalized_block = "ALREADY FINALIZED CHANGES (avoid redundancy):\n" + "\n".join(ctx_lines) + "\n\n"
+
     history_text = ""
     if history:
         history_text = "\n".join(
@@ -297,6 +320,7 @@ async def discuss_comment(
             current_plan=current_plan or "(none yet — please propose an initial plan)",
             numbered_manuscript=numbered_ms[:8000],
             doi_block=doi_block,
+            finalized_block=finalized_block,
             history_text=history_text,
             user_message=user_message,
         ),
@@ -322,19 +346,24 @@ _FINALIZE_SYSTEM = """You are an expert scientific author. The author has agreed
 Write:
 1. A formal, respectful author response letter paragraph (scholarly, professional tone)
 2. A precise action-taken location string
-3. A manuscript diff (JSON with deleted/added text snippets, max 30 words each)
+3. A manuscript change-instructions block (plain text, exact edit operations)
 
 Return ONLY valid JSON (no markdown fences):
 {
   "author_response": "We thank Reviewer X for this insightful comment...",
   "action_taken": "Introduction, paragraph 2, Lines 23–28 of the revised manuscript: [description]",
-  "manuscript_changes": "{\"deleted\": \"original text snippet\", \"added\": \"replacement text\"}"
+  "manuscript_changes": "CHANGE Methods, Line 37 of the revised manuscript\nDELETE: \"...\"\nADD: \"...\""
 }
 
 Rules:
 - author_response: 2–4 paragraphs. Acknowledge the comment, explain the change, cite the plan.
 - action_taken: be precise. If no text change, write "No change required: [reason]".
-- manuscript_changes: JSON string. Use {} if no text was changed."""
+- manuscript_changes must follow this strict format when text is edited:
+  Manuscript Change Instructions (what · where · exact text)
+  CHANGE <where>
+  DELETE: "<exact old text>"
+  ADD: "<exact new text>"
+  If no text change, return "No textual manuscript edit required."""
 
 _FINALIZE_USER_TMPL = """REVIEWER COMMENT (Reviewer {reviewer_number}, Comment {comment_number}):
 {original_comment}

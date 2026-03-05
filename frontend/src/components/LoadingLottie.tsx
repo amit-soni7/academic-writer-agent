@@ -1,5 +1,5 @@
 import Lottie from 'lottie-react';
-import foridayLogoAnimation from '../assets/foriday-logo-lottie.json';
+import loadingAnimationBlue from '../assets/loading-animation-blue.json';
 
 interface LoadingLottieProps {
   className?: string;
@@ -19,7 +19,7 @@ export default function LoadingLottie({
   return (
     <div className={wrapperClassName}>
       <Lottie
-        animationData={foridayLogoAnimation}
+        animationData={loadingAnimationBlue}
         loop
         autoplay
         className={className}
