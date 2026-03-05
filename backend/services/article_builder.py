@@ -231,34 +231,92 @@ CASE REPORT REQUIREMENTS:
 }
 
 
+_SECTION_TAG = {
+    "background": "BG",
+    "methods": "ME",
+    "results": "RE",
+    "discussion": "DI",
+    "conclusion": "CO",
+}
+
+
 def _format_one_summary(i: int, s: dict, label_prefix: str = "") -> str:
-    """Render a single paper summary as a labelled block for the article-writer LLM."""
-    bib     = s.get("bibliography", {})
-    methods = s.get("methods", {})
-    ca      = s.get("critical_appraisal", {})
-    results = s.get("results", [])
+    """Render a single paper summary as a labelled block for the article-writer LLM.
 
-    authors = bib.get("authors", [])
+    When a sentence_bank is present (new summaries), each sentence is rendered as an
+    individually citable tagged line: [BG], [ME], [RE], [DI], [CO].
+    Legacy summaries without a sentence_bank fall back to the compact 6-line format.
+    """
+    bib = s.get("bibliography", {})
+    ca  = s.get("critical_appraisal", {})
+
+    authors      = bib.get("authors", [])
     first_author = authors[0] if authors else s.get("paper_key", "Unknown")
-    year     = bib.get("year") or "n.d."
-    title    = bib.get("title") or s.get("paper_key", "")
-    jname    = bib.get("journal") or ""
-    doi      = bib.get("doi") or ""
+    year         = bib.get("year") or "n.d."
+    title        = bib.get("title") or s.get("paper_key", "")
+    jname        = bib.get("journal") or ""
+    doi          = bib.get("doi") or ""
 
+    header = f"\n[{label_prefix}{i}] {first_author} ({year}). {title}. {jname}. {doi}\n"
+    evidence_line = (
+        f"  Evidence: {ca.get('evidence_grade', 'not assessed')}"
+        f" ({ca.get('evidence_grade_justification', '')})\n"
+    )
+
+    sentence_bank = s.get("sentence_bank", [])
+    if sentence_bank:
+        # Group by target manuscript section (use_in), high-importance first within each group
+        _USE_IN_ORDER = ["introduction", "methods", "results", "discussion"]
+        groups: dict[str, list] = {k: [] for k in _USE_IN_ORDER}
+        for sent in sentence_bank:
+            key = (sent.get("use_in") or "discussion").lower()
+            if key not in groups:
+                key = "discussion"
+            groups[key].append(sent)
+
+        lines = []
+        for group_key in _USE_IN_ORDER:
+            group = groups[group_key]
+            if not group:
+                continue
+            lines.append(f"  -- {group_key.upper()} --")
+            for sent in group:
+                sec   = (sent.get("section") or "").lower()
+                tag   = _SECTION_TAG.get(sec, sec[:2].upper() if sec else "??")
+                text  = sent.get("text", "").strip()
+                if not text:
+                    continue
+                stats      = sent.get("stats", "").strip()
+                quote      = sent.get("verbatim_quote", "").strip()
+                importance = sent.get("importance", "medium")
+                marker     = "★" if importance == "high" else " "
+
+                line = f"  {marker}[{tag}] {text}"
+                if stats and stats not in ("NR", ""):
+                    line += f" ({stats})"
+                if quote and quote not in ("NR", "") and sec == "results":
+                    snippet = quote[:150] + "…" if len(quote) > 150 else quote
+                    line += f'\n         Quote: "{snippet}"'
+                lines.append(line)
+
+        return header + "\n".join(lines) + "\n" + evidence_line
+
+    # ── Legacy fallback: compact block ────────────────────────────────────────
+    methods = s.get("methods", {})
+    results = s.get("results", [])
     first_result = results[0] if results else {}
-    finding   = first_result.get("finding", "not reported")
-    effect    = first_result.get("effect_size", "")
-    ci        = first_result.get("ci_95", "")
-    pval      = first_result.get("p_value", "")
+    finding  = first_result.get("finding", "not reported")
+    effect   = first_result.get("effect_size", "")
+    ci       = first_result.get("ci_95", "")
+    pval     = first_result.get("p_value", "")
     stats_line = " | ".join(x for x in [effect, ci, pval] if x and x != "NR")
-
     return (
-        f"\n[{label_prefix}{i}] {first_author} ({year}). {title}. {jname}. {doi}\n"
-        f"  Takeaway: {s.get('one_line_takeaway', '')}\n"
-        f"  Finding:  {finding}\n"
-        f"  Study:    {methods.get('study_design', 'NR')} | N={methods.get('sample_n', '?')}\n"
-        f"  Stats:    {stats_line or 'not reported'}\n"
-        f"  Evidence: {ca.get('evidence_grade', 'not assessed')} ({ca.get('evidence_grade_justification', '')})\n"
+        header
+        + f"  Takeaway: {s.get('one_line_takeaway', '')}\n"
+        + f"  Finding:  {finding}\n"
+        + f"  Study:    {methods.get('study_design', 'NR')} | N={methods.get('sample_n', '?')}\n"
+        + f"  Stats:    {stats_line or 'not reported'}\n"
+        + evidence_line
     )
 
 

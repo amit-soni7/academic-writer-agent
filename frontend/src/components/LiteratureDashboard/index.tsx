@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Paper, PaperSummary, SynthesisResult } from '../../types/paper';
 import { streamSearch } from '../../api/literature';
-import { createProject, streamSummarizeAll, synthesizePapers } from '../../api/projects';
+import { createProject, loadScreenings, overrideScreening, streamScreenPapers, streamSummarizeAll, synthesizePapers } from '../../api/projects';
 import ExportButtons from './ExportButtons';
 import PapersTable from './PapersTable';
 import ProgressStream from './ProgressStream';
@@ -82,8 +82,31 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
   const [sessionId, setSessionId]           = useState<string | null>(null); // aliased as projectId
   const [summarizeStatus, setSummarizeStatus] = useState<SummarizeStatus>('idle');
   const [sumProgress, setSumProgress]       = useState({ current: 0, total: 0, title: '' });
+  const [currentStep, setCurrentStep]       = useState<string>('');
   const [sumErrors, setSumErrors]           = useState(0);
   const [summaries, setSummaries]           = useState<Record<string, PaperSummary>>({});
+
+  // Screening state
+  const [screenings, setScreenings]         = useState<Record<string, { decision: string; reason: string }>>({});
+  const [screeningState, setScreeningState] = useState<'idle' | 'running' | 'done'>('idle');
+  const [screenProgress, setScreenProgress] = useState<{ current: number; total: number; title: string } | null>(null);
+  const [screenCounts, setScreenCounts]     = useState<{ include: number; exclude: number; uncertain: number } | null>(null);
+
+  // Load existing screenings when a project is opened/resumed
+  useEffect(() => {
+    if (!sessionId) return;
+    loadScreenings(sessionId).then((data) => {
+      if (Object.keys(data).length > 0) {
+        setScreenings(data);
+        setScreeningState('done');
+        const counts = { include: 0, exclude: 0, uncertain: 0 };
+        for (const { decision } of Object.values(data)) {
+          if (decision in counts) (counts as any)[decision]++;
+        }
+        setScreenCounts(counts);
+      }
+    }).catch(() => {/* non-critical */});
+  }, [sessionId]);
 
   const isStreaming    = searchStatus === 'streaming';
   const isSummarizing = summarizeStatus === 'running';
@@ -120,6 +143,10 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
     setStrategyNotes([]);
     setTentativeTitle('');
     setShowMatrix(false);
+    setScreenings({});
+    setScreeningState('idle');
+    setScreenProgress(null);
+    setScreenCounts(null);
 
     try {
       for await (const event of streamSearch(query.trim(), limit, true, articleType)) {
@@ -198,12 +225,64 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
     }
   }
 
+  // ── Screening ───────────────────────────────────────────────────────────────
+
+  async function handleScreenPapers() {
+    if (papers.length === 0 || !sessionId) return;
+    setScreeningState('running');
+    setScreenProgress(null);
+    setScreenCounts(null);
+
+    try {
+      for await (const event of streamScreenPapers(sessionId, papers, query)) {
+        if (event.type === 'progress') {
+          setScreenProgress({ current: event.current, total: event.total, title: event.title });
+        } else if (event.type === 'screen_done') {
+          setScreenings((prev) => ({
+            ...prev,
+            [event.paper_key]: { decision: event.decision, reason: event.reason },
+          }));
+        } else if (event.type === 'complete') {
+          setScreenCounts({ include: event.include, exclude: event.exclude, uncertain: event.uncertain });
+          setScreeningState('done');
+        } else if (event.type === 'error') {
+          throw new Error(event.message);
+        }
+      }
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Screening failed.');
+      setScreeningState('idle');
+    }
+  }
+
+  async function handleOverrideScreening(paperKey: string, decision: string) {
+    if (!sessionId) return;
+    try {
+      await overrideScreening(sessionId, paperKey, decision);
+      setScreenings((prev) => ({
+        ...prev,
+        [paperKey]: { ...prev[paperKey], decision },
+      }));
+      // Update screen counts
+      if (screenCounts) {
+        const old = screenings[paperKey]?.decision as keyof typeof screenCounts | undefined;
+        const newCounts = { ...screenCounts };
+        if (old && old in newCounts) (newCounts as any)[old]--;
+        if (decision in newCounts) (newCounts as any)[decision]++;
+        setScreenCounts(newCounts);
+      }
+    } catch {
+      // silent — badge stays as-is
+    }
+  }
+
   // ── Summarize All ──────────────────────────────────────────────────────────
 
   async function handleSummarizeAll() {
     if (papers.length === 0) return;
     setSummarizeStatus('running');
     setSumErrors(0);
+    setCurrentStep('');
     setSumProgress({ current: 0, total: papers.length, title: '' });
 
     try {
@@ -223,6 +302,10 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
               total:   event.total ?? papers.length,
               title:   event.title ?? '',
             });
+            setCurrentStep('');  // reset step label on new paper
+            break;
+          case 'step_progress':
+            setCurrentStep(event.step ?? '');
             break;
           case 'summary_done':
             if (event.paper_key && event.summary) {
@@ -234,6 +317,7 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
             break;
           case 'complete':
             setSummarizeStatus('done');
+            setCurrentStep('');
             break;
           case 'error':
             throw new Error(event.message ?? 'Summarize failed');
@@ -386,19 +470,84 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
                 strategyNotes={strategyNotes}
               />
 
-              {/* Summarize-all panel */}
+              {/* Phase 3 panel */}
               {searchStatus === 'done' && papers.length > 0 && (
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
                   <div>
-                    <h3 className="text-sm font-semibold text-slate-800">Phase 3 · AI Summarise All</h3>
+                    <h3 className="text-sm font-semibold text-slate-800">Phase 3 · Screen & Summarise</h3>
                     <p className="text-xs text-slate-500 mt-1">
-                      Reads each paper (full text if available, otherwise abstract) and
-                      generates a reviewer-grade structured analysis. Saved to disk so you
-                      can continue later.
+                      Screen papers by abstract first, then run full AI extraction on included papers.
                     </p>
                   </div>
 
-                  {/* Progress bar */}
+                  {/* ── Screening section ── */}
+                  {screeningState === 'idle' && !hasSummaries && (
+                    <button
+                      onClick={handleScreenPapers}
+                      disabled={!sessionId}
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
+                        rounded-xl text-sm font-semibold text-white bg-violet-600 hover:bg-violet-700
+                        disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z"/>
+                      </svg>
+                      Screen {papers.length} Papers (fast)
+                    </button>
+                  )}
+
+                  {screeningState === 'running' && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs text-slate-500">
+                        <span>Screening {screenProgress?.current ?? 0} / {screenProgress?.total ?? papers.length}</span>
+                        {screenCounts && (
+                          <span className="flex gap-2">
+                            <span className="text-emerald-600">✓ {screenCounts.include}</span>
+                            <span className="text-rose-600">✗ {screenCounts.exclude}</span>
+                            <span className="text-amber-600">? {screenCounts.uncertain}</span>
+                          </span>
+                        )}
+                      </div>
+                      <div className="w-full bg-slate-100 rounded-full h-1.5">
+                        <div
+                          className="bg-violet-500 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${(screenProgress?.total ?? 0) > 0 ? ((screenProgress?.current ?? 0) / (screenProgress?.total ?? 1)) * 100 : 0}%` }}
+                        />
+                      </div>
+                      {screenProgress?.title && (
+                        <p className="text-xs text-slate-400 truncate">{screenProgress.title}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {screeningState === 'done' && screenCounts && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-3 text-xs flex-wrap">
+                        <span className="flex items-center gap-1 text-emerald-700 font-medium">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"/>
+                          {screenCounts.include} include
+                        </span>
+                        <span className="flex items-center gap-1 text-rose-700 font-medium">
+                          <span className="w-2 h-2 rounded-full bg-rose-500 inline-block"/>
+                          {screenCounts.exclude} exclude
+                        </span>
+                        <span className="flex items-center gap-1 text-amber-700 font-medium">
+                          <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"/>
+                          {screenCounts.uncertain} uncertain
+                        </span>
+                      </div>
+                      <button
+                        onClick={handleScreenPapers}
+                        disabled={!sessionId}
+                        className="text-xs text-slate-400 hover:text-slate-600 underline"
+                      >
+                        ↻ Re-screen
+                      </button>
+                    </div>
+                  )}
+
+                  {/* ── Summarise progress bar ── */}
                   {(isSummarizing || summarizeStatus === 'done') && (
                     <div className="space-y-2">
                       <div className="flex justify-between text-xs text-slate-500">
@@ -412,23 +561,29 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
                         />
                       </div>
                       {isSummarizing && (
-                        <p className="text-xs text-slate-400 truncate" title={sumProgress.title}>
-                          Analysing: {sumProgress.title}
-                        </p>
+                        <div>
+                          <p className="text-xs text-slate-400 truncate" title={sumProgress.title}>
+                            {sumProgress.title}
+                          </p>
+                          {currentStep && (
+                            <p className="text-xs text-indigo-500 mt-0.5">{currentStep}</p>
+                          )}
+                        </div>
                       )}
                       {summarizeStatus === 'done' && (
                         <p className="text-xs text-emerald-600 font-medium">
-                          ✓ {summaryCount} summaries saved · session {sessionId}
+                          ✓ {summaryCount} summaries saved
                         </p>
                       )}
                     </div>
                   )}
 
-                  <div className="flex gap-2 flex-wrap">
+                  {/* ── Summarise button — shown when screening done OR already have summaries ── */}
+                  {(screeningState === 'done' || hasSummaries) && (
                     <button
                       onClick={handleSummarizeAll}
                       disabled={isSummarizing || papers.length === 0}
-                      className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
                         rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700
                         disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
@@ -439,6 +594,12 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
                         </svg>Analysing {sumProgress.current}/{sumProgress.total}…</>
                       ) : allSummarized ? (
                         '↻ Re-run Summarise All'
+                      ) : screenCounts && screenCounts.exclude > 0 ? (
+                        <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                        </svg>Summarise {papers.length - screenCounts.exclude} Papers
+                        <span className="text-xs opacity-70">(skip {screenCounts.exclude} excluded)</span></>
                       ) : (
                         <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -446,7 +607,7 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
                         </svg>Summarise All {papers.length} Papers</>
                       )}
                     </button>
-                  </div>
+                  )}
 
                   {/* Cross-paper synthesis */}
                   {hasSummaries && sessionId && (
@@ -551,7 +712,14 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
                   <SummaryMatrix papers={papers} summaries={summaries} />
                 </div>
               ) : (
-                <PapersTable papers={papers} query={query} preloadedSummaries={summaries} sessionId={sessionId ?? ''} />
+                <PapersTable
+                  papers={papers}
+                  query={query}
+                  preloadedSummaries={summaries}
+                  sessionId={sessionId ?? ''}
+                  screenings={screenings}
+                  onOverrideScreening={handleOverrideScreening}
+                />
               )}
 
               {/* Synthesis panel */}

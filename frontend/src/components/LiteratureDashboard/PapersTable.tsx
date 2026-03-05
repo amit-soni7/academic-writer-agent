@@ -6,11 +6,18 @@ import LoadingLottie from '../LoadingLottie';
 // PAGE_SIZE=0 means show all papers on one page (no pagination)
 const PAGE_SIZE = 0;
 
+interface Screening {
+  decision: string;
+  reason: string;
+}
+
 interface Props {
   papers: Paper[];
   query?: string;
   preloadedSummaries?: Record<string, PaperSummary>;  // from Summarize All
   sessionId?: string;
+  screenings?: Record<string, Screening>;
+  onOverrideScreening?: (paperKey: string, decision: string) => void;
 }
 
 const SOURCE_STYLES: Record<string, string> = {
@@ -373,11 +380,18 @@ function SummaryCard({ summary }: { summary: PaperSummary }) {
   );
 }
 
+const SCREEN_CLS: Record<string, string> = {
+  include:   'bg-emerald-50 text-emerald-700 border-emerald-200',
+  exclude:   'bg-rose-50 text-rose-700 border-rose-200',
+  uncertain: 'bg-amber-50 text-amber-700 border-amber-200',
+};
+
 // ── Main table ─────────────────────────────────────────────────────────────────
-export default function PapersTable({ papers, query = '', preloadedSummaries = {}, sessionId = '' }: Props) {
+export default function PapersTable({ papers, query = '', preloadedSummaries = {}, sessionId = '', screenings = {}, onOverrideScreening }: Props) {
   const [page, setPage]                   = useState(0);
   const [summaries, setSummaries]         = useState<Record<string, PaperSummary>>(preloadedSummaries);
   const [loading, setLoading]             = useState<string | null>(null);
+  const [overriding, setOverriding]       = useState<string | null>(null); // paper key being overridden
 
   // Merge incoming preloaded summaries (from Summarize All stream)
   useEffect(() => {
@@ -463,11 +477,17 @@ export default function PapersTable({ papers, query = '', preloadedSummaries = {
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="px-3 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wide w-8">#</th>
-              {['Title', 'First Author', 'Year', 'Journal', 'Citations', 'OA PDF', 'Source', 'AI Analysis'].map((h) => (
+              {['Title', 'First Author', 'Year', 'Journal', 'Citations', 'OA PDF', 'Source'].map((h) => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">
                   {h}
                 </th>
               ))}
+              {/* Extraction columns — shown when any summary exists */}
+              <th className="px-2 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap min-w-[80px]">Design</th>
+              <th className="px-2 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap min-w-[50px]">N</th>
+              <th className="px-2 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap min-w-[70px]">Grade</th>
+              <th className="px-2 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap min-w-[70px]">Screen</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">AI Analysis</th>
             </tr>
           </thead>
           <tbody>
@@ -535,6 +555,69 @@ export default function PapersTable({ papers, query = '', preloadedSummaries = {
                       </span>
                     </td>
 
+                    {/* Design */}
+                    <td className="px-2 py-3 align-top text-xs text-slate-600 max-w-[90px]">
+                      {summaries[key]
+                        ? <span className="line-clamp-2" title={summaries[key].methods.study_design}>
+                            {summaries[key].methods.study_design !== 'NR' ? summaries[key].methods.study_design.slice(0, 20) : <span className="text-slate-300">NR</span>}
+                          </span>
+                        : <span className="text-slate-300">—</span>}
+                    </td>
+
+                    {/* N */}
+                    <td className="px-2 py-3 align-top text-xs text-slate-600 text-right whitespace-nowrap">
+                      {summaries[key]
+                        ? (summaries[key].methods.sample_n !== 'NR'
+                            ? summaries[key].methods.sample_n.slice(0, 12)
+                            : <span className="text-slate-300">NR</span>)
+                        : <span className="text-slate-300">—</span>}
+                    </td>
+
+                    {/* Evidence Grade */}
+                    <td className="px-2 py-3 align-top whitespace-nowrap">
+                      {summaries[key]
+                        ? <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${
+                            EVIDENCE_GRADE_CLS[summaries[key].critical_appraisal.evidence_grade] ?? EVIDENCE_GRADE_CLS.Low
+                          }`}>
+                            {summaries[key].critical_appraisal.evidence_grade}
+                          </span>
+                        : <span className="text-slate-300 text-xs">—</span>}
+                    </td>
+
+                    {/* Screen decision badge + override */}
+                    <td className="px-2 py-3 align-top whitespace-nowrap">
+                      {screenings[key] ? (
+                        overriding === key ? (
+                          <select
+                            autoFocus
+                            defaultValue={screenings[key].decision}
+                            className="text-[10px] border border-slate-300 rounded px-1 py-0.5"
+                            onChange={(e) => {
+                              onOverrideScreening?.(key, e.target.value);
+                              setOverriding(null);
+                            }}
+                            onBlur={() => setOverriding(null)}
+                          >
+                            <option value="include">include</option>
+                            <option value="uncertain">uncertain</option>
+                            <option value="exclude">exclude</option>
+                          </select>
+                        ) : (
+                          <button
+                            onClick={() => setOverriding(key)}
+                            title={screenings[key].reason}
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium border cursor-pointer hover:opacity-80 ${
+                              SCREEN_CLS[screenings[key].decision] ?? 'bg-slate-50 text-slate-600 border-slate-200'
+                            }`}
+                          >
+                            {screenings[key].decision}
+                          </button>
+                        )
+                      ) : (
+                        <span className="text-slate-300 text-xs">—</span>
+                      )}
+                    </td>
+
                     {/* Summarise button */}
                     <td className="px-4 py-3 whitespace-nowrap align-top">
                       {hasError ? (
@@ -579,7 +662,7 @@ export default function PapersTable({ papers, query = '', preloadedSummaries = {
                   {/* Expandable summary row */}
                   {isExpanded && summaries[key] && (
                     <tr key={`summary-${start + i}`}>
-                      <td colSpan={9} className="p-0">
+                      <td colSpan={13} className="p-0">
                         <SummaryCard summary={summaries[key]} />
                       </td>
                     </tr>
@@ -588,7 +671,7 @@ export default function PapersTable({ papers, query = '', preloadedSummaries = {
                   {/* Error row */}
                   {hasError && (
                     <tr key={`error-${start + i}`}>
-                      <td colSpan={9} className="px-6 py-2 bg-rose-50 text-xs text-rose-600 border-t border-rose-100">
+                      <td colSpan={13} className="px-6 py-2 bg-rose-50 text-xs text-rose-600 border-t border-rose-100">
                         {errors[key]}
                       </td>
                     </tr>

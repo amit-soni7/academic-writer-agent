@@ -115,7 +115,7 @@ Generate 10-20 fact bank entries — only facts directly stated in the text with
 
 def _compact_summary(s: PaperSummary) -> dict[str, Any]:
     """Convert a full PaperSummary into a compact dict for the prompt."""
-    return {
+    compact: dict[str, Any] = {
         "paper_key": s.paper_key,
         "triage_category": s.triage.category,
         "study_design": s.methods.study_design,
@@ -141,6 +141,18 @@ def _compact_summary(s: PaperSummary) -> dict[str, Any]:
         "methodological_strengths": s.critical_appraisal.methodological_strengths,
         "one_line_takeaway": s.one_line_takeaway,
     }
+    # Include sentence bank when present — gives synthesis LLM sentence-level citable data
+    if s.sentence_bank:
+        compact["sentence_bank"] = [
+            {
+                "section":    sent.section,
+                "text":       sent.text,
+                "stats":      sent.stats,
+                "claim_type": sent.claim_type,
+            }
+            for sent in s.sentence_bank
+        ]
+    return compact
 
 
 def _parse_evidence_matrix(raw: list) -> list[EvidenceClaim]:

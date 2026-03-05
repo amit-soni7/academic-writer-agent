@@ -72,9 +72,19 @@ export async function synthesizePapers(projectId: string): Promise<SynthesisResu
   return data;
 }
 
+export async function getSynthesisResult(projectId: string): Promise<SynthesisResult | null> {
+  const { data } = await api.get<SynthesisResult | Record<string, never>>(`/api/projects/${projectId}/synthesis_result`);
+  return data && Object.keys(data).length > 0 ? (data as SynthesisResult) : null;
+}
+
 export async function generatePeerReview(projectId: string): Promise<PeerReviewReport> {
   const { data } = await api.post<PeerReviewReport>(`/api/projects/${projectId}/peer_review`);
   return data;
+}
+
+export async function getPeerReviewResult(projectId: string): Promise<PeerReviewReport | null> {
+  const { data } = await api.get<PeerReviewReport | Record<string, never>>(`/api/projects/${projectId}/peer_review_result`);
+  return data && Object.keys(data).length > 0 ? (data as PeerReviewReport) : null;
 }
 
 export async function reviseAfterReview(
@@ -360,6 +370,26 @@ export async function generateFromPlans(
 export async function getRevisionRounds(projectId: string): Promise<RevisionRound[]> {
   const { data } = await api.get<RevisionRound[]>(`/api/projects/${projectId}/revision_rounds`);
   return data;
+}
+
+export interface RevisionWip {
+  manuscript_text?: string;
+  import_result?: ImportManuscriptResult | null;
+  raw_comments?: string;
+  journal_name?: string;
+  parsed_comments?: RealReviewerComment[];
+  suggestions?: CommentChangeSuggestion[];
+  comment_plans?: CommentPlan[];
+  step?: string;
+}
+
+export async function getRevisionWip(projectId: string): Promise<RevisionWip> {
+  const { data } = await api.get<RevisionWip>(`/api/projects/${projectId}/revision_wip`);
+  return data ?? {};
+}
+
+export async function saveRevisionWip(projectId: string, wip: RevisionWip): Promise<void> {
+  await api.put(`/api/projects/${projectId}/revision_wip`, wip);
 }
 
 export function downloadPointByPointDocx(projectId: string, roundNumber: number): string {

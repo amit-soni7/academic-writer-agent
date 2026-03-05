@@ -17,7 +17,7 @@ from typing import Optional
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from services.db import create_engine_async, projects, papers, summaries, journal_recs
+from services.db import create_engine_async, projects, papers, summaries, journal_recs, screenings
 
 
 def _now() -> datetime:
@@ -59,6 +59,7 @@ async def create_project(
     project_description: Optional[str] = None,
     pdf_save_path: Optional[str] = None,
     project_name: Optional[str] = None,
+    project_type: Optional[str] = 'write',
 ) -> str:
     eng = engine or create_engine_async()
     pid = uuid.uuid4().hex[:8]
@@ -79,6 +80,8 @@ async def create_project(
             created_at=_now(),
             updated_at=_now(),
             article_type=article_type,
+            project_type=project_type or 'write',
+            revision_rounds='[]',
         ))
         is_jsonb = papers.c.data.type.__class__.__name__.lower() == 'jsonb'
         for p in papers_list:
@@ -109,6 +112,7 @@ async def list_projects(user_id: str) -> list[dict]:
                 projects.c.project_description,
                 projects.c.project_folder,
                 projects.c.current_phase,
+                projects.c.project_type,
                 (projects.c.article.is_not(None) & (projects.c.article != '')).label('has_article'),
                 paper_count.label('paper_count'),
                 summary_count.label('summary_count'),
@@ -317,6 +321,229 @@ async def update_project_folder(project_id: str, folder: str) -> None:
             .where(projects.c.project_id == project_id)
             .values(project_folder=folder, updated_at=_now())
         )
+
+
+# ── Revision round persistence ─────────────────────────────────────────────────
+
+async def save_base_manuscript(project_id: str, text: str) -> None:
+    """Store the imported manuscript text."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(base_manuscript=text, updated_at=_now())
+        )
+
+
+async def get_revision_rounds(project_id: str) -> list[dict]:
+    """Return all saved revision rounds for this project."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.revision_rounds)
+            .where(projects.c.project_id == project_id)
+        )).first()
+        if not row or not row[0]:
+            return []
+        raw = row[0]
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return []
+        return raw if isinstance(raw, list) else []
+
+
+async def save_synthesis_result(project_id: str, result: dict) -> None:
+    """Persist the cross-paper synthesis result."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(synthesis_result=json.dumps(result, ensure_ascii=False), updated_at=_now())
+        )
+
+
+async def get_synthesis_result(project_id: str) -> dict | None:
+    """Return the saved synthesis result, or None if not yet run."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.synthesis_result)
+            .where(projects.c.project_id == project_id)
+        )).first()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except Exception:
+            return None
+
+
+async def save_peer_review_result(project_id: str, result: dict) -> None:
+    """Persist the peer review report."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(peer_review_result=json.dumps(result, ensure_ascii=False), updated_at=_now())
+        )
+
+
+async def get_peer_review_result(project_id: str) -> dict | None:
+    """Return the saved peer review report, or None if not yet run."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.peer_review_result)
+            .where(projects.c.project_id == project_id)
+        )).first()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except Exception:
+            return None
+
+
+async def save_revision_wip(project_id: str, wip: dict) -> None:
+    """Save intermediate revision work-in-progress state (parsed comments, plans, etc.)."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(revision_wip=json.dumps(wip, ensure_ascii=False), updated_at=_now())
+        )
+
+
+async def get_revision_wip(project_id: str) -> dict:
+    """Return WIP state + base_manuscript for resuming a revision project."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.revision_wip, projects.c.base_manuscript)
+            .where(projects.c.project_id == project_id)
+        )).first()
+        if not row:
+            return {}
+        wip: dict = {}
+        if row[0]:
+            try:
+                wip = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                pass
+        # Always include manuscript_text from base_manuscript so frontend can restore it
+        if row[1]:
+            wip["manuscript_text"] = row[1]
+        return wip
+
+
+async def save_revision_round(project_id: str, round_data: dict) -> None:
+    """Upsert a revision round by round_number."""
+    rounds = await get_revision_rounds(project_id)
+    # Replace existing round with same number or append
+    idx = next((i for i, r in enumerate(rounds) if r.get('round_number') == round_data.get('round_number')), None)
+    if idx is not None:
+        rounds[idx] = round_data
+    else:
+        rounds.append(round_data)
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(revision_rounds=json.dumps(rounds, ensure_ascii=False), updated_at=_now())
+        )
+
+
+# ── Screening persistence ──────────────────────────────────────────────────────
+
+async def save_screening(project_id: str, paper_key: str, decision: str, reason: str) -> None:
+    """Upsert a screening decision."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        existing = (await conn.execute(
+            select(screenings.c.paper_key).where(
+                (screenings.c.project_id == project_id) &
+                (screenings.c.paper_key == paper_key)
+            )
+        )).first()
+        if existing:
+            await conn.execute(
+                update(screenings)
+                .where(
+                    (screenings.c.project_id == project_id) &
+                    (screenings.c.paper_key == paper_key)
+                )
+                .values(decision=decision, reason=reason)
+            )
+        else:
+            await conn.execute(
+                insert(screenings).values(
+                    project_id=project_id,
+                    paper_key=paper_key,
+                    decision=decision,
+                    reason=reason,
+                    overridden="false",
+                )
+            )
+
+
+async def get_screenings(project_id: str) -> dict[str, dict]:
+    """Return {paper_key: {"decision": ..., "reason": ..., "overridden": bool}}."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        res = await conn.execute(
+            select(
+                screenings.c.paper_key,
+                screenings.c.decision,
+                screenings.c.reason,
+                screenings.c.overridden,
+            ).where(screenings.c.project_id == project_id)
+        )
+        return {
+            r[0]: {
+                "decision": r[1],
+                "reason": r[2],
+                "overridden": r[3] == "true",
+            }
+            for r in res
+        }
+
+
+async def override_screening(project_id: str, paper_key: str, decision: str) -> None:
+    """Override a screening decision (marks overridden=true)."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        existing = (await conn.execute(
+            select(screenings.c.paper_key).where(
+                (screenings.c.project_id == project_id) &
+                (screenings.c.paper_key == paper_key)
+            )
+        )).first()
+        if existing:
+            await conn.execute(
+                update(screenings)
+                .where(
+                    (screenings.c.project_id == project_id) &
+                    (screenings.c.paper_key == paper_key)
+                )
+                .values(decision=decision, overridden="true")
+            )
+        else:
+            await conn.execute(
+                insert(screenings).values(
+                    project_id=project_id,
+                    paper_key=paper_key,
+                    decision=decision,
+                    reason="",
+                    overridden="true",
+                )
+            )
 
 
 # ── Backward-compat aliases (used by tests and other services) ─────────────────

@@ -23,7 +23,9 @@ import { Document, Packer, Paragraph, TextRun } from 'docx';
 import type { JournalStyle, PeerReviewReport, RevisionResult, SynthesisResult } from '../../types/paper';
 import {
   synthesizePapers,
+  getSynthesisResult,
   generatePeerReview,
+  getPeerReviewResult,
   reviseAfterReview,
   writeArticle,
   generateTitle,
@@ -42,6 +44,8 @@ interface Props {
   initialArticleType?: string;
   onBack: () => void;
   onOpenSettings: () => void;
+  activeTab?: MainTab;
+  onTabChange?: (tab: MainTab) => void;
 }
 
 const ARTICLE_TYPES: { value: string; label: string; description?: string }[] = [
@@ -62,7 +66,7 @@ const DECISION_CONFIG: Record<string, { label: string; cls: string }> = {
   reject:          { label: 'Reject',           cls: 'bg-rose-50 text-rose-700 border-rose-300' },
 };
 
-type MainTab = 'synthesis' | 'draft' | 'peerreview' | 'revision';
+export type MainTab = 'synthesis' | 'draft' | 'peerreview' | 'revision';
 
 // ── CEILS article renderer (full markdown) ───────────────────────────────────
 
@@ -492,8 +496,14 @@ function CitationStyleBadge({ style }: { style: JournalStyle }) {
   );
 }
 
-export default function ArticleWriter({ sessionId, selectedJournal, initialTitle, initialArticleType, onBack, onOpenSettings }: Props) {
-  const [tab, setTab]               = useState<MainTab>('synthesis');
+export default function ArticleWriter({ sessionId, selectedJournal, initialTitle, initialArticleType, onBack, onOpenSettings, activeTab, onTabChange }: Props) {
+  const [tab, setTab]               = useState<MainTab>(activeTab ?? 'synthesis');
+
+  useEffect(() => {
+    if (activeTab && activeTab !== tab) setTab(activeTab);
+  }, [activeTab]);
+
+  function changeTab(t: MainTab) { setTab(t); onTabChange?.(t); }
   const [articleType, setArticleType] = useState(initialArticleType || 'review');
   const [wordLimit, setWordLimit]   = useState(4000);
   const [maxRefs, setMaxRefs]       = useState<string>('');
@@ -527,6 +537,24 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         setArticleType(data.article_type);
       }
     }).catch(() => { /* silently ignore */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Restore saved synthesis and peer review results on resume
+  useEffect(() => {
+    getSynthesisResult(sessionId).then(result => {
+      if (result) {
+        setSynthesis(result);
+        setSynthState('done');
+      }
+    }).catch(() => {});
+
+    getPeerReviewResult(sessionId).then(result => {
+      if (result) {
+        setReview(result);
+        setReviewState('done');
+      }
+    }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -626,7 +654,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       setRevisionState('idle');
       setRevisionError(null);
       setWritingState('done');
-      setTab('draft');
+      changeTab('draft');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Article generation failed.';
       setWriteError(msg);
@@ -637,7 +665,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   async function handleWriteArticle() {
     if (!synthesis) {
       setWriteError('Run Cross-paper Evidence Synthesis first.');
-      setTab('synthesis');
+      changeTab('synthesis');
       return;
     }
     // ── Title Quality Policy gate ──────────────────────────────────────────────
@@ -652,7 +680,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   async function handleSynthesize() {
     setSynthState('running');
     setSynthError(null);
-    setTab('synthesis');
+    changeTab('synthesis');
     try {
       const result = await synthesizePapers(sessionId);
       setSynthesis(result);
@@ -666,12 +694,12 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   async function handlePeerReview() {
     if (!articleText) {
       setReviewError('Draft the manuscript first.');
-      setTab('draft');
+      changeTab('draft');
       return;
     }
     setReviewState('running');
     setReviewError(null);
-    setTab('peerreview');
+    changeTab('peerreview');
     try {
       const report = await generatePeerReview(sessionId);
       setReview(report);
@@ -688,12 +716,12 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   async function handleReviseAfterReview() {
     if (!articleText || !review) {
       setRevisionError('Draft and peer review are required before revision.');
-      setTab(!articleText ? 'draft' : 'peerreview');
+      changeTab(!articleText ? 'draft' : 'peerreview');
       return;
     }
     setRevisionState('running');
     setRevisionError(null);
-    setTab('revision');
+    changeTab('revision');
     try {
       const result = await reviseAfterReview(sessionId, articleText, review, selectedJournal);
       setRevision(result);
@@ -1127,7 +1155,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
           ] as Array<{ id: MainTab; label: string; badge?: string }>).map(t => (
             <button
               key={t.id}
-              onClick={() => setTab(t.id)}
+              onClick={() => changeTab(t.id)}
               className={`px-4 py-2.5 text-sm font-medium rounded-t-lg -mb-px border-b-2 transition-colors ${
                 tab === t.id
                   ? 'border-brand-500 text-brand-700 bg-white'

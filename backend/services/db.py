@@ -66,6 +66,12 @@ projects = Table(
     Column("article", Text, nullable=True),
     Column("manuscript_title", Text, nullable=True),
     Column("article_type", String, nullable=True),
+    Column("project_type", Text, nullable=True, server_default="write"),
+    Column("base_manuscript", Text, nullable=True),
+    Column("revision_rounds", Text, nullable=True, server_default="[]"),
+    Column("revision_wip", Text, nullable=True),
+    Column("synthesis_result", Text, nullable=True),
+    Column("peer_review_result", Text, nullable=True),
 )
 
 _json_type = JSONB if _IS_PG else Text
@@ -119,6 +125,16 @@ journal_style_cache = Table(
     Column("fetched_at", String, nullable=False),  # ISO datetime string
 )
 
+screenings = Table(
+    "screenings", metadata,
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False),
+    Column("paper_key", String, nullable=False),
+    Column("decision", String, nullable=False),      # include | exclude | uncertain
+    Column("reason", Text, nullable=False, server_default=""),
+    Column("overridden", String, nullable=False, server_default="false"),  # "true" / "false"
+    PrimaryKeyConstraint("project_id", "paper_key"),
+)
+
 
 _engine: Optional[AsyncEngine] = None
 
@@ -154,6 +170,10 @@ async def init_db(engine: Optional[AsyncEngine] = None) -> None:
     await _migrate_add_sci_hub_settings(eng)
     await _migrate_add_provider_settings_v2(eng)
     await _migrate_add_oauth_token_column(eng)
+    await _migrate_add_revision_columns(eng)
+    await _migrate_add_revision_wip(eng)
+    await _migrate_add_write_result_columns(eng)
+    await _migrate_add_screenings_table(eng)
 
 
 async def _migrate_sessions_to_projects(eng: AsyncEngine) -> None:
@@ -332,6 +352,66 @@ async def _migrate_add_oauth_token_column(eng: AsyncEngine) -> None:
         async with eng.begin() as conn:
             await conn.execute(text(
                 "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS provider_oauth_tokens_encrypted_json TEXT;"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_revision_columns(eng: AsyncEngine) -> None:
+    """Add project_type, base_manuscript, revision_rounds columns to projects if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_type TEXT DEFAULT 'write';"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS base_manuscript TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS revision_rounds TEXT DEFAULT '[]';"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_revision_wip(eng: AsyncEngine) -> None:
+    """Add revision_wip column to projects if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS revision_wip TEXT;"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_write_result_columns(eng: AsyncEngine) -> None:
+    """Add synthesis_result and peer_review_result columns to projects if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS synthesis_result TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS peer_review_result TEXT;"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_screenings_table(eng: AsyncEngine) -> None:
+    """Create screenings table if it does not exist (safe, idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS screenings ("
+                "  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  paper_key  TEXT NOT NULL,"
+                "  decision   TEXT NOT NULL,"
+                "  reason     TEXT NOT NULL DEFAULT '',"
+                "  overridden TEXT NOT NULL DEFAULT 'false',"
+                "  PRIMARY KEY (project_id, paper_key)"
+                ")"
             ))
     except Exception:
         pass

@@ -9,6 +9,8 @@ import {
   finalizeComment,
   generateFromPlans,
   getRevisionRounds,
+  getRevisionWip,
+  saveRevisionWip,
   downloadPointByPointDocx,
   downloadRevisedManuscriptDocx,
   downloadTrackChangesDocx,
@@ -128,18 +130,72 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   const [finalizeLoading, setFinalizeLoading] = useState(false);
   const [discussError, setDiscussError] = useState<string | null>(null);
   const autoInitTriggeredRef = useRef<Set<string>>(new Set());
+  // Guard: when restoring comment_plans from WIP, skip the "fresh init" effect
+  const wipPlansLoadedRef = useRef(false);
+  const wipSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Download step ─────────────────────────────────────────────────────────
   const [currentRound, setCurrentRound] = useState<RevisionRound | null>(null);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
 
-  // ── Load existing rounds on mount ─────────────────────────────────────────
+  // ── Auto-save WIP state whenever meaningful state changes ────────────────
+  useEffect(() => {
+    // Don't save if there's nothing worth persisting yet
+    if (!manuscriptText && parsedComments.length === 0 && commentPlans.length === 0) return;
+    if (wipSaveTimerRef.current) clearTimeout(wipSaveTimerRef.current);
+    wipSaveTimerRef.current = setTimeout(() => {
+      saveRevisionWip(projectId, {
+        import_result: importResult,
+        raw_comments: rawComments,
+        journal_name: journalName,
+        parsed_comments: parsedComments,
+        suggestions,
+        comment_plans: commentPlans,
+        step,
+      }).catch(() => {});
+    }, 1500);
+    return () => {
+      if (wipSaveTimerRef.current) clearTimeout(wipSaveTimerRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importResult, parsedComments, commentPlans, suggestions, step, rawComments, journalName]);
+
+  // ── Load existing rounds + WIP state on mount ─────────────────────────────
   useEffect(() => {
     getRevisionRounds(projectId).then((r) => {
       if (r.length > 0) setRounds(r as RevisionRound[]);
     }).catch(() => {});
-  }, [projectId]);
+
+    // Restore in-progress state when resuming (no fresh initialData)
+    if (!initialData) {
+      getRevisionWip(projectId).then((wip) => {
+        if (wip.manuscript_text) setManuscriptText(wip.manuscript_text);
+        if (wip.import_result) setImportResult(wip.import_result as ImportManuscriptResult);
+        if (wip.raw_comments) setRawComments(wip.raw_comments);
+        if (wip.journal_name) setJournalName(wip.journal_name);
+        if (wip.comment_plans && wip.comment_plans.length > 0) {
+          // Set the guard BEFORE setting parsedComments to stop the
+          // "fresh init" effect from wiping the restored plans.
+          wipPlansLoadedRef.current = true;
+          setCommentPlans(wip.comment_plans as CommentPlan[]);
+          // Also restore the already-triggered keys so auto-init doesn't re-fire
+          autoInitTriggeredRef.current = new Set(
+            (wip.comment_plans as CommentPlan[]).map(
+              (p) => `${p.reviewer_number}-${p.comment_number}`
+            )
+          );
+        }
+        if (wip.parsed_comments && wip.parsed_comments.length > 0) {
+          setParsedComments(wip.parsed_comments as RealReviewerComment[]);
+        }
+        if (wip.suggestions && wip.suggestions.length > 0) {
+          setSuggestions(wip.suggestions as CommentChangeSuggestion[]);
+        }
+        if (wip.step) changeStep(wip.step as StepId);
+      }).catch(() => {});
+    }
+  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Auto-process manuscript + comments when initialData present ───────────
   useEffect(() => {
@@ -191,6 +247,11 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   // ── Initialize comment plans when parsedComments changes ──────────────────
   useEffect(() => {
     if (parsedComments.length === 0) return;
+    // Skip fresh init if plans were already restored from saved WIP state
+    if (wipPlansLoadedRef.current) {
+      wipPlansLoadedRef.current = false; // reset for any future re-parse
+      return;
+    }
     setCommentPlans(parsedComments.map((c) => ({
       ...c,
       discussion: [],

@@ -4,7 +4,7 @@ import type { ProjectMeta } from '../../types/paper';
 import LoadingLottie from '../LoadingLottie';
 
 interface Props {
-  onResume: (projectId: string, query: string, projectName?: string) => void;
+  onResume: (projectId: string, query: string, projectType?: string | null, projectName?: string) => void;
 }
 
 const PHASE_LABELS: Record<string, { label: string; color: string }> = {
@@ -89,11 +89,11 @@ export default function ProjectsList({ onResume }: Props) {
             className="w-full text-left px-6 py-4 hover:bg-slate-50 transition-colors group"
             role="button"
             tabIndex={0}
-            onClick={() => onResume(p.project_id, p.query, p.project_name ?? undefined)}
+            onClick={() => onResume(p.project_id, p.query, p.project_type, p.project_name ?? undefined)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                onResume(p.project_id, p.query, p.project_name ?? undefined);
+                onResume(p.project_id, p.query, p.project_type, p.project_name ?? undefined);
               }
             }}
           >
@@ -112,7 +112,11 @@ export default function ProjectsList({ onResume }: Props) {
                   <span className="text-xs text-slate-400">·</span>
                   <PhaseBadge phase={p.current_phase} />
                   <span className="text-xs text-slate-400">·</span>
-                  <span className="text-xs text-slate-500">{p.paper_count} papers</span>
+                  {p.project_type === 'revision' ? (
+                    <span className="text-xs font-medium text-purple-700 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">↺ Revision</span>
+                  ) : (
+                    <span className="text-xs text-slate-500">{p.paper_count} papers</span>
+                  )}
                   {p.summary_count > 0 && (
                     <>
                       <span className="text-xs text-slate-400">·</span>

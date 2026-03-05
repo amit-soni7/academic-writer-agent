@@ -61,10 +61,12 @@ class AIProvider:
         *,
         json_mode: bool = False,
         temperature: float = 0.3,
+        max_tokens: int = 8192,
     ) -> str:
         """
         Send a system + user message and return the assistant's reply as a string.
         Set json_mode=True when the prompt explicitly requests JSON output.
+        max_tokens: maximum output tokens (default 8192; increase for large structured outputs).
         """
         match self.config.provider:
             case "openai":
@@ -74,6 +76,7 @@ class AIProvider:
                     api_key=self.config.api_key,
                     json_mode=json_mode,
                     temperature=temperature,
+                    max_tokens=max_tokens,
                 )
             case "gemini":
                 # Prefer OAuth access token; fall back to API key.
@@ -84,9 +87,10 @@ class AIProvider:
                     api_key=effective_key,
                     json_mode=json_mode,
                     temperature=temperature,
+                    max_tokens=max_tokens,
                 )
             case "claude":
-                return await self._claude(system, user, json_mode=json_mode, temperature=temperature)
+                return await self._claude(system, user, json_mode=json_mode, temperature=temperature, max_tokens=max_tokens)
             case "ollama":
                 ollama_host = (self.config.base_url or "http://localhost:11434").rstrip("/")
                 return await self._openai_compat(
@@ -95,6 +99,7 @@ class AIProvider:
                     api_key="ollama",          # Ollama ignores the key but SDK requires one
                     json_mode=json_mode,
                     temperature=temperature,
+                    max_tokens=max_tokens,
                 )
             case "llamacpp":
                 llamacpp_host = (self.config.base_url or "http://localhost:8080").rstrip("/")
@@ -107,6 +112,7 @@ class AIProvider:
                     api_key=llamacpp_key,
                     json_mode=json_mode,
                     temperature=temperature,
+                    max_tokens=max_tokens,
                 )
             case _:
                 raise ValueError(f"Unknown provider: {self.config.provider!r}")
@@ -133,10 +139,12 @@ class AIProvider:
         api_key: str,
         json_mode: bool,
         temperature: float,
+        max_tokens: int,
     ) -> str:
         client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         kwargs: dict = dict(
             model=self.config.model,
+            max_tokens=max_tokens,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user},
@@ -159,6 +167,7 @@ class AIProvider:
         *,
         json_mode: bool,
         temperature: float,
+        max_tokens: int,
     ) -> str:
         client = anthropic.AsyncAnthropic(api_key=self.config.api_key)
 
@@ -167,7 +176,7 @@ class AIProvider:
 
         message = await client.messages.create(
             model=self.config.model,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             temperature=temperature,
             system=effective_system,
             messages=[{"role": "user", "content": user}],

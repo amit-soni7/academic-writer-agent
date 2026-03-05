@@ -46,6 +46,7 @@ from models import (
     ReviseAfterReviewRequest,
     RevisionResult,
     RevisionRound,
+    RevisionWipPayload,
     ScreenPapersRequest,
     SuggestChangesRequest,
     SummarizeAllRequest,
@@ -70,14 +71,20 @@ from services.project_repo import (
     load_project,
     load_project_minimal,
     override_screening,
+    get_peer_review_result,
+    get_synthesis_result,
     save_article,
     save_article_type,
     save_base_manuscript,
     save_journal_recs,
     save_manuscript_title,
+    save_peer_review_result,
     save_revision_round,
+    save_revision_wip,
+    get_revision_wip,
     save_screening,
     save_summary,
+    save_synthesis_result,
     slugify_project_name,
     update_project_name,
     update_project_phase,
@@ -774,6 +781,34 @@ async def write_article_sync(project_id: str, payload: WriteArticleRequest, user
     }
 
 
+# ── Saved synthesis / peer-review results (for resume) ────────────────────────
+
+@router.get("/projects/{project_id}/synthesis_result")
+async def get_synthesis_result_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Return the last saved synthesis result for this project, or {} if none."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    result = await get_synthesis_result(project_id)
+    return result or {}
+
+
+@router.get("/projects/{project_id}/peer_review_result")
+async def get_peer_review_result_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Return the last saved peer review report for this project, or {} if none."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    result = await get_peer_review_result(project_id)
+    return result or {}
+
+
 # ── Cross-paper synthesis ──────────────────────────────────────────────────────
 
 @router.post("/projects/{project_id}/synthesize", response_model=SynthesisResult)
@@ -797,6 +832,7 @@ async def synthesize_papers(project_id: str, user=Depends(get_current_user)) -> 
 
     result = await synthesize(provider, project_summaries, query)
     await update_project_phase(project_id, 'cross_reference')
+    await save_synthesis_result(project_id, result.model_dump())
     return result
 
 
@@ -823,6 +859,7 @@ async def peer_review(project_id: str, user=Depends(get_current_user)) -> PeerRe
     article = project.get("article", "") or ""
 
     report = await generate_peer_review(provider, project_summaries, query, article)
+    await save_peer_review_result(project_id, report.model_dump())
     return report
 
 
@@ -1096,6 +1133,32 @@ async def list_revision_rounds_endpoint(
         }
         for r in rounds
     ]
+
+
+@router.get("/projects/{project_id}/revision_wip")
+async def get_revision_wip_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Return saved work-in-progress revision state (parsed comments, plans, etc.)."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return await get_revision_wip(project_id)
+
+
+@router.put("/projects/{project_id}/revision_wip")
+async def save_revision_wip_endpoint(
+    project_id: str,
+    payload: RevisionWipPayload,
+    user=Depends(get_current_user),
+) -> dict:
+    """Persist work-in-progress revision state."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await save_revision_wip(project_id, payload.model_dump())
+    return {"ok": True}
 
 
 @router.get("/projects/{project_id}/revision_rounds/{round_number}/point_by_point_docx")

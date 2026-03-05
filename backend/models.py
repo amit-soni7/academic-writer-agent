@@ -637,6 +637,17 @@ class FinalizeCommentRequest(BaseModel):
 class GenerateFromPlansRequest(BaseModel):
     round_number: int
     journal_name: str = ""
+
+
+class RevisionWipPayload(BaseModel):
+    """Work-in-progress state for a revision project (intermediate steps)."""
+    import_result: Optional[dict] = None
+    raw_comments: str = ""
+    journal_name: str = ""
+    parsed_comments: list[dict] = []
+    suggestions: list[dict] = []
+    comment_plans: list[dict] = []
+    step: str = "manuscript"
     finalized_plans: list[dict]     # list of serialized CommentPlan objects
 
 

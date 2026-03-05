@@ -16,7 +16,7 @@ Non-negotiable rules enforced via system prompt:
 
 import json
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from models import (
     CitedReference,
@@ -30,6 +30,7 @@ from models import (
     PaperBibliography,
     PaperSummary,
     ResultItem,
+    SentenceCitation,
     Triage,
 )
 from services.ai_provider import AIProvider
@@ -114,6 +115,47 @@ the identical format as ref_id in cited_references so the pipeline can link them
   from the raw_text — these fields enable the system to search Semantic Scholar for the paper.
 
 - When text_source is "abstract_only" or "none": output empty arrays [] for all three fields.
+
+SENTENCE BANK — research-question-driven selective extraction:
+- sentence_bank: Extract 5–12 HIGH-VALUE sentences that would directly be cited when writing
+  an academic article about the research question above.
+  Quality over quantity — a paper with 10 relevant sentences is better than 25 generic ones.
+
+  For each sentence include:
+    • section: where in the SOURCE PAPER it came from:
+      "background" | "methods" | "results" | "discussion" | "conclusion"
+    • text: clean, concise paraphrased statement in active voice — self-contained and citable
+    • verbatim_quote: exact sentence(s) from the paper (required for results; optional for others)
+    • claim_type: "reported_fact" | "author_interpretation" | "inference"
+    • stats: extracted numeric statistics if present (e.g. "OR=1.8 [1.2, 2.7] p=0.003"), else ""
+    • importance: "high" if this sentence is a must-cite for the research question,
+                  "medium" if useful but secondary
+    • use_in: which section of the TARGET MANUSCRIPT this sentence belongs in:
+              "introduction" | "methods" | "results" | "discussion"
+
+  SELECTION CRITERIA — only include a sentence if it passes ALL of these:
+  1. RELEVANT to the research question — skip sentences about unrelated topics
+  2. SPECIFIC and CITABLE — contains a concrete claim, number, mechanism, or finding
+  3. NOT BOILERPLATE — skip: ethics approvals, funding statements, consent forms,
+     generic study registration, "future research is needed", "we conducted a study"
+  4. NOT REDUNDANT — do not include near-duplicate statements
+
+  PRIORITY RULES (what to include and mark "high"):
+  - Primary outcomes with effect sizes, CIs, p-values → always include, mark "high"
+  - Background facts that directly justify the research question (prevalence, mechanism,
+    burden of disease, gap in evidence) → include if specific and citable, mark "high"
+  - Study design + sample size (1 sentence max) → "medium"
+  - Comparison with other work that contradicts or confirms this paper → "high"
+  - Major clinical/policy implications directly related to the research question → "high"
+  - Secondary outcomes, subgroup analyses → "medium" only if relevant to research question
+  - Limitations that affect interpretation → "medium" (1–2 max)
+
+  LIMITS:
+  - Maximum 3 background sentences per paper
+  - Maximum 1 methods sentence per paper (design + N in one sentence)
+  - Maximum 5 results sentences per paper (primary outcome first, then secondary)
+  - Maximum 3 discussion/conclusion sentences per paper
+  - When text_source is "abstract_only": 2–5 sentences (results + conclusion only)
 """
 
 _USER_TMPL = """\
@@ -229,6 +271,18 @@ Use "NR" for any field where information is not present in the text.
   "one_line_takeaway": "In [population], [X] [leads to/is associated with] [Y] ([effect size]; [CI]; [p]); evidence certainty [High/Moderate/Low/Very Low].",
 
   "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"],
+
+  "sentence_bank": [
+    {{
+      "section": "background | methods | results | discussion | conclusion",
+      "text": "Clean paraphrased citable statement in active voice",
+      "verbatim_quote": "Exact sentence(s) from the paper — required for results, optional for others",
+      "claim_type": "reported_fact | author_interpretation | inference",
+      "stats": "OR=1.8 [1.2, 2.7] p=0.003 — or empty string if no stats",
+      "importance": "high | medium",
+      "use_in": "introduction | methods | results | discussion"
+    }}
+  ],
 
   "introduction_claims": [
     {{
@@ -504,6 +558,51 @@ def _parse_confidence(raw: dict) -> ConfidenceScore:
     )
 
 
+def _parse_sentence_bank(raw: list) -> list[SentenceCitation]:
+    valid_sections    = {"background", "methods", "results", "discussion", "conclusion"}
+    valid_claim_types = {"reported_fact", "author_interpretation", "inference"}
+    valid_importance  = {"high", "medium"}
+    valid_use_in      = {"introduction", "methods", "results", "discussion"}
+    out = []
+    for item in (raw if isinstance(raw, list) else []):
+        if not isinstance(item, dict):
+            continue
+        section = _str_field(item, "section", "").lower()
+        if section not in valid_sections:
+            section = "results"
+        claim_type = _str_field(item, "claim_type", "reported_fact")
+        if claim_type not in valid_claim_types:
+            claim_type = "reported_fact"
+        importance = _str_field(item, "importance", "medium").lower()
+        if importance not in valid_importance:
+            importance = "medium"
+        use_in = _str_field(item, "use_in", "").lower()
+        if use_in not in valid_use_in:
+            # Infer from section if missing
+            use_in = {
+                "background": "introduction",
+                "methods":    "methods",
+                "results":    "results",
+                "discussion": "discussion",
+                "conclusion": "discussion",
+            }.get(section, "discussion")
+        text = _str_field(item, "text", "")
+        if not text:
+            continue
+        out.append(SentenceCitation(
+            section=section,
+            text=text,
+            verbatim_quote=_str_field(item, "verbatim_quote", ""),
+            claim_type=claim_type,
+            stats=_str_field(item, "stats", ""),
+            importance=importance,
+            use_in=use_in,
+        ))
+    # Ensure high-importance sentences come first
+    out.sort(key=lambda s: (0 if s.importance == "high" else 1))
+    return out
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 async def summarize_paper(
@@ -512,12 +611,15 @@ async def summarize_paper(
     query: str,
     fetch_settings: Optional[FetchSettings] = None,
     session_id: str = "",
+    progress_cb: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> PaperSummary:
     """
     3-pass evidence extraction (+ intro/discussion) for a single paper.
     Fetches best available text (PMC XML > OA PDF > DOI/institutional > Sci-Hub > abstract)
     then runs the structured extraction prompt.
     """
+    if progress_cb:
+        await progress_cb("Fetching full text…")
     text, text_source = await fetch_full_text(paper, fetch_settings=fetch_settings)
 
     authors_str = "; ".join(paper.authors[:6]) or "Unknown"
@@ -541,6 +643,8 @@ async def summarize_paper(
         text=text if text else no_text_note,
     )
 
+    if progress_cb:
+        await progress_cb("Running AI extraction…")
     raw = await provider.complete(
         system=_SYSTEM,
         user=user_prompt,
@@ -549,6 +653,8 @@ async def summarize_paper(
     )
 
     # Robust JSON extraction
+    if progress_cb:
+        await progress_cb("Parsing results…")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -564,6 +670,8 @@ async def summarize_paper(
     bibliography = _parse_bibliography(data.get("bibliography", {}), paper)
 
     # ── CrossRef enrichment (Zotero-style) ───────────────────────────────────
+    if progress_cb:
+        await progress_cb("Enriching metadata…")
     # Fetch authoritative bibliographic metadata from CrossRef so that author
     # names, journal title, volume, issue, and pages are always correct —
     # regardless of what the LLM extracted from the paper text.
@@ -617,6 +725,9 @@ async def summarize_paper(
 
     full_text_used = text_source in ("pmc_xml", "full_pdf", "full_html")
 
+    # Sentence bank — extracted for all text sources (fewer sentences for abstract-only)
+    sentence_bank = _parse_sentence_bank(data.get("sentence_bank", []))
+
     # Only parse intro/discussion fields when full text was available
     intro_claims:    list[IntroductionClaim] = []
     disc_insights:   list[DiscussionInsight] = []
@@ -641,6 +752,7 @@ async def summarize_paper(
         confidence=_parse_confidence(data.get("confidence", {})),
         one_line_takeaway=_str_field(data, "one_line_takeaway"),
         keywords=_list_field(data, "keywords"),
+        sentence_bank=sentence_bank,
         introduction_claims=intro_claims,
         discussion_insights=disc_insights,
         cited_references=cited_refs,

@@ -30,6 +30,7 @@ export interface SSEEvent {
     strategy_notes: string[];
     framework_used?: string;
     framework_justification?: string;
+    tentative_title?: string;
   };
   before?: number;
   after?: number;

@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import type { ArticleMode, WritingType, IntentResponse } from '../../types/intent';
+import type { RevisionIntakeData } from '../../types/paper';
 import { submitIntent } from '../../api/client';
 import LoadingLottie from '../LoadingLottie';
 import StepIndicator from './StepIndicator';
 import StepOne from './StepOne';
 import StepTwo from './StepTwo';
+import StepTwoRevision from './StepTwoRevision';
 import StepThree from './StepThree';
+import StepThreeRevision from './StepThreeRevision';
 
-const STEP_LABELS = ['Mode', 'Article Type', 'Key Idea'];
+const STEP_LABELS_WRITE    = ['Mode', 'Article Type', 'Key Idea'];
+const STEP_LABELS_REVISION = ['Mode', 'Manuscript & Comments', 'Journal & Project'];
 const TOTAL_STEPS = 3;
 
 type FormState = {
@@ -15,29 +19,56 @@ type FormState = {
   writing_type: WritingType | null;
   key_idea: string;
   project_description: string;
+  // Revision fields
+  manuscript_text: string;
+  manuscript_file: File | null;
+  reviewer_comments_text: string;
+  reviewer_comments_file: File | null;
+  journal_name: string;
+  project_name: string;
 };
 
 interface Props {
   onComplete: (keyIdea: string, writingType: WritingType, projectDescription?: string) => void;
+  onCompleteRevision?: (data: RevisionIntakeData) => void;
 }
 
-export default function IntakeForm({ onComplete }: Props) {
+export default function IntakeForm({ onComplete, onCompleteRevision }: Props) {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<FormState>({
     mode: null,
     writing_type: null,
     key_idea: '',
     project_description: '',
+    manuscript_text: '',
+    manuscript_file: null,
+    reviewer_comments_text: '',
+    reviewer_comments_file: null,
+    journal_name: '',
+    project_name: '',
   });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<IntentResponse | null>(null);
 
+  const isRevision = form.mode === 'revision';
+  const stepLabels = isRevision ? STEP_LABELS_REVISION : STEP_LABELS_WRITE;
+
   // ── Validation per step ──────────────────────────────────────────────────
   function canAdvance(): boolean {
     if (step === 1) return form.mode !== null;
-    if (step === 2) return form.writing_type !== null;
-    if (step === 3) return form.key_idea.trim().length >= 10;
+    if (step === 2) {
+      if (isRevision) {
+        const hasManuscript = form.manuscript_file !== null || form.manuscript_text.trim().length > 0;
+        const hasComments   = form.reviewer_comments_file !== null || form.reviewer_comments_text.trim().length > 0;
+        return hasManuscript && hasComments;
+      }
+      return form.writing_type !== null;
+    }
+    if (step === 3) {
+      if (isRevision) return form.project_name.trim().length > 0;
+      return form.key_idea.trim().length >= 10;
+    }
     return false;
   }
 
@@ -50,13 +81,16 @@ export default function IntakeForm({ onComplete }: Props) {
     setError(null);
   }
 
-  // ── Submit ───────────────────────────────────────────────────────────────
+  // ── Submit (novel) ───────────────────────────────────────────────────────
   async function handleSubmit() {
+    if (isRevision) {
+      handleSubmitRevision();
+      return;
+    }
     if (!form.mode || !form.writing_type || form.key_idea.trim().length < 10) return;
 
     setIsLoading(true);
     setError(null);
-
     try {
       const response = await submitIntent({
         mode: form.mode,
@@ -73,7 +107,21 @@ export default function IntakeForm({ onComplete }: Props) {
     }
   }
 
-  // ── Success screen ───────────────────────────────────────────────────────
+  // ── Submit (revision) ────────────────────────────────────────────────────
+  function handleSubmitRevision() {
+    if (!onCompleteRevision || !form.project_name.trim()) return;
+    onCompleteRevision({
+      manuscript_text: form.manuscript_text,
+      manuscript_file: form.manuscript_file,
+      reviewer_comments_text: form.reviewer_comments_text,
+      reviewer_comments_file: form.reviewer_comments_file,
+      journal_name: form.journal_name,
+      project_name: form.project_name.trim(),
+      project_description: form.project_description,
+    });
+  }
+
+  // ── Success screen (novel only) ───────────────────────────────────────────
   if (result) {
     return (
       <div className="text-center py-6">
@@ -98,7 +146,6 @@ export default function IntakeForm({ onComplete }: Props) {
           ))}
         </div>
 
-        {/* Primary CTA — transition to Phase 2 */}
         <button
           onClick={() => onComplete(result.received.key_idea, result.received.writing_type, form.project_description || undefined)}
           className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl
@@ -116,7 +163,9 @@ export default function IntakeForm({ onComplete }: Props) {
           onClick={() => {
             setResult(null);
             setStep(1);
-            setForm({ mode: null, writing_type: null, key_idea: '', project_description: '' });
+            setForm({ mode: null, writing_type: null, key_idea: '', project_description: '',
+              manuscript_text: '', manuscript_file: null, reviewer_comments_text: '',
+              reviewer_comments_file: null, journal_name: '', project_name: '' });
           }}
           className="text-sm text-slate-400 hover:text-slate-600 font-medium underline underline-offset-2"
         >
@@ -129,19 +178,47 @@ export default function IntakeForm({ onComplete }: Props) {
   // ── Form steps ───────────────────────────────────────────────────────────
   return (
     <div>
-      <StepIndicator currentStep={step} totalSteps={TOTAL_STEPS} labels={STEP_LABELS} />
+      <StepIndicator currentStep={step} totalSteps={TOTAL_STEPS} labels={stepLabels} />
 
       <div className="min-h-[340px]">
         {step === 1 && (
           <StepOne value={form.mode} onChange={(mode) => setForm((f) => ({ ...f, mode }))} />
         )}
-        {step === 2 && (
+
+        {step === 2 && isRevision && (
+          <StepTwoRevision
+            manuscriptText={form.manuscript_text}
+            onManuscriptTextChange={(t) => setForm((f) => ({ ...f, manuscript_text: t }))}
+            manuscriptFile={form.manuscript_file}
+            onManuscriptFileChange={(file) => setForm((f) => ({ ...f, manuscript_file: file }))}
+            reviewerCommentsText={form.reviewer_comments_text}
+            onReviewerCommentsTextChange={(t) => setForm((f) => ({ ...f, reviewer_comments_text: t }))}
+            reviewerCommentsFile={form.reviewer_comments_file}
+            onReviewerCommentsFileChange={(file) => setForm((f) => ({ ...f, reviewer_comments_file: file }))}
+            journalName={form.journal_name}
+            onJournalNameChange={(n) => setForm((f) => ({ ...f, journal_name: n }))}
+          />
+        )}
+
+        {step === 2 && !isRevision && (
           <StepTwo
             value={form.writing_type}
             onChange={(writing_type) => setForm((f) => ({ ...f, writing_type }))}
           />
         )}
-        {step === 3 && (
+
+        {step === 3 && isRevision && (
+          <StepThreeRevision
+            journalName={form.journal_name}
+            manuscriptText={form.manuscript_text}
+            projectName={form.project_name}
+            onProjectNameChange={(n) => setForm((f) => ({ ...f, project_name: n }))}
+            projectDescription={form.project_description}
+            onProjectDescriptionChange={(d) => setForm((f) => ({ ...f, project_description: d }))}
+          />
+        )}
+
+        {step === 3 && !isRevision && (
           <StepThree
             value={form.key_idea}
             onChange={(key_idea) => setForm((f) => ({ ...f, key_idea }))}
@@ -198,6 +275,8 @@ export default function IntakeForm({ onComplete }: Props) {
                 <LoadingLottie className="w-5 h-5" />
                 Submitting…
               </>
+            ) : isRevision ? (
+              'Start Revision →'
             ) : (
               'Begin Pipeline →'
             )}
