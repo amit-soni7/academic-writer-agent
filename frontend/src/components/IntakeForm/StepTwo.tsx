@@ -113,7 +113,7 @@ export default function StepTwo({ value, onChange }: Props) {
                       flex items-start gap-4 p-4 rounded-xl border-2 cursor-pointer
                       transition-all duration-200
                       ${isSelected
-                        ? 'border-brand-600 bg-brand-50'
+                        ? 'border-brand-500 bg-brand-50'
                         : 'border-slate-200 bg-white hover:border-brand-200 hover:bg-slate-50'
                       }
                     `}
@@ -122,9 +122,9 @@ export default function StepTwo({ value, onChange }: Props) {
                     <div className={`
                       mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0
                       transition-all duration-200
-                      ${isSelected ? 'border-brand-600' : 'border-slate-300'}
+                      ${isSelected ? 'border-brand-500' : 'border-slate-300'}
                     `}>
-                      {isSelected && <div className="w-2.5 h-2.5 rounded-full bg-brand-600" />}
+                      {isSelected && <div className="w-2.5 h-2.5 rounded-full bg-brand-500" />}
                     </div>
                     <input
                       type="radio"

@@ -6,18 +6,30 @@ interface Props {
 }
 
 const MIN_LENGTH = 10;
-const SOFT_MAX = 500;
+const SOFT_MAX   = 500;
+
+const tips = [
+  'Mention the population or sample (e.g., "adolescents aged 13–17").',
+  'Include the intervention or variable of interest.',
+  'State the outcome measure or dependent variable.',
+  'Note the time frame or study design if relevant.',
+];
 
 export default function StepThree({ value, onChange, description = '', onDescriptionChange }: Props) {
   const charCount = value.length;
-  const isUnder = charCount < MIN_LENGTH;
-  const isOver = charCount > SOFT_MAX;
+  const isUnder   = charCount < MIN_LENGTH;
+  const isOver    = charCount > SOFT_MAX;
 
   return (
     <div>
-      <h2 className="text-xl font-semibold text-slate-800 mb-1">Describe your key idea</h2>
-      <p className="text-sm text-slate-500 mb-6">
-        State your central research question or argument. Be as specific as possible — this seeds the literature search and AI summarization pipeline.
+      <h2
+        className="text-2xl font-light mb-1 leading-snug"
+        style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', color: 'var(--text-bright)' }}
+      >
+        Describe your key idea
+      </h2>
+      <p className="text-sm text-slate-500 mb-6 leading-relaxed">
+        State your central research question or argument. Specificity here seeds the literature search and summarization pipeline.
       </p>
 
       <div className="relative">
@@ -26,65 +38,91 @@ export default function StepThree({ value, onChange, description = '', onDescrip
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder="e.g. Examining the longitudinal effects of Cognitive Behavioral Therapy on treatment-resistant depression in adolescents, with a focus on biomarker changes over a 12-month follow-up period."
-          className={`
-            w-full rounded-xl border-2 p-4 text-sm text-slate-800 placeholder-slate-400
-            resize-none transition-all duration-200 focus:outline-none leading-relaxed
-            ${isOver
-              ? 'border-amber-400 focus:border-amber-500 focus:ring-2 focus:ring-amber-100'
-              : 'border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-100'
-            }
-          `}
+          className="w-full rounded-lg border p-4 text-sm resize-none transition-all duration-200
+            focus:outline-none leading-relaxed"
+          style={{
+            background: 'var(--bg-elevated)',
+            color: 'var(--text-body)',
+            borderColor: isOver ? '#d0aa58' : 'var(--border-muted)',
+            caretColor: 'var(--gold)',
+            boxShadow: isOver
+              ? 'inset 0 0 0 1px rgba(208,170,88,0.4)'
+              : 'inset 0 0 0 1px transparent',
+          }}
+          onFocus={(e) => {
+            (e.target as HTMLTextAreaElement).style.borderColor = isOver ? '#d0aa58' : 'var(--gold)';
+            (e.target as HTMLTextAreaElement).style.boxShadow = isOver
+              ? 'inset 0 0 0 1px rgba(208,170,88,0.4)'
+              : 'inset 0 0 0 1px rgba(196,147,70,0.3)';
+          }}
+          onBlur={(e) => {
+            (e.target as HTMLTextAreaElement).style.borderColor = isOver ? '#d0aa58' : 'var(--border-muted)';
+            (e.target as HTMLTextAreaElement).style.boxShadow = 'inset 0 0 0 1px transparent';
+          }}
         />
-        {/* Character counter */}
-        <div className={`absolute bottom-3 right-4 text-xs font-medium tabular-nums ${
-          isOver ? 'text-amber-500' : 'text-slate-400'
-        }`}>
+        <div
+          className="absolute bottom-3 right-4 font-mono text-[10px] tabular-nums"
+          style={{ color: isOver ? '#d0aa58' : 'var(--text-muted)' }}
+        >
           {charCount} / {SOFT_MAX}
         </div>
       </div>
 
-      {/* Hints */}
       {isUnder && charCount > 0 && (
-        <p className="mt-2 text-xs text-rose-500">
+        <p className="mt-2 text-xs" style={{ color: '#d65454' }}>
           Please provide at least {MIN_LENGTH} characters.
         </p>
       )}
       {isOver && (
-        <p className="mt-2 text-xs text-amber-600">
+        <p className="mt-2 text-xs" style={{ color: '#d0aa58' }}>
           Consider distilling your idea to its core argument for better AI performance.
         </p>
       )}
 
-      {/* Project description (optional) */}
       {onDescriptionChange && (
         <div className="mt-5">
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">
-            Project description <span className="text-slate-400 font-normal">(optional)</span>
+          <label className="block text-xs font-mono uppercase tracking-wider mb-2"
+            style={{ color: 'var(--text-secondary)' }}>
+            Project description{' '}
+            <span style={{ color: 'var(--text-muted)' }}>(optional)</span>
           </label>
           <textarea
             rows={2}
             value={description}
             onChange={(e) => onDescriptionChange(e.target.value)}
             placeholder="e.g. Systematic review for my PhD chapter on AI chatbots in healthcare"
-            className="w-full rounded-xl border-2 border-slate-200 p-3 text-sm text-slate-800
-              placeholder-slate-400 resize-none transition-all duration-200 focus:outline-none
-              leading-relaxed focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+            className="w-full rounded-lg border p-3 text-sm resize-none
+              transition-all duration-200 focus:outline-none leading-relaxed"
+            style={{
+              background: 'var(--bg-elevated)',
+              color: 'var(--text-body)',
+              borderColor: 'var(--border-muted)',
+              caretColor: 'var(--gold)',
+            }}
+            onFocus={(e) => { (e.target as HTMLTextAreaElement).style.borderColor = 'var(--gold)'; }}
+            onBlur={(e)  => { (e.target as HTMLTextAreaElement).style.borderColor = 'var(--border-muted)'; }}
           />
         </div>
       )}
 
-      {/* Tips box */}
-      <div className="mt-5 rounded-xl bg-slate-100 border border-slate-200 p-4">
-        <p className="text-xs font-semibold text-slate-600 mb-2 uppercase tracking-wide">Tips for a strong prompt</p>
-        <ul className="space-y-1.5 text-xs text-slate-500 list-none">
-          {[
-            'Mention the population or sample (e.g., "adolescents aged 13–17").',
-            'Include the intervention or variable of interest.',
-            'State the outcome measure or dependent variable.',
-            'Note the time frame or study design if relevant.',
-          ].map((tip) => (
-            <li key={tip} className="flex items-start gap-2">
-              <span className="text-brand-400 mt-0.5">→</span>
+      {/* Tips */}
+      <div
+        className="mt-5 rounded-lg border p-4"
+        style={{
+          background: 'var(--bg-base)',
+          borderColor: 'var(--border-faint)',
+          borderLeft: '3px solid var(--gold-faint)',
+        }}
+      >
+        <p className="font-mono text-[9px] uppercase tracking-[0.15em] mb-3"
+          style={{ color: 'var(--gold)' }}>
+          Tips for a strong prompt
+        </p>
+        <ul className="space-y-1.5">
+          {tips.map((tip) => (
+            <li key={tip} className="flex items-start gap-2 text-xs leading-relaxed"
+              style={{ color: 'var(--text-muted)' }}>
+              <span className="flex-shrink-0 mt-0.5" style={{ color: 'var(--gold-faint)' }}>›</span>
               {tip}
             </li>
           ))}

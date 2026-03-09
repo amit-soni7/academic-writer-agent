@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   type AISettings,
   type Provider,
@@ -21,7 +21,8 @@ interface Props {
 
 type TestState = 'idle' | 'testing' | 'ok' | 'fail';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
-type SectionKey = 'ai' | 'pdf' | 'scihub';
+// Navigation views: menu → ai (provider list) → ai:providerid (detail) → pdf → scihub
+type View = 'menu' | 'ai' | `ai:${Provider}` | 'pdf' | 'scihub';
 
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
@@ -33,8 +34,6 @@ const PROVIDERS: { id: Provider; label: string; badge: string; dotColor: string;
   { id: 'llamacpp', label: 'llama.cpp', badge: 'Local', dotColor: 'bg-slate-700',   local: true },
 ];
 
-const CLOUD_PROVIDERS = PROVIDERS.filter((p) => !p.local);
-const LOCAL_PROVIDERS_LIST = PROVIDERS.filter((p) => p.local);
 const LOCAL_IDS = new Set<Provider>(['ollama', 'llamacpp']);
 
 const API_KEY_PLACEHOLDERS: Record<Provider, string> = {
@@ -100,15 +99,6 @@ function normalizeSettings(input: AISettings): AISettings {
 
 // ── Small UI helpers ───────────────────────────────────────────────────────────
 
-function Chevron({ open }: { open: boolean }) {
-  return (
-    <svg className={`w-4 h-4 text-slate-400 transition-transform flex-shrink-0 ${open ? 'rotate-180' : ''}`}
-      fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-    </svg>
-  );
-}
-
 function EyeIcon({ visible }: { visible: boolean }) {
   if (visible) return (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -141,28 +131,6 @@ function Spinner() {
   );
 }
 
-function Section({ title, subtitle, open, onToggle, children }: {
-  title: string; subtitle?: string; open: boolean; onToggle: () => void; children: ReactNode;
-}) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
-      <button type="button" onClick={onToggle}
-        className="w-full px-4 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-slate-50 transition-colors">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-slate-800">{title}</p>
-          {subtitle && <p className="text-xs text-slate-500 mt-0.5 truncate">{subtitle}</p>}
-        </div>
-        <Chevron open={open} />
-      </button>
-      <div className={`grid transition-[grid-template-rows] duration-300 ${open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-        <div className="overflow-hidden">
-          <div className="px-4 pb-5 pt-2 border-t border-slate-100">{children}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function SettingsPanel({ open, onClose, onSaved }: Props) {
@@ -172,17 +140,16 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     pdf_save_enabled: false, pdf_save_path: null, sci_hub_enabled: false, http_proxy: null,
   }));
 
-  const [sections,         setSections]         = useState<Record<SectionKey, boolean>>({ ai: true, pdf: false, scihub: false });
-  const [cardExpanded,     setCardExpanded]     = useState<Partial<Record<Provider, boolean>>>({ openai: true });
-  const [showKey,          setShowKey]          = useState<Partial<Record<Provider, boolean>>>({});
-  const [revealingKey,     setRevealingKey]     = useState<Partial<Record<Provider, boolean>>>({});
-  const [saveState,        setSaveState]        = useState<SaveState>('idle');
-  const [saveError,        setSaveError]        = useState('');
-  const [testState,        setTestState]        = useState<TestState>('idle');
-  const [testMessage,      setTestMessage]      = useState('');
-  const [modelsLoading,    setModelsLoading]    = useState<Partial<Record<Provider, boolean>>>({});
-  const [modelSource,      setModelSource]      = useState<Partial<Record<Provider, string>>>({});
-  const [dynamicModels,    setDynamicModels]    = useState<Partial<Record<Provider, ProviderModelOption[]>>>({});
+  const [view,          setView]          = useState<View>('menu');
+  const [showKey,       setShowKey]       = useState<Partial<Record<Provider, boolean>>>({});
+  const [revealingKey,  setRevealingKey]  = useState<Partial<Record<Provider, boolean>>>({});
+  const [saveState,     setSaveState]     = useState<SaveState>('idle');
+  const [saveError,     setSaveError]     = useState('');
+  const [testState,     setTestState]     = useState<TestState>('idle');
+  const [testMessage,   setTestMessage]   = useState('');
+  const [modelsLoading, setModelsLoading] = useState<Partial<Record<Provider, boolean>>>({});
+  const [modelSource,   setModelSource]   = useState<Partial<Record<Provider, string>>>({});
+  const [dynamicModels, setDynamicModels] = useState<Partial<Record<Provider, ProviderModelOption[]>>>({});
 
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -193,12 +160,10 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
 
   useEffect(() => {
     if (!open) return;
+    setView('menu');
+    setTestState('idle');
     fetchSettings()
-      .then((s) => {
-        const norm = normalizeSettings(s);
-        setSettings(norm);
-        setCardExpanded({ [norm.provider as Provider]: true });
-      })
+      .then((s) => setSettings(normalizeSettings(s)))
       .catch(() => {});
   }, [open]);
 
@@ -210,13 +175,16 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open, onClose]);
 
+  // Auto-fetch models when entering a provider detail view
+  useEffect(() => {
+    if (!view.startsWith('ai:')) return;
+    const pid = view.slice(3) as Provider;
+    void loadModels(pid, false);
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!open) return null;
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
-
-  function toggleSection(key: SectionKey) {
-    setSections((p) => ({ ...p, [key]: !p[key] }));
-  }
 
   function updateConfig(provider: Provider, patch: Partial<ProviderConfigEntry>) {
     setSettings((prev) => {
@@ -246,14 +214,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       has_api_key: cfg.has_api_key ?? false,
       provider_configs: { ...providerConfigs, [provider]: { ...cfg, base_url: cfg.base_url ?? defaultBaseUrl(provider) } },
     }));
-    setCardExpanded((p) => ({ ...p, [provider]: true }));
     setTestState('idle');
-  }
-
-  function toggleCard(provider: Provider) {
-    const willOpen = !cardExpanded[provider];
-    setCardExpanded((p) => ({ ...p, [provider]: willOpen }));
-    if (willOpen) void loadModels(provider, false);
   }
 
   async function handleRevealKey(provider: Provider) {
@@ -327,7 +288,6 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       const result = await testSettings(buildPayload());
       setTestState('ok');
       setTestMessage(result.message);
-      // Auto-save on successful test so the provider is always persisted to DB.
       void handleSave();
     } catch (err: unknown) {
       setTestState('fail');
@@ -337,206 +297,478 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     }
   }
 
-  // ── Per-provider card ────────────────────────────────────────────────────────
+  // ── Back-button header ───────────────────────────────────────────────────────
 
-  function ProviderCard({ p }: { p: typeof PROVIDERS[0] }) {
-    const cfg      = providerConfigs[p.id];
-    const isActive = activeProvider === p.id;
-    const isLocal  = LOCAL_IDS.has(p.id);
-    const hasKey   = cfg?.has_api_key || Boolean(cfg?.api_key);
-    const expanded = Boolean(cardExpanded[p.id]);
-    const modelList = (dynamicModels[p.id]?.length ? dynamicModels[p.id] : PROVIDER_MODELS[p.id]) ?? [];
-    const currentModel = cfg?.model || PROVIDER_DEFAULT_MODEL[p.id];
-
+  function SubHeader({ title, onBack }: { title: string; onBack: () => void }) {
     return (
-      <div className={`rounded-xl border overflow-hidden transition-shadow ${
-        isActive ? 'border-brand-400 shadow-sm' : 'border-slate-200'
-      }`}>
-
-        {/* Card header */}
-        <button type="button" onClick={() => toggleCard(p.id)}
-          className={`w-full px-3 py-2.5 flex items-center gap-2.5 text-left transition-colors ${
-            expanded ? 'bg-slate-50' : 'bg-white hover:bg-slate-50'
-          }`}>
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${p.dotColor}`} />
-          <span className="text-sm font-medium text-slate-800 flex-1">{p.label}</span>
-
-          {/* Badges */}
-          <div className="flex items-center gap-1.5">
-            {isActive && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-100 text-brand-700 font-semibold">
-                Active
-              </span>
-            )}
-            {!isLocal && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                hasKey ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-              }`}>
-                {hasKey ? '✓ Key saved' : 'No key'}
-              </span>
-            )}
-            {isLocal && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 font-medium">
-                Local
-              </span>
-            )}
-            <span className="text-[11px] text-slate-400 max-w-[80px] truncate hidden sm:block">
-              {currentModel}
-            </span>
-          </div>
-          <Chevron open={expanded} />
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 bg-white flex-shrink-0">
+        <button type="button" onClick={onBack}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 transition-colors flex-shrink-0">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
         </button>
+        <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
+      </div>
+    );
+  }
 
-        {/* Expanded body */}
-        <div className={`grid transition-[grid-template-rows] duration-200 ${expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-          <div className="overflow-hidden">
-            <div className="border-t border-slate-100 bg-white px-3 pb-3 pt-3 space-y-3">
+  // ── VIEW: Menu (root) ────────────────────────────────────────────────────────
 
-              {/* Set as active */}
-              {!isActive && (
-                <button type="button" onClick={() => switchActiveProvider(p.id)}
-                  className="w-full text-xs px-3 py-1.5 rounded-lg bg-brand-50 border border-brand-200 text-brand-700 font-medium hover:bg-brand-100 transition-colors">
-                  Use {p.label} as active provider
-                </button>
-              )}
+  const activeP     = PROVIDERS.find((p) => p.id === activeProvider)!;
+  const pdfSummary  = settings.pdf_save_enabled ? (settings.pdf_save_path || 'Enabled') : 'Disabled';
+  const sciSummary  = settings.sci_hub_enabled  ? 'Enabled' : 'Disabled';
 
-              {/* API Key — cloud always; llama.cpp optional; ollama not shown */}
-              {p.id !== 'ollama' && (
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">
-                    {isLocal ? 'API Key (optional)' : 'API Key'}
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showKey[p.id] ? 'text' : 'password'}
-                      value={cfg?.api_key || ''}
-                      onChange={(e) => updateConfig(p.id, { api_key: e.target.value, has_api_key: Boolean(e.target.value) })}
-                      placeholder={API_KEY_PLACEHOLDERS[p.id]}
-                      className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 pr-14 text-sm font-mono bg-white focus:outline-none focus:border-brand-500"
-                    />
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                      {revealingKey[p.id] && <Spinner />}
-                      <button type="button" onClick={() => void handleRevealKey(p.id)}
-                        title={showKey[p.id] ? 'Hide key' : hasKey ? 'Load saved key' : 'Show / hide'}
-                        className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">
-                        <EyeIcon visible={Boolean(showKey[p.id])} />
-                      </button>
-                    </div>
-                  </div>
-                  {!cfg?.api_key && cfg?.has_api_key && (
-                    <p className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-                      Key saved in database — click the eye icon to load it into this field.
-                    </p>
-                  )}
-                  {p.id === 'gemini' && (
-                    <p className="text-[11px] text-slate-500 mt-1.5">
-                      Free API key —{' '}
-                      <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
-                        className="text-blue-600 hover:underline">
-                        get one at aistudio.google.com
-                      </a>
-                    </p>
-                  )}
-                  {p.id === 'openai' && (
-                    <p className="text-[11px] text-slate-500 mt-1.5">
-                      API key required —{' '}
-                      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
-                        className="text-blue-600 hover:underline">
-                        get one at platform.openai.com
-                      </a>
-                    </p>
-                  )}
-                </div>
-              )}
+  const MENU_ITEMS = [
+    {
+      key: 'ai' as const,
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+            d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+      ),
+      label: 'AI Provider',
+      subtitle: `${activeP.label} · ${providerConfigs[activeProvider]?.model || PROVIDER_DEFAULT_MODEL[activeProvider]}`,
+      badge: 'Active',
+    },
+    {
+      key: 'pdf' as const,
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+            d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+        </svg>
+      ),
+      label: 'PDF Folder Path',
+      subtitle: pdfSummary,
+      badge: null,
+    },
+    {
+      key: 'scihub' as const,
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+            d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+        </svg>
+      ),
+      label: 'Sci-Hub',
+      subtitle: sciSummary,
+      badge: null,
+    },
+  ] as const;
 
-              {/* Host URL for local providers */}
-              {isLocal && (
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">
-                    {p.id === 'ollama' ? 'Ollama Host URL' : 'llama.cpp Server URL'}
-                  </label>
-                  <input
-                    type="text"
-                    value={cfg?.base_url ?? defaultBaseUrl(p.id) ?? ''}
-                    onChange={(e) => updateConfig(p.id, { base_url: e.target.value || null })}
-                    placeholder={defaultBaseUrl(p.id) ?? 'http://localhost:11434'}
-                    className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm font-mono bg-white focus:outline-none focus:border-brand-500"
-                  />
-                </div>
-              )}
-
-              {/* Model selector */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Model</label>
-                  <div className="flex items-center gap-1.5">
-                    {modelSource[p.id] && (
-                      <span className="text-[10px] text-slate-400">
-                        {modelSource[p.id] === 'api' ? 'Loaded from API' : 'Fallback list'}
-                      </span>
-                    )}
-                    <button type="button" onClick={() => void loadModels(p.id, true)}
-                      disabled={Boolean(modelsLoading[p.id])}
-                      className="text-[11px] px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 transition-colors flex items-center gap-1">
-                      {modelsLoading[p.id] ? <><Spinner /> Loading…</> : '↻ Refresh'}
-                    </button>
-                  </div>
-                </div>
-
-                <select
-                  value={currentModel}
-                  onChange={(e) => updateConfig(p.id, { model: e.target.value })}
-                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm bg-white focus:outline-none focus:border-brand-500">
-                  {modelList.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-
-                {/* Manual model entry for local providers */}
-                {isLocal && (
-                  <input
-                    type="text"
-                    value={currentModel}
-                    onChange={(e) => updateConfig(p.id, { model: e.target.value })}
-                    placeholder="Or type model name (e.g. qwen2.5:7b, llama3.2)"
-                    className="mt-2 w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm font-mono bg-white focus:outline-none focus:border-brand-500"
-                  />
-                )}
+  function MenuView() {
+    return (
+      <div className="flex-1 overflow-y-auto">
+        <div className="px-4 py-5 space-y-2">
+          {MENU_ITEMS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setView(item.key as View)}
+              className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-200 bg-white hover:border-brand-300 hover:shadow-sm transition-all text-left group"
+            >
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
+                style={{ background: 'var(--gold-faint)', color: 'var(--gold)' }}>
+                {item.icon}
               </div>
-
-            </div>
-          </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-slate-800">{item.label}</p>
+                <p className="text-xs text-slate-500 mt-0.5 truncate">{item.subtitle}</p>
+              </div>
+              <svg className="w-4 h-4 text-slate-400 group-hover:text-slate-600 flex-shrink-0 transition-colors"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          ))}
         </div>
       </div>
     );
   }
 
-  // ── Summary strings for section headers ──────────────────────────────────────
+  // ── VIEW: AI Provider list ───────────────────────────────────────────────────
 
-  const aiSummary  = `${activeProvider.toUpperCase()} · ${providerConfigs[activeProvider]?.model || PROVIDER_DEFAULT_MODEL[activeProvider]}`;
-  const pdfSummary = settings.pdf_save_enabled ? (settings.pdf_save_path || 'Enabled (path not set)') : 'Disabled';
-  const sciSummary = settings.sci_hub_enabled  ? (settings.http_proxy ? 'Enabled + proxy' : 'Enabled') : 'Disabled';
+  function AIListView() {
+    return (
+      <>
+        <SubHeader title="AI Provider" onBack={() => setView('menu')} />
+        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-2">
+          {PROVIDERS.map((p) => {
+            const cfg      = providerConfigs[p.id];
+            const isActive = activeProvider === p.id;
+            const hasKey   = cfg?.has_api_key || Boolean(cfg?.api_key);
+            const model    = cfg?.model || PROVIDER_DEFAULT_MODEL[p.id];
+
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setView(`ai:${p.id}` as View)}
+                className={`w-full flex items-center gap-4 px-4 py-4 rounded-2xl border transition-all text-left group ${
+                  isActive
+                    ? 'border-brand-400 bg-brand-50'
+                    : 'border-slate-200 bg-white hover:border-brand-300 hover:shadow-sm'
+                }`}
+              >
+                {/* Color dot */}
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                  isActive ? 'bg-brand-600' : 'bg-slate-100'
+                }`}>
+                  <span className={`w-3 h-3 rounded-full ${isActive ? 'bg-white' : p.dotColor}`} />
+                </div>
+
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-sm font-semibold ${isActive ? 'text-brand-800' : 'text-slate-800'}`}>
+                      {p.label}
+                    </span>
+                    {isActive && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-bold"
+                        style={{ background: 'var(--gold)', color: '#fff' }}>
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-xs text-slate-500 truncate">{model}</span>
+                    {!p.local && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ${
+                        hasKey ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'
+                      }`}>
+                        {hasKey ? '✓ Key saved' : 'No key'}
+                      </span>
+                    )}
+                    {p.local && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400 font-medium flex-shrink-0">
+                        Local
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <svg className={`w-4 h-4 flex-shrink-0 transition-colors ${
+                  isActive ? 'text-brand-400' : 'text-slate-400 group-hover:text-slate-600'
+                }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            );
+          })}
+        </div>
+      </>
+    );
+  }
+
+  // ── VIEW: Provider detail ────────────────────────────────────────────────────
+
+  function ProviderDetailView({ pid }: { pid: Provider }) {
+    const p        = PROVIDERS.find((x) => x.id === pid)!;
+    const cfg      = providerConfigs[pid];
+    const isActive = activeProvider === pid;
+    const isLocal  = LOCAL_IDS.has(pid);
+    const hasKey   = cfg?.has_api_key || Boolean(cfg?.api_key);
+    const modelList = (dynamicModels[pid]?.length ? dynamicModels[pid] : PROVIDER_MODELS[pid]) ?? [];
+    const currentModel = cfg?.model || PROVIDER_DEFAULT_MODEL[pid];
+
+    return (
+      <>
+        <SubHeader title={p.label} onBack={() => setView('ai')} />
+
+        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
+
+          {/* Active status card */}
+          <div className={`rounded-2xl p-4 border flex items-center gap-3 ${
+            isActive
+              ? 'border-brand-300 bg-brand-50'
+              : 'border-slate-200 bg-white'
+          }`}>
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
+              isActive ? 'bg-brand-600' : 'bg-slate-100'
+            }`}>
+              <span className={`w-3 h-3 rounded-full ${isActive ? 'bg-white' : p.dotColor}`} />
+            </div>
+            <div className="flex-1">
+              <p className={`text-sm font-semibold ${isActive ? 'text-brand-800' : 'text-slate-700'}`}>
+                {isActive ? `${p.label} is your active provider` : `Switch to ${p.label}`}
+              </p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {isActive ? 'All AI generation uses this provider.' : 'Save settings to switch.'}
+              </p>
+            </div>
+            {!isActive && (
+              <button type="button"
+                onClick={() => switchActiveProvider(pid)}
+                className="text-xs px-3 py-1.5 rounded-xl font-semibold transition-colors flex-shrink-0"
+                style={{ background: 'var(--gold)', color: '#fff' }}>
+                Set Active
+              </button>
+            )}
+          </div>
+
+          {/* API Key */}
+          {pid !== 'ollama' && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                {isLocal ? 'API Key (optional)' : 'API Key'}
+              </label>
+              <div className="relative">
+                <input
+                  type={showKey[pid] ? 'text' : 'password'}
+                  value={cfg?.api_key || ''}
+                  onChange={(e) => updateConfig(pid, { api_key: e.target.value, has_api_key: Boolean(e.target.value) })}
+                  placeholder={API_KEY_PLACEHOLDERS[pid]}
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 pr-12 text-sm font-mono bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                />
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                  {revealingKey[pid] && <Spinner />}
+                  <button type="button" onClick={() => void handleRevealKey(pid)}
+                    title={showKey[pid] ? 'Hide key' : hasKey ? 'Load saved key' : 'Show / hide'}
+                    className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">
+                    <EyeIcon visible={Boolean(showKey[pid])} />
+                  </button>
+                </div>
+              </div>
+              {!cfg?.api_key && cfg?.has_api_key && (
+                <p className="text-[11px] text-emerald-600 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                  Key saved — click the eye icon to load it.
+                </p>
+              )}
+              {pid === 'gemini' && (
+                <p className="text-[11px] text-slate-500">
+                  Free API key —{' '}
+                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+                    className="underline" style={{ color: 'var(--gold)' }}>
+                    get one at aistudio.google.com
+                  </a>
+                </p>
+              )}
+              {pid === 'openai' && (
+                <p className="text-[11px] text-slate-500">
+                  <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
+                    className="underline" style={{ color: 'var(--gold)' }}>
+                    platform.openai.com/api-keys
+                  </a>
+                </p>
+              )}
+              {pid === 'claude' && (
+                <p className="text-[11px] text-slate-500">
+                  <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer"
+                    className="underline" style={{ color: 'var(--gold)' }}>
+                    console.anthropic.com
+                  </a>
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Host URL for local providers */}
+          {isLocal && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                {pid === 'ollama' ? 'Ollama Host URL' : 'llama.cpp Server URL'}
+              </label>
+              <input
+                type="text"
+                value={cfg?.base_url ?? defaultBaseUrl(pid) ?? ''}
+                onChange={(e) => updateConfig(pid, { base_url: e.target.value || null })}
+                placeholder={defaultBaseUrl(pid) ?? 'http://localhost:11434'}
+                className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm font-mono bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+              />
+            </div>
+          )}
+
+          {/* Model selector */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Model</label>
+              <button type="button" onClick={() => void loadModels(pid, true)}
+                disabled={Boolean(modelsLoading[pid])}
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1">
+                {modelsLoading[pid] ? <><Spinner /> Fetching…</> : '↻ Fetch models'}
+              </button>
+            </div>
+
+            {modelSource[pid] && (
+              <p className="text-[10px] text-slate-400">
+                {modelSource[pid] === 'api' ? 'Fetched live from API' : 'Using fallback list'}
+              </p>
+            )}
+
+            <select
+              value={currentModel}
+              onChange={(e) => updateConfig(pid, { model: e.target.value })}
+              className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors">
+              {modelList.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+
+            {isLocal && (
+              <>
+                <p className="text-[10px] text-slate-400 -mt-1">Or type a model name manually:</p>
+                <input
+                  type="text"
+                  value={currentModel}
+                  onChange={(e) => updateConfig(pid, { model: e.target.value })}
+                  placeholder="e.g. qwen2.5:7b, llama3.2"
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm font-mono bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                />
+              </>
+            )}
+          </div>
+
+          {/* Test result */}
+          {testState !== 'idle' && (
+            <div className={`rounded-2xl border px-4 py-3 text-sm ${
+              testState === 'ok'   ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+              : testState === 'fail' ? 'bg-rose-50 border-rose-200 text-rose-700'
+              : 'bg-slate-50 border-slate-200 text-slate-500'
+            }`}>
+              {testState === 'testing'
+                ? <span className="flex items-center gap-2"><Spinner /> Testing connection…</span>
+                : testMessage}
+            </div>
+          )}
+        </div>
+
+        {/* Footer: test + save */}
+        {saveState === 'error' && saveError && (
+          <div className="mx-4 mb-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            Save failed: {saveError}
+          </div>
+        )}
+        <div className="px-4 py-4 border-t border-slate-200 bg-white flex gap-3 flex-shrink-0">
+          <button type="button" onClick={() => void handleTest()} disabled={testState === 'testing'}
+            className="flex-1 px-4 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition-colors">
+            {testState === 'testing' ? 'Testing…' : 'Test Connection'}
+          </button>
+          <button type="button" onClick={() => void handleSave()} disabled={saveState === 'saving'}
+            className="flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-colors"
+            style={{ background: 'var(--gold)' }}>
+            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : saveState === 'error' ? 'Retry' : 'Save'}
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  // ── VIEW: PDF ────────────────────────────────────────────────────────────────
+
+  function PDFView() {
+    return (
+      <>
+        <SubHeader title="PDF Folder Path" onBack={() => setView('menu')} />
+        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+            <div className="flex items-start gap-3">
+              <Toggle
+                checked={Boolean(settings.pdf_save_enabled)}
+                onChange={() => setSettings((s) => ({ ...s, pdf_save_enabled: !s.pdf_save_enabled }))}
+              />
+              <div>
+                <p className="text-sm font-semibold text-slate-800">Save downloaded PDFs to disk</p>
+                <p className="text-xs text-slate-500 mt-0.5">Store PDFs and BibTeX in a local folder.</p>
+              </div>
+            </div>
+            {settings.pdf_save_enabled && (
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Folder path
+                </label>
+                <input
+                  type="text"
+                  value={settings.pdf_save_path ?? ''}
+                  onChange={(e) => setSettings((s) => ({ ...s, pdf_save_path: e.target.value || null }))}
+                  placeholder="/Users/you/Research/Papers"
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm font-mono bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="px-4 py-4 border-t border-slate-200 bg-white flex-shrink-0">
+          <button type="button" onClick={() => void handleSave()} disabled={saveState === 'saving'}
+            className="w-full px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-colors"
+            style={{ background: 'var(--gold)' }}>
+            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : 'Save'}
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  // ── VIEW: Sci-Hub ────────────────────────────────────────────────────────────
+
+  function SciHubView() {
+    return (
+      <>
+        <SubHeader title="Sci-Hub" onBack={() => setView('menu')} />
+        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+            <div className="flex items-start gap-3">
+              <Toggle
+                checked={Boolean(settings.sci_hub_enabled)}
+                onChange={() => setSettings((s) => ({ ...s, sci_hub_enabled: !s.sci_hub_enabled }))}
+              />
+              <div>
+                <p className="text-sm font-semibold text-slate-800">Use Sci-Hub for paywalled papers</p>
+                <p className="text-xs mt-0.5" style={{ color: '#b45309' }}>
+                  Use responsibly and in accordance with your institution's policies.
+                </p>
+              </div>
+            </div>
+            {settings.sci_hub_enabled && (
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  HTTP Proxy (optional)
+                </label>
+                <input
+                  type="text"
+                  value={settings.http_proxy ?? ''}
+                  onChange={(e) => setSettings((s) => ({ ...s, http_proxy: e.target.value || null }))}
+                  placeholder="http://proxy.university.edu:8080"
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm font-mono bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                />
+                <p className="text-xs text-slate-500">For networks with restricted outbound access.</p>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="px-4 py-4 border-t border-slate-200 bg-white flex-shrink-0">
+          <button type="button" onClick={() => void handleSave()} disabled={saveState === 'saving'}
+            className="w-full px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-colors"
+            style={{ background: 'var(--gold)' }}>
+            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : 'Save'}
+          </button>
+        </div>
+      </>
+    );
+  }
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
+  const isProviderDetail = view.startsWith('ai:');
+  const detailPid = isProviderDetail ? (view.slice(3) as Provider) : null;
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm">
-      <div ref={panelRef} className="w-full max-w-2xl bg-slate-50 h-full shadow-2xl flex flex-col">
+      <div ref={panelRef} className="w-full max-w-sm bg-slate-50 h-full shadow-2xl flex flex-col">
 
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-white flex-shrink-0">
+        {/* Top header — always shown */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 bg-white flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center">
-              <svg className="w-4 h-4 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
+              style={{ background: 'var(--gold-faint)' }}>
+              <svg className="w-4 h-4" style={{ color: 'var(--gold)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </div>
-            <div>
-              <h2 className="font-semibold text-slate-800">Settings</h2>
-              <p className="text-xs text-slate-500">AI provider · PDF storage · Sci-Hub</p>
-            </div>
+            <h2 className="font-semibold text-slate-800 text-sm">Settings</h2>
           </div>
           <button type="button" onClick={onClose}
             className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors">
@@ -546,164 +778,12 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
           </button>
         </div>
 
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-
-          {/* ── Section 1: AI Provider ─────────────────────────────────────── */}
-          <Section title="AI Provider" subtitle={aiSummary}
-            open={sections.ai} onToggle={() => toggleSection('ai')}>
-            <div className="space-y-5 pt-1">
-
-              {/* Active provider pill row */}
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                  Active provider for AI generation
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {PROVIDERS.map((p) => (
-                    <button key={p.id} type="button" onClick={() => switchActiveProvider(p.id)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-sm font-medium transition-all ${
-                        activeProvider === p.id
-                          ? 'border-brand-500 bg-brand-600 text-white shadow-sm'
-                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                      }`}>
-                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                        activeProvider === p.id ? 'bg-white' : p.dotColor
-                      }`} />
-                      {p.label}
-                      <span className={`text-[10px] ${activeProvider === p.id ? 'text-brand-200' : 'text-slate-400'}`}>
-                        {p.badge}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Cloud providers */}
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
-                  Cloud Providers — set API keys &amp; models
-                </p>
-                <div className="space-y-2">
-                  {CLOUD_PROVIDERS.map((p) => <ProviderCard key={p.id} p={p} />)}
-                </div>
-              </div>
-
-              {/* Local providers */}
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
-                  Local Models
-                </p>
-                <div className="space-y-2">
-                  {LOCAL_PROVIDERS_LIST.map((p) => <ProviderCard key={p.id} p={p} />)}
-                </div>
-              </div>
-
-            </div>
-          </Section>
-
-          {/* ── Section 2: PDF Folder Path ──────────────────────────────────── */}
-          <Section title="PDF Folder Path" subtitle={pdfSummary}
-            open={sections.pdf} onToggle={() => toggleSection('pdf')}>
-            <div className="space-y-4 pt-1">
-              <div className="flex items-start gap-3">
-                <Toggle
-                  checked={Boolean(settings.pdf_save_enabled)}
-                  onChange={() => setSettings((s) => ({ ...s, pdf_save_enabled: !s.pdf_save_enabled }))}
-                />
-                <div>
-                  <p className="text-sm font-medium text-slate-700">Save downloaded PDFs to disk</p>
-                  <p className="text-xs text-slate-500 mt-0.5">Store PDFs and generated BibTeX in your chosen folder.</p>
-                </div>
-              </div>
-              {settings.pdf_save_enabled && (
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">
-                    Folder path
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.pdf_save_path ?? ''}
-                    onChange={(e) => setSettings((s) => ({ ...s, pdf_save_path: e.target.value || null }))}
-                    placeholder="/Users/you/Research/Papers"
-                    className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm font-mono bg-white focus:outline-none focus:border-brand-500"
-                  />
-                </div>
-              )}
-            </div>
-          </Section>
-
-          {/* ── Section 3: Sci-Hub ──────────────────────────────────────────── */}
-          <Section title="Sci-Hub" subtitle={sciSummary}
-            open={sections.scihub} onToggle={() => toggleSection('scihub')}>
-            <div className="space-y-4 pt-1">
-              <div className="flex items-start gap-3">
-                <Toggle
-                  checked={Boolean(settings.sci_hub_enabled)}
-                  onChange={() => setSettings((s) => ({ ...s, sci_hub_enabled: !s.sci_hub_enabled }))}
-                />
-                <div>
-                  <p className="text-sm font-medium text-slate-700">Use Sci-Hub for paywalled papers</p>
-                  <p className="text-xs text-amber-700 mt-0.5">
-                    Use responsibly and in accordance with your institution's policies.
-                  </p>
-                </div>
-              </div>
-              {settings.sci_hub_enabled && (
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">
-                    HTTP Proxy (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.http_proxy ?? ''}
-                    onChange={(e) => setSettings((s) => ({ ...s, http_proxy: e.target.value || null }))}
-                    placeholder="http://proxy.university.edu:8080"
-                    className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm font-mono bg-white focus:outline-none focus:border-brand-500"
-                  />
-                  <p className="mt-1.5 text-xs text-slate-500">
-                    Optional — for networks with restricted outbound access.
-                  </p>
-                </div>
-              )}
-            </div>
-          </Section>
-
-          {/* Test result banner */}
-          {testState !== 'idle' && (
-            <div className={`rounded-xl border px-4 py-3 text-sm ${
-              testState === 'ok'
-                ? 'bg-green-50 border-green-200 text-green-700'
-                : testState === 'fail'
-                  ? 'bg-rose-50 border-rose-200 text-rose-700'
-                  : 'bg-slate-50 border-slate-200 text-slate-500'
-            }`}>
-              {testState === 'testing' ? (
-                <span className="flex items-center gap-2"><Spinner /> Testing connection…</span>
-              ) : testMessage}
-            </div>
-          )}
-
-        </div>
-
-        {/* Save-error banner */}
-        {saveState === 'error' && saveError && (
-          <div className="mx-6 mb-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-            Save failed: {saveError}
-          </div>
-        )}
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-200 bg-white flex gap-3 flex-shrink-0">
-          <button type="button" onClick={() => void handleTest()} disabled={testState === 'testing'}
-            className="flex-1 px-4 py-2.5 rounded-xl border-2 border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition-colors">
-            {testState === 'testing' ? 'Testing…' : 'Test Connection'}
-          </button>
-          <button type="button" onClick={() => void handleSave()} disabled={saveState === 'saving'}
-            className="flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-40 transition-colors">
-            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : saveState === 'error' ? 'Retry Save' : 'Save Settings'}
-          </button>
-        </div>
+        {/* View content */}
+        {view === 'menu'    && <MenuView />}
+        {view === 'ai'      && <AIListView />}
+        {view === 'pdf'     && <PDFView />}
+        {view === 'scihub'  && <SciHubView />}
+        {detailPid          && <ProviderDetailView pid={detailPid} />}
 
       </div>
     </div>

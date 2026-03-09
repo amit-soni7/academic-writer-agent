@@ -5,29 +5,35 @@ interface Props {
   onChange: (mode: ArticleMode) => void;
 }
 
-const options: { value: ArticleMode; label: string; description: string; icon: string }[] = [
+const options: { value: ArticleMode; label: string; description: string; glyph: string }[] = [
   {
     value: 'novel',
     label: 'Novel Submission',
     description: 'Writing a new, original manuscript from scratch for first submission.',
-    icon: '✦',
+    glyph: '✦',
   },
   {
     value: 'revision',
-    label: 'Revision',
-    description: 'Revising a manuscript in response to peer-review feedback.',
-    icon: '↺',
+    label: 'Peer-Review Revision',
+    description: 'Revising a manuscript in response to reviewer feedback and editorial decision.',
+    glyph: '↺',
   },
 ];
 
 export default function StepOne({ value, onChange }: Props) {
   return (
     <div>
-      <h2 className="text-xl font-semibold text-slate-800 mb-1">What are you working on?</h2>
-      <p className="text-sm text-slate-500 mb-6">
-        Select the stage of your manuscript to tailor the pipeline accordingly.
+      <h2
+        className="text-2xl font-light mb-1 leading-snug"
+        style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', color: 'var(--text-bright)' }}
+      >
+        What are you working on?
+      </h2>
+      <p className="text-sm text-slate-500 mb-7 leading-relaxed">
+        Select the stage of your manuscript to tailor the AI pipeline accordingly.
       </p>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {options.map((opt) => {
           const isSelected = value === opt.value;
           return (
@@ -36,29 +42,49 @@ export default function StepOne({ value, onChange }: Props) {
               type="button"
               onClick={() => onChange(opt.value)}
               className={`
-                text-left p-5 rounded-xl border-2 transition-all duration-200 focus:outline-none
-                focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2
+                relative text-left p-5 rounded-lg border transition-all duration-200
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500
                 ${isSelected
-                  ? 'border-brand-600 bg-brand-50 shadow-sm'
-                  : 'border-slate-200 bg-white hover:border-brand-300 hover:shadow-sm'
+                  ? 'border-brand-500 bg-brand-50'
+                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-100'
                 }
               `}
+              style={isSelected ? { boxShadow: '0 0 0 1px var(--gold), inset 0 1px 0 rgba(30,58,95,0.06)' } : undefined}
             >
-              <span className={`text-2xl mb-3 block ${isSelected ? 'text-brand-600' : 'text-slate-400'}`}>
-                {opt.icon}
+              {/* Glyph */}
+              <span
+                className="block text-3xl mb-4 leading-none font-light select-none"
+                style={{
+                  fontFamily: 'Georgia, serif',
+                  color: isSelected ? 'var(--gold)' : 'var(--text-muted)',
+                  transition: 'color 0.2s',
+                }}
+              >
+                {opt.glyph}
               </span>
-              <span className={`block font-semibold mb-1 ${isSelected ? 'text-brand-700' : 'text-slate-700'}`}>
+
+              {/* Label */}
+              <span
+                className="block font-semibold text-sm mb-1.5 leading-tight"
+                style={{ color: isSelected ? 'var(--gold-light)' : 'var(--text-body)' }}
+              >
                 {opt.label}
               </span>
-              <span className="block text-sm text-slate-500 leading-relaxed">
+
+              {/* Description */}
+              <span className="block text-xs text-slate-500 leading-relaxed">
                 {opt.description}
               </span>
+
+              {/* Selected indicator */}
               {isSelected && (
-                <span className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-brand-600">
-                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                <span
+                  className="absolute top-3 right-3 w-5 h-5 rounded-full flex items-center justify-center"
+                  style={{ background: 'var(--gold)', color: '#ffffff' }}
+                >
+                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  Selected
                 </span>
               )}
             </button>

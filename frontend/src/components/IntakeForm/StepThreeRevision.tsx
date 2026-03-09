@@ -60,14 +60,14 @@ function JournalStyleCard({ style }: { style: JournalStyle }) {
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5">
         {rows.map(({ label, value }) => (
           <div key={label} className="col-span-1">
-            <dt className="text-xs text-brand-600 font-medium">{label}</dt>
+            <dt className="text-xs text-brand-500 font-medium">{label}</dt>
             <dd className="text-xs text-slate-700 capitalize">{value.replace(/_/g, ' ')}</dd>
           </div>
         ))}
       </dl>
       {style.accepted_article_types.length > 0 && (
         <div>
-          <p className="text-xs text-brand-600 font-medium mb-1">Accepted types</p>
+          <p className="text-xs text-brand-500 font-medium mb-1">Accepted types</p>
           <div className="flex flex-wrap gap-1">
             {style.accepted_article_types.slice(0, 6).map((t) => (
               <span key={t} className="text-xs bg-white border border-brand-200 text-brand-700 px-2 py-0.5 rounded-full">

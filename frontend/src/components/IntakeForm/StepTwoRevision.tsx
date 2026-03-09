@@ -82,7 +82,7 @@ export default function StepTwoRevision({
           <button
             type="button"
             onClick={() => manuscriptFileRef.current?.click()}
-            className="text-xs font-medium text-brand-600 hover:text-brand-800 underline underline-offset-2"
+            className="text-xs font-medium text-brand-500 hover:text-brand-400 underline underline-offset-2"
           >
             {manuscriptFile ? '↺ Replace .docx' : '↑ Upload .docx instead'}
           </button>
@@ -142,7 +142,7 @@ export default function StepTwoRevision({
           <button
             type="button"
             onClick={() => commentsFileRef.current?.click()}
-            className="text-xs font-medium text-brand-600 hover:text-brand-800 underline underline-offset-2"
+            className="text-xs font-medium text-brand-500 hover:text-brand-400 underline underline-offset-2"
           >
             {reviewerCommentsFile ? '↺ Replace .docx' : '↑ Upload reviewer comment .docx'}
           </button>
