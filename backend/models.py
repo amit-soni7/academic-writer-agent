@@ -227,7 +227,12 @@ class CreateProjectRequest(BaseModel):
     article_type: Optional[str] = None
     project_description: Optional[str] = None
     project_name: Optional[str] = None   # tentative title slug from search strategy
-    project_type: Optional[str] = 'write'  # 'write' | 'revision'
+    project_type: Optional[str] = 'write'  # 'write' | 'revision' | 'systematic_review'
+    # SR-only fields (null/empty for non-SR projects)
+    pico: Optional[dict] = None
+    inclusion_criteria: list[str] = []
+    exclusion_criteria: list[str] = []
+    data_extraction_schema: list[dict] = []
 
 
 # Backward-compat alias
@@ -672,3 +677,119 @@ class CommentChangeSuggestion(BaseModel):
     response_snippet: str = ""
     ambiguity_flag: bool = False
     ambiguity_question: str = ""
+
+
+# ── Systematic Review Pipeline ─────────────────────────────────────────────────
+
+class PicoQuestion(BaseModel):
+    population: str = ""
+    intervention: str = ""
+    comparator: str = ""
+    outcome: str = ""
+    study_design: str = ""
+    setting: str = ""
+    time_frame: str = ""
+    language_restriction: str = ""
+    date_from: str = ""
+    date_to: str = ""
+    review_type: str = "systematic_review"  # systematic_review | meta_analysis | scoping_review
+    health_area: str = ""
+    target_registries: list[str] = []  # ["prospero","osf","campbell"]
+
+
+class SRExtractionField(BaseModel):
+    field: str
+    type: str = "text"   # text | number | boolean | list
+    required: bool = False
+    description: str = ""
+
+
+class CreateSRProjectRequest(BaseModel):
+    """Extended project creation request for SR projects."""
+    query: str
+    papers: list[Paper] = []
+    article_type: Optional[str] = "systematic_review"
+    project_description: Optional[str] = None
+    project_name: Optional[str] = None
+    project_type: str = "systematic_review"
+    pico: Optional[dict] = None
+    inclusion_criteria: list[str] = []
+    exclusion_criteria: list[str] = []
+    data_extraction_schema: list[dict] = []
+
+
+class SavePicoRequest(BaseModel):
+    pico: dict
+    inclusion_criteria: list[str] = []
+    exclusion_criteria: list[str] = []
+    data_extraction_schema: list[dict] = []
+
+
+class SRSearchRequest(BaseModel):
+    databases: list[str] = ["pubmed", "openalex", "semantic_scholar", "clinicaltrials"]
+    date_from: str = "2000-01-01"
+    date_to: str = ""
+    custom_queries: Optional[dict] = None   # Override AI-generated queries per DB
+
+
+class SRScreeningDecision(BaseModel):
+    stage: str   # title_abstract | full_text
+    decision: str   # include | exclude | uncertain
+    reason: str = ""
+    exclusion_reason_category: str = ""
+
+
+class SRConflictResolutionRequest(BaseModel):
+    stage: str
+    final_decision: str
+    resolution_notes: str = ""
+
+
+class SRExtractionSchemaRequest(BaseModel):
+    fields: list[dict]
+
+
+class SRHumanVerificationRequest(BaseModel):
+    human_verified: dict
+    extraction_notes: str = ""
+
+
+class SRRoBConfirmRequest(BaseModel):
+    human_assessment: dict
+    final_assessment: dict
+
+
+class SRMetaAnalysisRequest(BaseModel):
+    effect_measure: str = "OR"   # OR | RR | MD | SMD | RD
+    model: str = "random"         # fixed | random
+    subgroups: list[str] = []
+
+
+class SRScreeningResult(BaseModel):
+    paper_key: str
+    decision: str
+    confidence: float
+    reason: str
+    criteria_scores: dict = {}
+    key_quote: str = ""
+
+
+class PRISMAFlowCounts(BaseModel):
+    identified: int = 0
+    duplicates_removed: int = 0
+    screened: int = 0
+    excluded_screening: int = 0
+    sought_retrieval: int = 0
+    not_retrieved: int = 0
+    assessed_eligibility: int = 0
+    excluded_fulltext: int = 0
+    excluded_fulltext_reasons: dict = {}
+    included: int = 0
+
+
+class OSFRegistrationRequest(BaseModel):
+    osf_token: str
+
+
+class SRProtocolExportRequest(BaseModel):
+    format: str = "docx"   # docx | pdf | markdown

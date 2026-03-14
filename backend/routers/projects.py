@@ -155,20 +155,48 @@ class UpdateProjectNameRequest(BaseModel):
 @router.post("/projects", response_model=ProjectMeta)
 async def create_project_endpoint(payload: CreateProjectRequest, user=Depends(get_current_user)) -> ProjectMeta:
     """Create a new research project scoped to the current user."""
+    import json as _json
+    from services.db import create_engine_async as _eng, projects as _projects_tbl
+    from sqlalchemy import update as _update
+
     papers_dicts = [p.model_dump() for p in payload.papers]
     cfg = await load_settings_for_user(user["id"])
     project_type = payload.project_type or 'write'
     project_id = await create_project(
         user["id"], payload.query, papers_dicts,
-        article_type=payload.article_type,
+        article_type=payload.article_type or (
+            "systematic_review" if project_type == "systematic_review" else payload.article_type
+        ),
         project_description=payload.project_description,
         pdf_save_path=cfg.pdf_save_path,
         project_name=payload.project_name,
         project_type=project_type,
     )
     # Update phase based on project type
-    initial_phase = 'realrevision' if project_type == 'revision' else 'literature'
+    if project_type == 'revision':
+        initial_phase = 'realrevision'
+    elif project_type == 'systematic_review':
+        initial_phase = 'sr_protocol'
+    else:
+        initial_phase = 'literature'
     await update_project_phase(project_id, initial_phase)
+
+    # For SR projects, save PICO and criteria immediately
+    if project_type == 'systematic_review' and payload.pico is not None:
+        eng = _eng()
+        async with eng.begin() as conn:
+            await conn.execute(
+                _update(_projects_tbl)
+                .where(_projects_tbl.c.project_id == project_id)
+                .values(
+                    pico_question=_json.dumps(payload.pico),
+                    inclusion_criteria=_json.dumps(payload.inclusion_criteria),
+                    exclusion_criteria=_json.dumps(payload.exclusion_criteria),
+                    data_extraction_schema=_json.dumps(payload.data_extraction_schema),
+                    sr_current_stage="protocol",
+                )
+            )
+
     meta = await load_project(user["id"], project_id) or {}
     return ProjectMeta(
         project_id=project_id,

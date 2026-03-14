@@ -7,7 +7,11 @@ export async function createProject(
   articleType?: string,
   projectDescription?: string,
   tentativeTitle?: string,
-  projectType?: 'write' | 'revision',
+  projectType?: 'write' | 'revision' | 'systematic_review',
+  pico?: Record<string, unknown>,
+  inclusionCriteria?: string[],
+  exclusionCriteria?: string[],
+  dataExtractionSchema?: unknown[],
 ): Promise<ProjectMeta> {
   const { data } = await api.post<ProjectMeta>('/api/projects', {
     query,
@@ -16,6 +20,10 @@ export async function createProject(
     ...(projectDescription ? { project_description: projectDescription } : {}),
     ...(tentativeTitle ? { project_name: tentativeTitle } : {}),
     ...(projectType ? { project_type: projectType } : {}),
+    ...(pico ? { pico } : {}),
+    ...(inclusionCriteria ? { inclusion_criteria: inclusionCriteria } : {}),
+    ...(exclusionCriteria ? { exclusion_criteria: exclusionCriteria } : {}),
+    ...(dataExtractionSchema ? { data_extraction_schema: dataExtractionSchema } : {}),
   });
   return data;
 }

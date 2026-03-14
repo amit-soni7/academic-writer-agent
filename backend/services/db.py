@@ -13,6 +13,10 @@ papers(project_id, paper_key, data)
 summaries(project_id, paper_key, data, created_at)
 journal_recs(project_id, data, updated_at)
 
+SR Pipeline tables:
+sr_protocols, sr_search_runs, sr_screenings, sr_data_extraction,
+sr_risk_of_bias, sr_audit_log
+
 All JSON payloads are stored as JSONB for Postgres.
 """
 
@@ -24,7 +28,9 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    MetaData, Table, Column, String, Text, DateTime, ForeignKey, PrimaryKeyConstraint, text
+    MetaData, Table, Column, String, Text, DateTime, ForeignKey,
+    PrimaryKeyConstraint, Integer, Float, Boolean, UniqueConstraint, text,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -40,6 +46,7 @@ DATABASE_URL = os.getenv(
 )
 
 _IS_PG = DATABASE_URL.startswith("postgresql+") or DATABASE_URL.startswith("postgres+")
+_json_type = JSONB if _IS_PG else Text
 metadata = MetaData()
 
 users = Table(
@@ -72,9 +79,15 @@ projects = Table(
     Column("revision_wip", Text, nullable=True),
     Column("synthesis_result", Text, nullable=True),
     Column("peer_review_result", Text, nullable=True),
+    # SR pipeline columns
+    Column("pico_question", _json_type, nullable=True),
+    Column("inclusion_criteria", _json_type, nullable=True),
+    Column("exclusion_criteria", _json_type, nullable=True),
+    Column("data_extraction_schema", _json_type, nullable=True),
+    Column("sr_current_stage", String(50), nullable=True, server_default="protocol"),
+    # PRISMA-P 2015 structured data (all 17 items)
+    Column("prisma_p_data", _json_type, nullable=True),
 )
-
-_json_type = JSONB if _IS_PG else Text
 
 papers = Table(
     "papers", metadata,
@@ -135,6 +148,108 @@ screenings = Table(
     PrimaryKeyConstraint("project_id", "paper_key"),
 )
 
+# ── SR Pipeline tables ─────────────────────────────────────────────────────────
+
+sr_protocols = Table(
+    "sr_protocols", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE"), unique=True),
+    Column("pico", _json_type, nullable=False, server_default='{}'),
+    Column("prospero_fields", _json_type, server_default='{}'),
+    Column("prisma_p_checklist", _json_type, server_default='{}'),
+    Column("campbell_fields", _json_type, server_default='{}'),
+    Column("comet_cos_search", _json_type, server_default='{}'),
+    Column("osf_registration_id", String(50), nullable=True),
+    Column("osf_draft_id", String(50), nullable=True),
+    Column("registration_status", String(30), server_default="not_started"),
+    Column("protocol_document", Text, nullable=True),
+    Column("search_strategies", _json_type, server_default='{}'),
+    Column("evidence_pack", _json_type, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+)
+
+sr_search_runs = Table(
+    "sr_search_runs", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE")),
+    Column("run_date", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Column("databases_searched", _json_type),
+    Column("total_retrieved", Integer, default=0),
+    Column("after_dedup", Integer, default=0),
+    Column("prisma_counts", _json_type, server_default='{}'),
+    Column("status", String(20), server_default="running"),
+)
+
+sr_screenings = Table(
+    "sr_screenings", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE")),
+    Column("paper_key", String(100), nullable=False),
+    Column("screening_stage", String(20), nullable=False),
+    Column("reviewer1_decision", String(20), nullable=True),
+    Column("reviewer1_type", String(10), server_default="ai"),
+    Column("reviewer1_reason", Text, nullable=True),
+    Column("reviewer1_confidence", Float, nullable=True),
+    Column("reviewer1_criteria_scores", _json_type, server_default='{}'),
+    Column("reviewer2_decision", String(20), nullable=True),
+    Column("reviewer2_type", String(10), server_default="human"),
+    Column("reviewer2_reason", Text, nullable=True),
+    Column("final_decision", String(20), nullable=True),
+    Column("conflict_resolved_by", String(20), nullable=True),
+    Column("exclusion_reason_category", String(100), nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("project_id", "paper_key", "screening_stage", name="uq_sr_screenings"),
+)
+
+sr_data_extraction = Table(
+    "sr_data_extraction", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE")),
+    Column("paper_key", String(100), nullable=False),
+    Column("extraction_schema", _json_type, server_default='{}'),
+    Column("ai_extracted", _json_type, server_default='{}'),
+    Column("human_verified", _json_type, server_default='{}'),
+    Column("final_data", _json_type, server_default='{}'),
+    Column("extraction_notes", Text, nullable=True),
+    Column("verified_by_human", Boolean, server_default="false"),
+    Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("project_id", "paper_key", name="uq_sr_extraction"),
+)
+
+sr_risk_of_bias = Table(
+    "sr_risk_of_bias", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE")),
+    Column("paper_key", String(100), nullable=False),
+    Column("tool_used", String(50), server_default="rob2"),
+    Column("ai_assessment", _json_type, server_default='{}'),
+    Column("robotreviewer_assessment", _json_type, server_default='{}'),
+    Column("human_assessment", _json_type, server_default='{}'),
+    Column("final_assessment", _json_type, server_default='{}'),
+    Column("overall_risk", String(20), nullable=True),
+    Column("human_confirmed", Boolean, server_default="false"),
+    Column("created_at", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("project_id", "paper_key", name="uq_sr_rob"),
+)
+
+sr_audit_log = Table(
+    "sr_audit_log", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("project_id", String, ForeignKey("projects.project_id", ondelete="CASCADE")),
+    Column("paper_key", String(100), nullable=True),
+    Column("stage", String(50)),
+    Column("action", String(100)),
+    Column("ai_model", String(100)),
+    Column("prompt_hash", String(64)),
+    Column("response_summary", Text),
+    Column("human_override", Boolean, server_default="false"),
+    Column("timestamp", DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")),
+)
+
 
 _engine: Optional[AsyncEngine] = None
 
@@ -174,6 +289,10 @@ async def init_db(engine: Optional[AsyncEngine] = None) -> None:
     await _migrate_add_revision_wip(eng)
     await _migrate_add_write_result_columns(eng)
     await _migrate_add_screenings_table(eng)
+    await _migrate_add_sr_columns(eng)
+    await _migrate_add_sr_tables(eng)
+    await _migrate_add_prisma_p_data(eng)
+    await _migrate_add_evidence_pack(eng)
 
 
 async def _migrate_sessions_to_projects(eng: AsyncEngine) -> None:
@@ -412,6 +531,158 @@ async def _migrate_add_screenings_table(eng: AsyncEngine) -> None:
                 "  overridden TEXT NOT NULL DEFAULT 'false',"
                 "  PRIMARY KEY (project_id, paper_key)"
                 ")"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_sr_columns(eng: AsyncEngine) -> None:
+    """Add SR-specific columns to projects table if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS pico_question JSONB DEFAULT '{}'::jsonb;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS inclusion_criteria JSONB DEFAULT '[]'::jsonb;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS exclusion_criteria JSONB DEFAULT '[]'::jsonb;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS data_extraction_schema JSONB DEFAULT '[]'::jsonb;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS sr_current_stage TEXT DEFAULT 'protocol';"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_sr_tables(eng: AsyncEngine) -> None:
+    """Create all SR pipeline tables if they do not exist (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sr_protocols ("
+                "  id SERIAL PRIMARY KEY,"
+                "  project_id TEXT UNIQUE REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  pico JSONB NOT NULL DEFAULT '{}',"
+                "  prospero_fields JSONB DEFAULT '{}',"
+                "  prisma_p_checklist JSONB DEFAULT '{}',"
+                "  campbell_fields JSONB DEFAULT '{}',"
+                "  comet_cos_search JSONB DEFAULT '{}',"
+                "  osf_registration_id VARCHAR(50),"
+                "  osf_draft_id VARCHAR(50),"
+                "  registration_status VARCHAR(30) DEFAULT 'not_started',"
+                "  protocol_document TEXT,"
+                "  search_strategies JSONB DEFAULT '{}',"
+                "  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,"
+                "  updated_at TIMESTAMPTZ"
+                ")"
+            ))
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sr_search_runs ("
+                "  id SERIAL PRIMARY KEY,"
+                "  project_id TEXT REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  run_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,"
+                "  databases_searched JSONB,"
+                "  total_retrieved INTEGER DEFAULT 0,"
+                "  after_dedup INTEGER DEFAULT 0,"
+                "  prisma_counts JSONB DEFAULT '{}',"
+                "  status VARCHAR(20) DEFAULT 'running'"
+                ")"
+            ))
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sr_screenings ("
+                "  id SERIAL PRIMARY KEY,"
+                "  project_id TEXT REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  paper_key VARCHAR(100) NOT NULL,"
+                "  screening_stage VARCHAR(20) NOT NULL,"
+                "  reviewer1_decision VARCHAR(20),"
+                "  reviewer1_type VARCHAR(10) DEFAULT 'ai',"
+                "  reviewer1_reason TEXT,"
+                "  reviewer1_confidence FLOAT,"
+                "  reviewer1_criteria_scores JSONB DEFAULT '{}',"
+                "  reviewer2_decision VARCHAR(20),"
+                "  reviewer2_type VARCHAR(10) DEFAULT 'human',"
+                "  reviewer2_reason TEXT,"
+                "  final_decision VARCHAR(20),"
+                "  conflict_resolved_by VARCHAR(20),"
+                "  exclusion_reason_category VARCHAR(100),"
+                "  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,"
+                "  updated_at TIMESTAMPTZ,"
+                "  UNIQUE (project_id, paper_key, screening_stage)"
+                ")"
+            ))
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sr_data_extraction ("
+                "  id SERIAL PRIMARY KEY,"
+                "  project_id TEXT REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  paper_key VARCHAR(100) NOT NULL,"
+                "  extraction_schema JSONB DEFAULT '{}',"
+                "  ai_extracted JSONB DEFAULT '{}',"
+                "  human_verified JSONB DEFAULT '{}',"
+                "  final_data JSONB DEFAULT '{}',"
+                "  extraction_notes TEXT,"
+                "  verified_by_human BOOLEAN DEFAULT FALSE,"
+                "  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,"
+                "  updated_at TIMESTAMPTZ,"
+                "  UNIQUE (project_id, paper_key)"
+                ")"
+            ))
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sr_risk_of_bias ("
+                "  id SERIAL PRIMARY KEY,"
+                "  project_id TEXT REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  paper_key VARCHAR(100) NOT NULL,"
+                "  tool_used VARCHAR(50) DEFAULT 'rob2',"
+                "  ai_assessment JSONB DEFAULT '{}',"
+                "  robotreviewer_assessment JSONB DEFAULT '{}',"
+                "  human_assessment JSONB DEFAULT '{}',"
+                "  final_assessment JSONB DEFAULT '{}',"
+                "  overall_risk VARCHAR(20),"
+                "  human_confirmed BOOLEAN DEFAULT FALSE,"
+                "  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,"
+                "  updated_at TIMESTAMPTZ,"
+                "  UNIQUE (project_id, paper_key)"
+                ")"
+            ))
+            await conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS sr_audit_log ("
+                "  id SERIAL PRIMARY KEY,"
+                "  project_id TEXT REFERENCES projects(project_id) ON DELETE CASCADE,"
+                "  paper_key VARCHAR(100),"
+                "  stage VARCHAR(50),"
+                "  action VARCHAR(100),"
+                "  ai_model VARCHAR(100),"
+                "  prompt_hash VARCHAR(64),"
+                "  response_summary TEXT,"
+                "  human_override BOOLEAN DEFAULT FALSE,"
+                "  timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_prisma_p_data(eng: AsyncEngine) -> None:
+    """Add prisma_p_data JSONB column to projects if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS prisma_p_data JSONB DEFAULT '{}'::jsonb;"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_evidence_pack(eng: AsyncEngine) -> None:
+    """Add evidence_pack JSONB column to sr_protocols if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE sr_protocols ADD COLUMN IF NOT EXISTS evidence_pack JSONB;"
             ))
     except Exception:
         pass

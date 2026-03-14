@@ -13,6 +13,7 @@ from fastapi import FastAPI, Body, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import intent, journals, literature, projects, settings
+from routers.sr_pipeline import router as sr_router
 from services.db import init_db as init_db_pg
 from services.auth import login_with_google, get_current_user, AUTH_COOKIE_NAME
 
@@ -56,6 +57,7 @@ app.include_router(literature.router)
 app.include_router(projects.router)
 app.include_router(settings.router)
 app.include_router(journals.router)
+app.include_router(sr_router)
 
 
 @app.get("/health", tags=["meta"])

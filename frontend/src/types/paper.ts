@@ -35,7 +35,8 @@ export interface ProjectMeta {
   project_description?: string | null;
   project_folder?: string | null;
   current_phase?: string | null;
-  project_type?: 'write' | 'revision' | null;
+  project_type?: 'write' | 'revision' | 'systematic_review' | null;
+  sr_current_stage?: string | null;
 }
 
 // ── Real peer-review revision types ────────────────────────────────────────────

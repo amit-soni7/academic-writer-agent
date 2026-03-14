@@ -4,13 +4,21 @@ import { getMe, loginWithGoogle, logout as logoutApi } from './api/auth';
 import ArticleWriter, { type MainTab } from './components/ArticleWriter';
 import CrossReferenceDashboard from './components/CrossReferenceDashboard';
 import IntakeForm from './components/IntakeForm';
+import type { SRIntakeCompleteData } from './components/IntakeForm';
 import JournalsDashboard from './components/JournalsDashboard';
 import LiteratureDashboard from './components/LiteratureDashboard';
 import ProjectsList from './components/ProjectsList';
 import RealRevisionPanel, { type StepId } from './components/RealRevisionPanel';
 import SettingsPanel from './components/SettingsPanel';
+import ProtocolDashboard from './components/SystematicReview/ProtocolDashboard';
+import SRSearchDashboard from './components/SystematicReview/SRSearchDashboard';
+import DualScreeningDashboard from './components/SystematicReview/DualScreeningDashboard';
+import DataExtractionDashboard from './components/SystematicReview/DataExtractionDashboard';
+import RiskOfBiasDashboard from './components/SystematicReview/RiskOfBiasDashboard';
+import SRSynthesisDashboard from './components/SystematicReview/SRSynthesisDashboard';
 import { createProject, listProjects, loadProject } from './api/projects';
 import type { ProjectData } from './api/projects';
+// savePico no longer called at intake — moved to Protocol Builder
 import type { ProjectMeta } from './types/paper';
 import { fetchSettings, type AISettings } from './api/settings';
 import appLogo from './assets/firstquill-logo.png';
@@ -60,7 +68,7 @@ function useAppCtx() { return useContext(AppCtx); }
 
 // ── Sidebar nav items ──────────────────────────────────────────────────────────
 
-type PhaseSlug = 'intake' | 'literature' | 'cross-reference' | 'journals' | 'article' | 'revision';
+type PhaseSlug = 'intake' | 'literature' | 'cross-reference' | 'journals' | 'article' | 'revision' | 'sr';
 const PHASE_NAV_ITEMS: { id: PhaseSlug; label: string; icon: ReactNode }[] = [
   {
     id: 'intake',
@@ -184,7 +192,24 @@ function IntakePage() {
       localStorage.setItem(PROJECT_STORAGE_KEY, meta.project_id);
       navigate(`/projects/${meta.project_id}/revision/manuscript`, { state: { initialData: data } });
     } catch {
-      // navigate anyway
+      navigate('/intake');
+    }
+  }
+
+  async function handleIntakeCompleteSR(srIntakeData: SRIntakeCompleteData) {
+    try {
+      const meta = await createProject(
+        srIntakeData.keyIdea || 'Systematic Review',
+        [],
+        srIntakeData.writingType,
+        srIntakeData.projectDescription,
+        undefined,
+        'systematic_review',
+      );
+      localStorage.setItem(PROJECT_STORAGE_KEY, meta.project_id);
+      // PICO, criteria, schema collected in Protocol Builder — not at intake
+      navigate(`/projects/${meta.project_id}/sr/protocol`);
+    } catch {
       navigate('/intake');
     }
   }
@@ -281,7 +306,7 @@ function IntakePage() {
           {/* Main form card */}
           <div className="animate-in delay-150 bg-white rounded-xl border border-slate-200 p-8 sm:p-10"
             style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.35), 0 1px 6px rgba(0,0,0,0.25)' }}>
-            <IntakeForm onComplete={handleIntakeComplete} onCompleteRevision={handleIntakeCompleteRevision} />
+            <IntakeForm onComplete={handleIntakeComplete} onCompleteRevision={handleIntakeCompleteRevision} onCompleteSR={handleIntakeCompleteSR} />
           </div>
 
           {/* Previous projects */}
@@ -311,6 +336,8 @@ function IntakePage() {
                   localStorage.setItem(PROJECT_STORAGE_KEY, projectId);
                   if (projectType === 'revision') {
                     navigate(`/projects/${projectId}/revision/manuscript`);
+                  } else if (projectType === 'systematic_review') {
+                    navigate(`/projects/${projectId}/sr/protocol`);
                   } else {
                     navigate(`/projects/${projectId}/literature`);
                   }
@@ -455,6 +482,101 @@ function RevisionPage() {
   );
 }
 
+// ── SR page components ────────────────────────────────────────────────────────
+
+function SRProtocolPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <ProtocolDashboard
+      projectId={id!}
+      onGoToSearch={() => navigate(`/projects/${id}/sr/search`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
+function SRSearchPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <SRSearchDashboard
+      projectId={id!}
+      onGoToScreening={() => navigate(`/projects/${id}/sr/screen-ta`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
+function SRScreenTAPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <DualScreeningDashboard
+      projectId={id!}
+      stage="title_abstract"
+      onGoToNext={() => navigate(`/projects/${id}/sr/screen-ft`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
+function SRScreenFTPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <DualScreeningDashboard
+      projectId={id!}
+      stage="full_text"
+      onGoToNext={() => navigate(`/projects/${id}/sr/extraction`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
+function SRExtractionPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <DataExtractionDashboard
+      projectId={id!}
+      onGoToRoB={() => navigate(`/projects/${id}/sr/rob`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
+function SRRoBPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <RiskOfBiasDashboard
+      projectId={id!}
+      onGoToSynthesis={() => navigate(`/projects/${id}/sr/synthesis`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
+function SRSynthesisPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { setSettingsOpen } = useAppCtx();
+  return (
+    <SRSynthesisDashboard
+      projectId={id!}
+      onGoToManuscript={() => navigate(`/projects/${id}/article/synthesis`)}
+      onOpenSettings={() => setSettingsOpen(true)}
+    />
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -462,7 +584,7 @@ export default function App() {
   const [aiSettings, setAiSettings]       = useState<AISettings | null>(null);
   const [authUserEmail, setAuthUserEmail] = useState<string | null>(null);
   const [authLoading, setAuthLoading]     = useState(true);
-  const [sidebarMode, setSidebarMode]     = useState<SidebarMode>('full');
+  const [sidebarMode, setSidebarMode]     = useState<SidebarMode>('compact');
   const [recentProjects, setRecentProjects] = useState<ProjectMeta[]>([]);
   const [themePref, setThemePref]         = useState<ThemePreference>(
     () => (localStorage.getItem(THEME_STORAGE_KEY) as ThemePreference | null) ?? 'system'
@@ -699,13 +821,28 @@ export default function App() {
 
               {/* Recent projects — separated by type */}
               {recentProjects.length > 0 && (() => {
-                const writeProjects    = recentProjects.filter((p) => p.project_type !== 'revision');
+                const writeProjects    = recentProjects.filter((p) => p.project_type !== 'revision' && p.project_type !== 'systematic_review');
+                const srProjects      = recentProjects.filter((p) => p.project_type === 'systematic_review');
                 const revisionProjects = recentProjects.filter((p) => p.project_type === 'revision');
 
                 // Resolve where to resume based on project type + current phase
                 function getResumeDest(proj: ProjectMeta): string {
                   if (proj.project_type === 'revision') {
                     return 'revision/manuscript';
+                  }
+                  if (proj.project_type === 'systematic_review') {
+                    const srStageMap: Record<string, string> = {
+                      protocol:     'sr/protocol',
+                      search:       'sr/search',
+                      screen_ta:    'sr/screen-ta',
+                      screen_ft:    'sr/screen-ft',
+                      extraction:   'sr/extraction',
+                      rob:          'sr/rob',
+                      synthesis:    'sr/synthesis',
+                      sr_protocol:  'sr/protocol',
+                    };
+                    const srStage = proj.sr_current_stage ?? 'protocol';
+                    return srStageMap[srStage] ?? 'sr/protocol';
                   }
                   const phase = proj.current_phase ?? 'intake';
                   const map: Record<string, string> = {
@@ -720,6 +857,16 @@ export default function App() {
 
                 function PhaseLabel({ proj }: { proj: ProjectMeta }) {
                   if (proj.project_type === 'revision') return <span>Revision</span>;
+                  if (proj.project_type === 'systematic_review') {
+                    const srLabels: Record<string, string> = {
+                      protocol: 'Protocol', search: 'Search',
+                      screen_ta: 'Title/Abs Screen', screen_ft: 'Full-text Screen',
+                      extraction: 'Data Extraction', rob: 'Risk of Bias',
+                      synthesis: 'Synthesis', sr_protocol: 'Protocol',
+                    };
+                    const stage = proj.sr_current_stage ?? 'protocol';
+                    return <span>SR · {srLabels[stage] ?? stage}</span>;
+                  }
                   const phase = proj.current_phase ?? 'intake';
                   const labels: Record<string, string> = {
                     intake: 'Intake', literature: 'Literature',
@@ -775,12 +922,27 @@ export default function App() {
                         </div>
                       </>
                     )}
+                    {/* SR projects */}
+                    {srProjects.length > 0 && (
+                      <>
+                        {showSidebarText && (
+                          <p className={`px-4 pb-1 text-[9px] font-mono uppercase tracking-[0.15em] text-slate-400 ${
+                            writeProjects.length > 0 ? 'pt-2 border-t border-slate-100 mt-1' : 'pt-3'
+                          }`}>
+                            Systematic Reviews
+                          </p>
+                        )}
+                        <div className="px-2 pb-1 space-y-0.5">
+                          {srProjects.slice(0, 6).map((proj) => <ProjectRow key={proj.project_id} proj={proj} />)}
+                        </div>
+                      </>
+                    )}
                     {/* Revision projects */}
                     {revisionProjects.length > 0 && (
                       <>
                         {showSidebarText && (
                           <p className={`px-4 pb-1 text-[9px] font-mono uppercase tracking-[0.15em] text-slate-400 ${
-                            writeProjects.length > 0 ? 'pt-2 border-t border-slate-100 mt-1' : 'pt-3'
+                            (writeProjects.length > 0 || srProjects.length > 0) ? 'pt-2 border-t border-slate-100 mt-1' : 'pt-3'
                           }`}>
                             Revisions
                           </p>
@@ -849,6 +1011,15 @@ export default function App() {
             <Route path="/projects/:id/article/:tab"    element={<ArticlePage />} />
             <Route path="/projects/:id/revision"        element={<Navigate to="manuscript" replace />} />
             <Route path="/projects/:id/revision/:step"  element={<RevisionPage />} />
+            {/* SR pipeline routes */}
+            <Route path="/projects/:id/sr/protocol"     element={<SRProtocolPage />} />
+            <Route path="/projects/:id/sr/search"        element={<SRSearchPage />} />
+            <Route path="/projects/:id/sr/screen-ta"     element={<SRScreenTAPage />} />
+            <Route path="/projects/:id/sr/screen-ft"     element={<SRScreenFTPage />} />
+            <Route path="/projects/:id/sr/extraction"    element={<SRExtractionPage />} />
+            <Route path="/projects/:id/sr/rob"           element={<SRRoBPage />} />
+            <Route path="/projects/:id/sr/synthesis"     element={<SRSynthesisPage />} />
+            <Route path="/projects/:id/sr"               element={<Navigate to="protocol" replace />} />
             {/* Legacy redirects */}
             <Route path="/p/:id/literature"      element={<LegacyRedir phase="literature" />} />
             <Route path="/p/:id/cross_reference" element={<LegacyRedir phase="cross-reference" />} />

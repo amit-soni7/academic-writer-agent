@@ -1,26 +1,29 @@
+/**
+ * StepOne — Two-card mode selector: Novel Article or Revise Manuscript.
+ */
 import type { ArticleMode } from '../../types/intent';
 
 interface Props {
-  value: ArticleMode | null;
-  onChange: (mode: ArticleMode) => void;
+  mode: ArticleMode | null;
+  onSelect: (mode: ArticleMode) => void;
 }
 
-const options: { value: ArticleMode; label: string; description: string; glyph: string }[] = [
+const CARDS: { id: ArticleMode; glyph: string; label: string; description: string }[] = [
   {
-    value: 'novel',
-    label: 'Novel Submission',
-    description: 'Writing a new, original manuscript from scratch for first submission.',
+    id: 'novel',
     glyph: '✦',
+    label: 'Novel Article',
+    description: 'Write a new manuscript — original research, review, commentary, or any other article type.',
   },
   {
-    value: 'revision',
-    label: 'Peer-Review Revision',
-    description: 'Revising a manuscript in response to reviewer feedback and editorial decision.',
+    id: 'revision',
     glyph: '↺',
+    label: 'Revise Manuscript',
+    description: 'Respond to peer-reviewer comments and generate a point-by-point response letter.',
   },
 ];
 
-export default function StepOne({ value, onChange }: Props) {
+export default function StepOne({ mode, onSelect }: Props) {
   return (
     <div>
       <h2
@@ -29,64 +32,38 @@ export default function StepOne({ value, onChange }: Props) {
       >
         What are you working on?
       </h2>
-      <p className="text-sm text-slate-500 mb-7 leading-relaxed">
-        Select the stage of your manuscript to tailor the AI pipeline accordingly.
+      <p className="text-sm text-slate-500 mb-6 leading-relaxed">
+        Select the type of work to tailor the pipeline accordingly.
       </p>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {options.map((opt) => {
-          const isSelected = value === opt.value;
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {CARDS.map((card) => {
+          const isActive = mode === card.id;
           return (
             <button
-              key={opt.value}
+              key={card.id}
               type="button"
-              onClick={() => onChange(opt.value)}
-              className={`
-                relative text-left p-5 rounded-lg border transition-all duration-200
-                focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500
-                ${isSelected
-                  ? 'border-brand-500 bg-brand-50'
-                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-100'
-                }
-              `}
-              style={isSelected ? { boxShadow: '0 0 0 1px var(--gold), inset 0 1px 0 rgba(30,58,95,0.06)' } : undefined}
+              onClick={() => onSelect(card.id)}
+              className={`text-left p-5 rounded-xl border-2 transition-all duration-200 focus:outline-none ${
+                isActive
+                  ? 'border-amber-400/70 bg-amber-50/40'
+                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50/60'
+              }`}
+              style={isActive ? { boxShadow: '0 0 0 1px var(--gold)' } : undefined}
             >
-              {/* Glyph */}
               <span
-                className="block text-3xl mb-4 leading-none font-light select-none"
-                style={{
-                  fontFamily: 'Georgia, serif',
-                  color: isSelected ? 'var(--gold)' : 'var(--text-muted)',
-                  transition: 'color 0.2s',
-                }}
+                className="block text-3xl mb-3 leading-none select-none"
+                style={{ color: isActive ? 'var(--gold)' : 'var(--text-muted)' }}
               >
-                {opt.glyph}
+                {card.glyph}
               </span>
-
-              {/* Label */}
               <span
-                className="block font-semibold text-sm mb-1.5 leading-tight"
-                style={{ color: isSelected ? 'var(--gold-light)' : 'var(--text-body)' }}
+                className="block text-sm font-semibold mb-1.5"
+                style={{ color: isActive ? 'var(--gold-light)' : 'var(--text-body)' }}
               >
-                {opt.label}
+                {card.label}
               </span>
-
-              {/* Description */}
-              <span className="block text-xs text-slate-500 leading-relaxed">
-                {opt.description}
-              </span>
-
-              {/* Selected indicator */}
-              {isSelected && (
-                <span
-                  className="absolute top-3 right-3 w-5 h-5 rounded-full flex items-center justify-center"
-                  style={{ background: 'var(--gold)', color: '#ffffff' }}
-                >
-                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                </span>
-              )}
+              <span className="block text-xs text-slate-500 leading-relaxed">{card.description}</span>
             </button>
           );
         })}

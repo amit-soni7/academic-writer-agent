@@ -132,31 +132,44 @@ def guidelines_available() -> bool:
 
 _ARTICLE_TYPE_GUIDELINES: dict[str, list[str]] = {
     "systematic_review": [
-        "Write the Introduction in two parts: (1) background and rationale, "
-        "(2) the PICO/PICOS research question and objectives.",
-        "The Methods section must be reproducible: a reader should be able to "
-        "replicate the search using the reported strategy alone.",
-        "Report the search date, all databases searched, grey literature sources, "
-        "and the full Boolean search string for at least one major database.",
-        "Describe the screening process: number of reviewers, method for resolving "
-        "disagreements, and whether a pilot test was conducted.",
-        "In Results, present the PRISMA flow narrative before the study characteristics table.",
-        "For each outcome, report the pooled effect estimate, 95% CI, number of studies, "
-        "total participants, I², and whether the result is statistically significant.",
-        "Interpret I² cautiously: >50% indicates substantial heterogeneity; >75% is considerable.",
-        "In Discussion, compare findings with previous systematic reviews, not just primary studies.",
-        "Limitations must address: language bias, publication bias, heterogeneity, "
-        "risk of bias in included studies.",
+        "TITLE: Use the word 'systematic review' or 'scoping review' and specify the PICO components.",
+        "ABSTRACT: Structured abstract with Background, Objectives, Methods (databases, dates, eligibility), Results (PRISMA numbers), Conclusions. NO citations.",
+        "INTRODUCTION: State rationale with gap analysis; end with explicit PICO objectives.",
+        "METHODS — ELIGIBILITY: Define PICO/PCC explicitly. State inclusion AND exclusion criteria with justifications.",
+        "METHODS — INFORMATION SOURCES: List every database searched with coverage dates. Mention grey literature (clinicaltrials.gov, WHO ICTRP, Google Scholar).",
+        "METHODS — SEARCH STRATEGY: Report full search string for at least one database in an Appendix. State the date of the last search.",
+        "METHODS — STUDY SELECTION: Describe dual independent screening process. State software used. Report inter-rater reliability (Cohen's kappa or percentage agreement).",
+        "METHODS — DATA EXTRACTION: Describe extraction form, dual extraction, and pilot testing. State what was extracted.",
+        "METHODS — RISK OF BIAS: Name the tool (RoB 2, ROBINS-I, QUADAS-2, Newcastle-Ottawa). State who assessed and how disagreements resolved.",
+        "METHODS — SYNTHESIS: For meta-analysis, name software (R/RevMan/Stata), specify fixed vs random effects, heterogeneity statistics (I², Cochran's Q). For narrative synthesis, describe tabulation approach.",
+        "RESULTS — STUDY SELECTION: Report PRISMA 2020 flow numbers at each stage. Identify the total number of excluded full-text papers with reasons.",
+        "RESULTS — STUDY CHARACTERISTICS: Table of included studies with key characteristics. Do not rely on text alone.",
+        "RESULTS — RISK OF BIAS: Summary table and traffic-light plot. Discuss overall concerns.",
+        "RESULTS — SYNTHESIS: Report pooled estimates with 95% CI, I², tau², Q-statistic for each meta-analysis. Interpret I²: <25% low, 25-75% moderate, >75% high heterogeneity.",
+        "DISCUSSION: Compare findings with prior reviews. Address heterogeneity. State GRADE certainty (high/moderate/low/very low) per outcome.",
+        "PRISMA-trAIce: If AI tools were used at any stage, declare: which stages, which models, how human oversight was applied.",
+        "REGISTRATION: State PROSPERO ID (e.g., CRD42024XXXXXX) or OSF DOI in both abstract and methods.",
+        "SCOPING REVIEW NOTE: Do NOT pool statistics. Organize results thematically by categories/domains. Quality assessment is optional but should be noted if omitted.",
     ],
     "scoping_review": [
-        "Frame the Introduction around a clear gap in knowledge that the scope of "
-        "the literature has not yet mapped.",
-        "The PCC framework (Population, Concept, Context) should guide eligibility criteria.",
-        "Do not pool statistics or make claims about effect sizes — this is a mapping exercise.",
-        "Organise Results by meaningful categories (study design, geography, population, "
-        "intervention type) rather than by paper.",
-        "The Discussion should explicitly identify research gaps and recommend future directions.",
-        "A scoping review does not appraise quality of individual studies — note this limitation.",
+        "TITLE: Use the word 'systematic review' or 'scoping review' and specify the PICO components.",
+        "ABSTRACT: Structured abstract with Background, Objectives, Methods (databases, dates, eligibility), Results (PRISMA numbers), Conclusions. NO citations.",
+        "INTRODUCTION: State rationale with gap analysis; end with explicit PICO objectives.",
+        "METHODS — ELIGIBILITY: Define PICO/PCC explicitly. State inclusion AND exclusion criteria with justifications.",
+        "METHODS — INFORMATION SOURCES: List every database searched with coverage dates. Mention grey literature (clinicaltrials.gov, WHO ICTRP, Google Scholar).",
+        "METHODS — SEARCH STRATEGY: Report full search string for at least one database in an Appendix. State the date of the last search.",
+        "METHODS — STUDY SELECTION: Describe dual independent screening process. State software used. Report inter-rater reliability (Cohen's kappa or percentage agreement).",
+        "METHODS — DATA EXTRACTION: Describe extraction form, dual extraction, and pilot testing. State what was extracted.",
+        "METHODS — RISK OF BIAS: Name the tool (RoB 2, ROBINS-I, QUADAS-2, Newcastle-Ottawa). State who assessed and how disagreements resolved.",
+        "METHODS — SYNTHESIS: For meta-analysis, name software (R/RevMan/Stata), specify fixed vs random effects, heterogeneity statistics (I², Cochran's Q). For narrative synthesis, describe tabulation approach.",
+        "RESULTS — STUDY SELECTION: Report PRISMA 2020 flow numbers at each stage. Identify the total number of excluded full-text papers with reasons.",
+        "RESULTS — STUDY CHARACTERISTICS: Table of included studies with key characteristics. Do not rely on text alone.",
+        "RESULTS — RISK OF BIAS: Summary table and traffic-light plot. Discuss overall concerns.",
+        "RESULTS — SYNTHESIS: Report pooled estimates with 95% CI, I², tau², Q-statistic for each meta-analysis. Interpret I²: <25% low, 25-75% moderate, >75% high heterogeneity.",
+        "DISCUSSION: Compare findings with prior reviews. Address heterogeneity. State GRADE certainty (high/moderate/low/very low) per outcome.",
+        "PRISMA-trAIce: If AI tools were used at any stage, declare: which stages, which models, how human oversight was applied.",
+        "REGISTRATION: State PROSPERO ID (e.g., CRD42024XXXXXX) or OSF DOI in both abstract and methods.",
+        "SCOPING REVIEW NOTE: Do NOT pool statistics. Organize results thematically by categories/domains. Quality assessment is optional but should be noted if omitted.",
     ],
     "narrative_review": [
         "Clearly define the scope and boundaries of the review in the Introduction.",
@@ -168,14 +181,17 @@ _ARTICLE_TYPE_GUIDELINES: dict[str, list[str]] = {
         "The Conclusions should identify specific knowledge gaps and propose research priorities.",
     ],
     "meta_analysis": [
-        "The effect measure (OR, RR, MD, SMD, HR) must be pre-specified and justified.",
-        "Report both fixed-effects and random-effects estimates where heterogeneity is substantial.",
-        "I² > 50% warrants investigation of sources of heterogeneity via subgroup or "
-        "meta-regression analysis.",
-        "Sensitivity analyses (e.g. excluding high-risk-of-bias studies) are required.",
-        "Report Egger's test result and describe funnel plot asymmetry to assess publication bias.",
-        "Use GRADE to assess certainty of evidence for each primary outcome.",
-        "All statistical methods must be reproducible: name the software and version used.",
+        "PRE-REGISTRATION: State PROSPERO ID. Describe any deviations from the registered protocol.",
+        "EFFECT MEASURE: Explicitly justify choice (OR for binary, SMD for continuous, HR for time-to-event). State direction of effect.",
+        "STATISTICAL MODEL: State whether fixed or random effects (DerSimonian-Laird, REML, Hartung-Knapp). For random effects, report tau² and its estimator.",
+        "HETEROGENEITY: Report I² with 95% CI, Cochran's Q with df and p-value, tau². Interpret cautiously: I² reflects proportion not absolute amount.",
+        "SUBGROUP ANALYSIS: Pre-specify subgroups (not post-hoc). Report between-subgroup heterogeneity (I²_between). Use interaction tests not separate analyses.",
+        "SENSITIVITY ANALYSIS: Report leave-one-out, restricting to low RoB, alternate effect measure.",
+        "PUBLICATION BIAS: Funnel plot (≥10 studies), Egger's test, trim-and-fill. State if too few studies.",
+        "GRADE: Apply GRADE framework per outcome: start High, downgrade for study limitations, inconsistency, indirectness, imprecision, publication bias.",
+        "FOREST PLOT: Include study names, sample sizes, effect sizes, 95% CIs, weights (%), and diamond. Label axes clearly.",
+        "SOFTWARE: Name R package (meta, metafor), RevMan, or Stata and version.",
+        "REPORTING: Follow PRISMA 2020 checklist. For continuous outcomes report MD or SMD with pooled SD. For binary outcomes report event rates in both arms.",
     ],
     "case_report": [
         "Begin the Introduction with why this specific case is clinically or scientifically "
