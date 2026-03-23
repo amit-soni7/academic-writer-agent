@@ -13,9 +13,305 @@ from __future__ import annotations
 
 import difflib
 import io
+import json
+import logging
 import re
+import tempfile
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+WP = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+
+def _enable_track_changes(rdoc) -> None:
+    """Enable trackRevisions + markup view in word/settings.xml.
+
+    Without this, Word won't display tracked changes on open even though
+    the w:ins/w:del elements are present in the document body.
+    """
+    from lxml import etree
+
+    settings_elem = rdoc.document.settings.element
+
+    if settings_elem.find(f'{{{WP}}}trackRevisions') is None:
+        etree.SubElement(settings_elem, f'{{{WP}}}trackRevisions')
+
+    rv = settings_elem.find(f'{{{WP}}}revisionView')
+    if rv is None:
+        rv = etree.SubElement(settings_elem, f'{{{WP}}}revisionView')
+    rv.set(f'{{{WP}}}markup', '1')
+    rv.set(f'{{{WP}}}comments', '0')
+    rv.set(f'{{{WP}}}insDel', '1')
+    rv.set(f'{{{WP}}}formatting', '1')
+    rv.set(f'{{{WP}}}inkAnnotations', '0')
+
+
+def _enable_track_changes_raw(doc) -> None:
+    """Same as _enable_track_changes but for a plain python-docx Document."""
+    from lxml import etree
+
+    settings_elem = doc.settings.element
+
+    if settings_elem.find(f'{{{WP}}}trackRevisions') is None:
+        etree.SubElement(settings_elem, f'{{{WP}}}trackRevisions')
+
+    rv = settings_elem.find(f'{{{WP}}}revisionView')
+    if rv is None:
+        rv = etree.SubElement(settings_elem, f'{{{WP}}}revisionView')
+    rv.set(f'{{{WP}}}markup', '1')
+    rv.set(f'{{{WP}}}comments', '0')
+    rv.set(f'{{{WP}}}insDel', '1')
+    rv.set(f'{{{WP}}}formatting', '1')
+    rv.set(f'{{{WP}}}inkAnnotations', '0')
+
+
+def _enable_continuous_line_numbers_raw(doc, start: int = 1, count_by: int = 1) -> None:
+    """Turn on continuous line numbering for every section in a python-docx Document."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    for section in doc.sections:
+        sect_pr = section._sectPr
+        ln_num_type = sect_pr.find(qn('w:lnNumType'))
+        if ln_num_type is None:
+            ln_num_type = OxmlElement('w:lnNumType')
+            sect_pr.append(ln_num_type)
+        ln_num_type.set(qn('w:countBy'), str(max(1, count_by)))
+        ln_num_type.set(qn('w:start'), str(max(1, start)))
+        ln_num_type.set(qn('w:restart'), 'continuous')
+
+
+def prepare_revision_manuscript_docx(docx_bytes: bytes) -> bytes:
+    """Enable tracked revisions and continuous line numbers on an uploaded .docx."""
+    import docx as _docx
+
+    doc = _docx.Document(io.BytesIO(docx_bytes))
+    _enable_track_changes_raw(doc)
+    _enable_continuous_line_numbers_raw(doc)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ── Accept all tracked changes ────────────────────────────────────────────────
+
+def accept_all_changes(docx_bytes: bytes) -> bytes:
+    """Accept all tracked changes in a .docx, returning clean bytes.
+
+    - w:del / w:moveFrom  → remove entirely
+    - w:ins / w:moveTo    → unwrap (keep children, remove wrapper)
+    - w:rPrChange etc.    → remove (keep current formatting)
+    """
+    import docx as _docx
+
+    doc = _docx.Document(io.BytesIO(docx_bytes))
+    body = doc.element.body
+    WP = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+
+    # Pass 1: Remove deletions
+    for tag in (f'{WP}del', f'{WP}moveFrom'):
+        for elem in body.findall(f'.//{tag}'):
+            parent = elem.getparent()
+            if parent is not None:
+                parent.remove(elem)
+
+    # Pass 2: Unwrap insertions (promote children to parent)
+    for tag in (f'{WP}ins', f'{WP}moveTo'):
+        for elem in body.findall(f'.//{tag}'):
+            parent = elem.getparent()
+            if parent is not None:
+                idx = list(parent).index(elem)
+                children = list(elem)
+                if elem.tail:
+                    if children:
+                        children[-1].tail = (children[-1].tail or '') + elem.tail
+                    elif idx > 0:
+                        parent[idx - 1].tail = (parent[idx - 1].tail or '') + elem.tail
+                    else:
+                        parent.text = (parent.text or '') + elem.tail
+                for i, child in enumerate(children):
+                    parent.insert(idx + i, child)
+                parent.remove(elem)
+
+    # Pass 3: Strip property-change tracking
+    for tag in ('rPrChange', 'pPrChange', 'sectPrChange',
+                'tblPrChange', 'trPrChange', 'tcPrChange', 'numberingChange'):
+        for elem in body.findall(f'.//{WP}{tag}'):
+            parent = elem.getparent()
+            if parent is not None:
+                parent.remove(elem)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ── Direct track changes via docx-revisions ──────────────────────────────────
+
+def _parse_manuscript_changes(changes_text: str, manuscript_lines: list[str] | None = None) -> list[dict]:
+    """Parse manuscript_changes into operation dicts.
+
+    Supports two formats:
+    - New: JSON array [{"type": "replace", "find": ..., "replace_with": ...}, ...]
+    - Legacy: "CHANGE ...\nDELETE: '...'\nADD: '...'" text format
+    """
+    if not changes_text or changes_text in ("{}", "No textual manuscript edit required.", "[]"):
+        return []
+
+    # Try JSON first
+    try:
+        ops = json.loads(changes_text)
+        if isinstance(ops, list):
+            return ops
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Legacy text format
+    return _parse_legacy_format(changes_text, manuscript_lines)
+
+
+def _parse_legacy_format(text: str, manuscript_lines: list[str] | None = None) -> list[dict]:
+    """Parse old CHANGE/DELETE/ADD text format into operation dicts."""
+    ops: list[dict] = []
+    blocks = re.split(r'(?=CHANGE\s)', text)
+    for block in blocks:
+        if not block.strip() or not block.strip().startswith("CHANGE"):
+            continue
+        delete_m = re.search(r'DELETE:\s*"(.+?)"', block, re.DOTALL)
+        add_m = re.search(r'ADD:\s*"(.+?)"', block, re.DOTALL)
+        anchor_m = re.search(r'ANCHOR:\s*"(.+?)"', block, re.DOTALL)
+        line_m = re.search(r'Line\s+(\d+)', block)
+
+        if delete_m and add_m:
+            ops.append({"type": "replace", "find": delete_m.group(1), "replace_with": add_m.group(1)})
+        elif delete_m:
+            ops.append({"type": "delete", "find": delete_m.group(1)})
+        elif add_m:
+            anchor = ""
+            if anchor_m:
+                anchor = anchor_m.group(1)
+            elif line_m and manuscript_lines:
+                ln = int(line_m.group(1)) - 1
+                if 0 <= ln < len(manuscript_lines):
+                    anchor = manuscript_lines[ln].strip()
+            ops.append({"type": "insert_after", "anchor": anchor, "text": add_m.group(1)})
+    return ops
+
+
+def apply_direct_track_changes(
+    original_docx_bytes: bytes,
+    finalized_plans: list[dict],
+    author: str = "Author",
+    manuscript_text: str = "",
+) -> bytes:
+    """Apply finalized change plans directly to the original .docx using docx-revisions.
+
+    Each plan's manuscript_changes field is parsed into structured operations
+    and applied using RevisionDocument methods.
+    """
+    import os
+    from docx_revisions import RevisionDocument
+
+    # docx-revisions needs a file path, not a stream
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp.write(original_docx_bytes)
+        _tmp_input = tmp.name
+    rdoc = RevisionDocument(_tmp_input)
+    _enable_track_changes(rdoc)
+    _enable_continuous_line_numbers_raw(rdoc.document)
+    manuscript_lines = manuscript_text.split('\n') if manuscript_text else None
+    applied = 0
+    skipped = 0
+
+    for plan in finalized_plans:
+        changes_text = plan.get("manuscript_changes", "")
+        operations = _parse_manuscript_changes(changes_text, manuscript_lines)
+
+        for op in operations:
+            op_type = op.get("type", "")
+
+            if op_type == "replace":
+                find_text = op.get("find", "")
+                replace_text = op.get("replace_with", "")
+                if find_text and replace_text:
+                    rdoc.find_and_replace_tracked(find_text, replace_text, author=author)
+                    applied += 1
+                else:
+                    logger.warning("Skipping replace op with empty find/replace_with")
+                    skipped += 1
+
+            elif op_type == "delete":
+                find_text = op.get("find", "")
+                found = False
+                for rp in rdoc.paragraphs:
+                    if find_text and find_text in rp.text:
+                        start = rp.text.index(find_text)
+                        rp.add_tracked_deletion(start, start + len(find_text), author=author)
+                        applied += 1
+                        found = True
+                        break
+                if not found:
+                    logger.warning("DELETE text not found in document: '%.60s...'", find_text)
+                    skipped += 1
+
+            elif op_type == "insert_after":
+                anchor = op.get("anchor", "")
+                new_text = op.get("text", "")
+                found = False
+                if anchor:
+                    for rp in rdoc.paragraphs:
+                        if anchor in rp.text:
+                            rp.add_tracked_insertion(new_text, author=author)
+                            applied += 1
+                            found = True
+                            break
+                if not found:
+                    # Fallback: append to last paragraph
+                    if new_text and rdoc.paragraphs:
+                        rdoc.paragraphs[-1].add_tracked_insertion(new_text, author=author)
+                        applied += 1
+                        logger.warning("Anchor not found, appended to last paragraph: '%.60s...'", anchor)
+                    else:
+                        logger.warning("INSERT_AFTER failed — no anchor match and no fallback: '%.60s...'", anchor)
+                        skipped += 1
+
+    # Validation
+    tc_count = len(rdoc.track_changes)
+    logger.info("Track changes: applied=%d, skipped=%d, total_tracked=%d", applied, skipped, tc_count)
+
+    # docx-revisions save() only accepts file paths, not streams
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp_path = tmp.name
+    rdoc.save(tmp_path)
+    with open(tmp_path, "rb") as f:
+        result = f.read()
+    os.unlink(tmp_path)
+    os.unlink(_tmp_input)
+    return result
+
+
+def generate_clean_docx(track_changes_bytes: bytes) -> bytes:
+    """Accept all tracked changes and return clean .docx bytes.
+
+    Uses docx-revisions accept_all() — keeps insertions, removes deletions.
+    """
+    import os
+    from docx_revisions import RevisionDocument
+
+    # docx-revisions needs a file path to load, so write bytes to temp file
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp.write(track_changes_bytes)
+        tmp_path = tmp.name
+    rdoc = RevisionDocument(tmp_path)
+    rdoc.accept_all()
+    rdoc.save(tmp_path)
+    with open(tmp_path, "rb") as f:
+        result = f.read()
+    os.unlink(tmp_path)
+    return result
 
 
 # ── Manuscript parser (structure-preserving) ──────────────────────────────────
@@ -340,12 +636,36 @@ def build_point_by_point_docx(
 
 # ── B. Clean revised manuscript ────────────────────────────────────────────────
 
-def build_clean_revised_docx(revised_article: str, manuscript_title: str = "") -> bytes:
-    """Convert the revised manuscript markdown to a clean .docx."""
-    import docx
+def build_clean_revised_docx(
+    revised_article: str,
+    manuscript_title: str = "",
+    original_docx_bytes: bytes | None = None,
+) -> bytes:
+    """Build the clean revised manuscript .docx.
 
-    doc = docx.Document()
-    _markdown_to_doc(doc, revised_article)
+    If original_docx_bytes is provided, uses the original .docx as a template
+    (preserving styles, fonts, headers/footers, numbering definitions) and
+    replaces the body content with the revised text.
+    Otherwise falls back to a plain markdown→docx conversion.
+    """
+    import docx as _docx
+
+    if original_docx_bytes:
+        doc = _docx.Document(io.BytesIO(original_docx_bytes))
+        # Remove all existing body elements (paragraphs + tables)
+        body = doc.element.body
+        for child in list(body):
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag in ('p', 'tbl'):
+                body.remove(child)
+        # Re-populate with revised text (preserves document styles/settings)
+        _markdown_to_doc(doc, revised_article)
+    else:
+        doc = _docx.Document()
+        _markdown_to_doc(doc, revised_article)
+
+    _enable_continuous_line_numbers_raw(doc)
+
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -470,6 +790,10 @@ def build_track_changes_docx(
     # Remove the default empty paragraph python-docx adds
     for p in list(doc.paragraphs):
         p._element.getparent().remove(p._element)
+
+    # Enable track changes visibility in Word
+    _enable_track_changes_raw(doc)
+    _enable_continuous_line_numbers_raw(doc)
 
     rev_id = 1
 

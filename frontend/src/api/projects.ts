@@ -1,5 +1,5 @@
 import api from './client';
-import type { CommentChangeSuggestion, CommentPlan, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, RealReviewerComment, RevisionResult, RevisionRound, SynthesisResult } from '../types/paper';
+import type { CommentChangeSuggestion, CommentPlan, DeepSynthesisResult, DeepSynthesisSSEEvent, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, RealReviewerComment, RevisionResult, RevisionRound, SynthesisResult } from '../types/paper';
 
 export async function createProject(
   query: string,
@@ -12,6 +12,7 @@ export async function createProject(
   inclusionCriteria?: string[],
   exclusionCriteria?: string[],
   dataExtractionSchema?: unknown[],
+  literatureSearchState?: LiteratureSearchState,
 ): Promise<ProjectMeta> {
   const { data } = await api.post<ProjectMeta>('/api/projects', {
     query,
@@ -24,6 +25,7 @@ export async function createProject(
     ...(inclusionCriteria ? { inclusion_criteria: inclusionCriteria } : {}),
     ...(exclusionCriteria ? { exclusion_criteria: exclusionCriteria } : {}),
     ...(dataExtractionSchema ? { data_extraction_schema: dataExtractionSchema } : {}),
+    ...(literatureSearchState ? { literature_search_state: literatureSearchState } : {}),
   });
   return data;
 }
@@ -48,6 +50,60 @@ export async function updateProjectName(
 ): Promise<{ project_id: string; project_name: string; project_folder: string }> {
   const { data } = await api.patch(`/api/projects/${projectId}/name`, { project_name: projectName });
   return data;
+}
+
+export async function ensureProjectTentativeTitle(
+  projectId: string,
+): Promise<{ project_id: string; tentative_title: string; project_slug: string }> {
+  const { data } = await api.post(`/api/projects/${projectId}/ensure_tentative_title`);
+  return data;
+}
+
+export async function backfillLegacyProjectTitles(): Promise<{
+  updated_count: number;
+  projects: Array<{ project_id: string; project_name: string; project_slug: string }>;
+}> {
+  const { data } = await api.post('/api/projects/backfill_legacy_titles');
+  return data;
+}
+
+export interface NormalizeProjectStorageResult {
+  projects_updated: number;
+  pdfs_moved: number;
+  pdfs_copied: number;
+  bibs_rebuilt: number;
+  missing_pdfs: Array<{
+    project_id: string;
+    project_name: string;
+    paper_key: string;
+    title: string;
+    expected_path: string | null;
+    repair_needed: boolean;
+    reason: string;
+  }>;
+  unassigned_files: string[];
+  projects: Array<{
+    project_id: string;
+    project_name: string;
+    old_folder: string;
+    target_folder: string;
+    folder_updated: boolean;
+    existing_files_merged: number;
+    bib_path: string | null;
+    bib_entries: number;
+    bib_rebuilt: boolean;
+    missing_pdf_count: number;
+  }>;
+}
+
+export async function normalizeProjectStorage(): Promise<NormalizeProjectStorageResult> {
+  const { data } = await api.post<NormalizeProjectStorageResult>('/api/projects/normalize_storage');
+  return data;
+}
+
+export function projectPaperPdfUrl(projectId: string, paperKey: string): string {
+  const base = String(api.defaults.baseURL || 'http://localhost:8010').replace(/\/$/, '');
+  return `${base}/api/projects/${projectId}/paper_pdf?paper_key=${encodeURIComponent(paperKey)}`;
 }
 
 export async function recommendJournals(projectId: string): Promise<JournalRecommendation[]> {
@@ -85,6 +141,73 @@ export async function getSynthesisResult(projectId: string): Promise<SynthesisRe
   return data && Object.keys(data).length > 0 ? (data as SynthesisResult) : null;
 }
 
+// ── Deep Synthesis ────────────────────────────────────────────────────────────
+
+export function streamDeepSynthesis(
+  projectId: string,
+  onEvent: (event: DeepSynthesisSSEEvent) => void,
+  autoFetchEnabled = true,
+): AbortController {
+  const controller = new AbortController();
+  const baseUrl = api.defaults.baseURL || '';
+  const url = `${baseUrl}/api/projects/${projectId}/deep_synthesize`;
+
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ auto_fetch_enabled: autoFetchEnabled }),
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const reader = response.body?.getReader();
+      if (!reader) return;
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6)) as DeepSynthesisSSEEvent;
+              onEvent(event);
+            } catch {
+              // skip malformed SSE lines
+            }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') {
+        console.error('Deep synthesis stream error:', err);
+      }
+    });
+
+  return controller;
+}
+
+export async function getDeepSynthesisResult(
+  projectId: string,
+): Promise<DeepSynthesisResult | null> {
+  try {
+    const { data } = await api.get<DeepSynthesisResult>(
+      `/api/projects/${projectId}/deep_synthesis_result`,
+    );
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 export async function generatePeerReview(projectId: string): Promise<PeerReviewReport> {
   const { data } = await api.post<PeerReviewReport>(`/api/projects/${projectId}/peer_review`);
   return data;
@@ -119,6 +242,7 @@ export interface SummarizeAllEvent {
   step?: string;         // only for step_progress
   skipped?: boolean;
   skip_reason?: string;
+  skipped_count?: number;
   paper_key?: string;
   summary?: PaperSummary;
   message?: string;
@@ -126,6 +250,65 @@ export interface SummarizeAllEvent {
   errors?: number;
   project_id?: string;
   session_id?: string; // backward-compat
+}
+
+// ── Background summarisation (survives navigation) ─────────────────────────
+
+export interface BgSummarizeStatus {
+  running: boolean;
+  current: number;
+  total: number;
+  current_title: string;
+  errors: number;
+  saved: number;
+  started?: boolean;
+  reason?: string;
+}
+
+export async function startSummarizeAllBg(
+  projectId: string,
+  papers: Paper[],
+  query: string,
+): Promise<BgSummarizeStatus> {
+  const res = await fetch(`http://localhost:8010/api/projects/${projectId}/summarize_all/start`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ papers, query }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getSummarizeStatus(projectId: string): Promise<BgSummarizeStatus> {
+  const res = await fetch(`http://localhost:8010/api/projects/${projectId}/summarize_all/status`, {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function backfillFiles(projectId: string): Promise<{
+  saved: number;
+  already_existed: number;
+  failed: number;
+  total_summarised: number;
+}> {
+  const res = await fetch(`http://localhost:8010/api/projects/${projectId}/backfill_files`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function resetSummaries(projectId: string): Promise<{ deleted: number }> {
+  const res = await fetch(`http://localhost:8010/api/projects/${projectId}/summaries`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
 export async function* streamSummarizeAll(
@@ -240,6 +423,38 @@ export interface ProjectData {
   current_phase: string | null;
   project_type: 'write' | 'revision' | null;
   base_manuscript: string | null;
+  literature_search_state?: LiteratureSearchState | null;
+}
+
+export interface LiteratureSearchState {
+  status: 'streaming' | 'done' | 'error';
+  query: string;
+  total_limit: number;
+  warnings?: string[];
+  source_progress?: Record<string, number>;
+  sources_done?: string[];
+  sources_error?: Record<string, string>;
+  is_deduplicating?: boolean;
+  ranking_info?: { candidates: number; selected: number; requested: number } | null;
+  is_enriching?: boolean;
+  expanded_queries?: string[];
+  pubmed_queries?: string[];
+  mesh_terms?: string[];
+  boolean_query?: string;
+  pico?: Record<string, string> | null;
+  framework_elements?: Record<string, string | string[]>;
+  framework_used?: string;
+  framework_justification?: string;
+  question_type?: string | null;
+  secondary_frameworks_considered?: string[];
+  study_type_filters?: string[];
+  ai_rationale?: string;
+  facets?: Record<string, { mesh: string[]; freetext: string[] }>;
+  strategy_notes?: string[];
+  tentative_title?: string;
+  source_papers?: Record<string, Paper[]>;
+  current_papers?: Paper[];
+  error?: string;
 }
 
 // Backward-compat alias
@@ -311,6 +526,7 @@ export async function suggestChanges(
     manuscript_text?: string;
     journal_name?: string;
     parsed_comments: RealReviewerComment[];
+    round_number?: number;
   },
 ): Promise<CommentChangeSuggestion[]> {
   const { data } = await api.post<CommentChangeSuggestion[]>(
@@ -327,6 +543,7 @@ export async function discussComment(
     reviewer_number: number;
     comment_number: number;
     user_message: string;
+    round_number?: number;
     history?: { role: 'ai' | 'user'; content: string }[];
     current_plan?: string;
     doi_references?: string[];
@@ -354,6 +571,7 @@ export async function finalizeComment(
     reviewer_number: number;
     comment_number: number;
     finalized_plan: string;
+    round_number?: number;
     manuscript_text?: string;
   },
 ): Promise<{ author_response: string; action_taken: string; manuscript_changes: string }> {
@@ -400,16 +618,116 @@ export async function saveRevisionWip(projectId: string, wip: RevisionWip): Prom
   await api.put(`/api/projects/${projectId}/revision_wip`, wip);
 }
 
+// ── Comment work (per-comment persistent storage) ─────────────────────────────
+
+export interface CommentWorkRow {
+  project_id: string;
+  round_number: number;
+  reviewer_number: number;
+  comment_number: number;
+  original_comment: string;
+  category: string;
+  severity?: string;
+  domain?: string;
+  requirement_level?: string;
+  ambiguity_flag: boolean;
+  ambiguity_question?: string;
+  intent_interpretation?: string;
+  suggestion: CommentChangeSuggestion | null;
+  discussion: { role: 'ai' | 'user'; content: string }[];
+  current_plan: string;
+  doi_references: string[];
+  is_finalized: boolean;
+  author_response: string;
+  action_taken: string;
+  manuscript_changes: string;
+}
+
+export async function getCommentWork(
+  projectId: string,
+  roundNumber: number,
+): Promise<CommentWorkRow[]> {
+  const { data } = await api.get<CommentWorkRow[]>(
+    `/api/projects/${projectId}/comment_work/${roundNumber}`,
+  );
+  return data;
+}
+
+export async function updateCommentWork(
+  projectId: string,
+  roundNumber: number,
+  reviewerNumber: number,
+  commentNumber: number,
+  updates: Record<string, unknown>,
+): Promise<void> {
+  await api.patch(
+    `/api/projects/${projectId}/comment_work/${roundNumber}/${reviewerNumber}/${commentNumber}`,
+    updates,
+  );
+}
+
+export async function replaceComments(
+  projectId: string,
+  roundNumber: number,
+  comments: Record<string, unknown>[],
+): Promise<void> {
+  await api.put(
+    `/api/projects/${projectId}/comment_work/${roundNumber}`,
+    { comments },
+  );
+}
+
 export function downloadPointByPointDocx(projectId: string, roundNumber: number): string {
   return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/point_by_point_docx`;
+}
+
+export function downloadManuscriptReferencePdf(projectId: string): string {
+  return `${API_BASE}/api/projects/${projectId}/manuscript_reference_pdf`;
 }
 
 export function downloadRevisedManuscriptDocx(projectId: string, roundNumber: number): string {
   return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/revised_manuscript_docx`;
 }
 
+export function downloadRevisedManuscriptPdf(projectId: string, roundNumber: number): string {
+  return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/revised_manuscript_pdf`;
+}
+
 export function downloadTrackChangesDocx(projectId: string, roundNumber: number): string {
   return `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/track_changes_docx`;
+}
+
+export function downloadProjectZip(projectId: string): string {
+  return `${API_BASE}/api/projects/${projectId}/download_zip`;
+}
+
+/** Fetch AI-powered track changes .docx as a blob (may take 30+ seconds). */
+export async function fetchTrackChangesDocx(
+  projectId: string,
+  roundNumber: number,
+  author: string,
+): Promise<Blob> {
+  const url = `${API_BASE}/api/projects/${projectId}/revision_rounds/${roundNumber}/track_changes_docx?author=${encodeURIComponent(author)}`;
+  const resp = await fetch(url, { credentials: 'include' });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => 'Unknown error');
+    let detail = text;
+    try { detail = JSON.parse(text).detail || text; } catch {}
+    throw new Error(detail);
+  }
+  return resp.blob();
+}
+
+/** Generate the revision document package (track changes, clean docx, revised PDF, point-by-point). */
+export async function generateAllDocs(
+  projectId: string,
+  req: { round_number: number; author?: string },
+): Promise<{ status: string; round_number: number; revised_pdf_ready?: boolean }> {
+  const { data } = await api.post<{ status: string; round_number: number; revised_pdf_ready?: boolean }>(
+    `/api/projects/${projectId}/revision_rounds/generate_all_docs`,
+    req,
+  );
+  return data;
 }
 
 // ── Screening ─────────────────────────────────────────────────────────────────

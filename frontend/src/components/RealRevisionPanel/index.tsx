@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import type { CommentChangeSuggestion, CommentPlan, DiscussionMessage, RevisionIntakeData, RealReviewerComment, RevisionRound, ImportManuscriptResult } from '../../types/paper';
 import {
   importManuscript,
@@ -7,14 +7,20 @@ import {
   suggestChanges,
   discussComment,
   finalizeComment,
-  generateFromPlans,
+  generateAllDocs,
   getRevisionRounds,
   getRevisionWip,
   saveRevisionWip,
+  getCommentWork,
+  updateCommentWork,
+  replaceComments,
   downloadPointByPointDocx,
+  downloadManuscriptReferencePdf,
   downloadRevisedManuscriptDocx,
+  downloadRevisedManuscriptPdf,
   downloadTrackChangesDocx,
 } from '../../api/projects';
+import { fetchSettings } from '../../api/settings';
 import LoadingLottie from '../LoadingLottie';
 
 export type StepId = 'manuscript' | 'comments' | 'edit_comments' | 'responses' | 'download';
@@ -66,32 +72,7 @@ function MetaBadge({ text }: { text: string }) {
   );
 }
 
-function CommentChip({
-  plan,
-  isActive,
-  onClick,
-}: {
-  plan: CommentPlan;
-  isActive: boolean;
-  onClick: () => void;
-}) {
-  const label = `R${plan.reviewer_number} C${plan.comment_number}`;
-  let cls = 'text-xs font-medium px-2.5 py-1 rounded-full border cursor-pointer transition-colors ';
-  if (plan.is_finalized) {
-    cls += 'bg-emerald-100 text-emerald-700 border-emerald-200';
-  } else if (isActive) {
-    cls += 'bg-brand-600 text-white border-brand-600';
-  } else {
-    cls += 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50';
-  }
-  return (
-    <button onClick={onClick} className={cls} title={plan.original_comment.slice(0, 80)}>
-      {label} {plan.is_finalized ? '✓' : isActive ? '●' : '○'}
-    </button>
-  );
-}
-
-export default function RealRevisionPanel({ projectId, initialData, onOpenSettings: _onOpenSettings, activeStep, onStepChange }: Props) {
+export default function RealRevisionPanel({ projectId, initialData, activeStep, onStepChange }: Props) {
   // ── Round management ──────────────────────────────────────────────────────
   const [rounds, setRounds] = useState<RevisionRound[]>([]);
   const [activeRound, setActiveRound] = useState(1);
@@ -133,25 +114,26 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   // Guard: when restoring comment_plans from WIP, skip the "fresh init" effect
   const wipPlansLoadedRef = useRef(false);
   const wipSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const planSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Download step ─────────────────────────────────────────────────────────
   const [currentRound, setCurrentRound] = useState<RevisionRound | null>(null);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
 
-  // ── Auto-save WIP state whenever meaningful state changes ────────────────
+  // ── Author dialog for document generation ──────────────────────────────
+  const [showAuthorDialog, setShowAuthorDialog] = useState(false);
+  const [trackChangesAuthor, setTrackChangesAuthor] = useState('');
+
+  // ── Auto-save slim WIP state (non-comment data only) ─────────────────────
   useEffect(() => {
-    // Don't save if there's nothing worth persisting yet
-    if (!manuscriptText && parsedComments.length === 0 && commentPlans.length === 0) return;
+    if (!manuscriptText && !rawComments && !importResult) return;
     if (wipSaveTimerRef.current) clearTimeout(wipSaveTimerRef.current);
     wipSaveTimerRef.current = setTimeout(() => {
       saveRevisionWip(projectId, {
         import_result: importResult,
         raw_comments: rawComments,
         journal_name: journalName,
-        parsed_comments: parsedComments,
-        suggestions,
-        comment_plans: commentPlans,
         step,
       }).catch(() => {});
     }, 1500);
@@ -159,9 +141,9 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
       if (wipSaveTimerRef.current) clearTimeout(wipSaveTimerRef.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [importResult, parsedComments, commentPlans, suggestions, step, rawComments, journalName]);
+  }, [importResult, step, rawComments, journalName]);
 
-  // ── Load existing rounds + WIP state on mount ─────────────────────────────
+  // ── Load existing rounds + WIP state + comment_work on mount ────────────
   useEffect(() => {
     getRevisionRounds(projectId).then((r) => {
       if (r.length > 0) setRounds(r as RevisionRound[]);
@@ -174,25 +156,53 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         if (wip.import_result) setImportResult(wip.import_result as ImportManuscriptResult);
         if (wip.raw_comments) setRawComments(wip.raw_comments);
         if (wip.journal_name) setJournalName(wip.journal_name);
-        if (wip.comment_plans && wip.comment_plans.length > 0) {
-          // Set the guard BEFORE setting parsedComments to stop the
-          // "fresh init" effect from wiping the restored plans.
-          wipPlansLoadedRef.current = true;
-          setCommentPlans(wip.comment_plans as CommentPlan[]);
-          // Also restore the already-triggered keys so auto-init doesn't re-fire
-          autoInitTriggeredRef.current = new Set(
-            (wip.comment_plans as CommentPlan[]).map(
-              (p) => `${p.reviewer_number}-${p.comment_number}`
-            )
-          );
-        }
-        if (wip.parsed_comments && wip.parsed_comments.length > 0) {
-          setParsedComments(wip.parsed_comments as RealReviewerComment[]);
-        }
-        if (wip.suggestions && wip.suggestions.length > 0) {
-          setSuggestions(wip.suggestions as CommentChangeSuggestion[]);
-        }
         if (wip.step) changeStep(wip.step as StepId);
+      }).catch(() => {});
+
+      // Load per-comment data from comment_work table
+      getCommentWork(projectId, activeRound).then((rows) => {
+        if (rows.length === 0) return;
+        // Rebuild parsedComments from rows
+        const parsed: RealReviewerComment[] = rows.map((r) => ({
+          reviewer_number: r.reviewer_number,
+          comment_number: r.comment_number,
+          original_comment: r.original_comment,
+          category: r.category as 'major' | 'minor' | 'editorial',
+          severity: r.severity as 'major' | 'minor' | 'editorial' | undefined,
+          domain: r.domain as RealReviewerComment['domain'],
+          requirement_level: r.requirement_level as RealReviewerComment['requirement_level'],
+          ambiguity_flag: r.ambiguity_flag,
+          ambiguity_question: r.ambiguity_question,
+          intent_interpretation: r.intent_interpretation,
+        }));
+        // Set guard BEFORE setting parsedComments to prevent fresh-init effect
+        wipPlansLoadedRef.current = true;
+        setParsedComments(parsed);
+
+        // Rebuild suggestions from rows that have them
+        const sugs: CommentChangeSuggestion[] = rows
+          .filter((r) => r.suggestion)
+          .map((r) => r.suggestion as CommentChangeSuggestion);
+        if (sugs.length > 0) setSuggestions(sugs);
+
+        // Rebuild commentPlans from rows
+        const plans: CommentPlan[] = rows.map((r) => ({
+          reviewer_number: r.reviewer_number,
+          comment_number: r.comment_number,
+          original_comment: r.original_comment,
+          category: r.category,
+          discussion: r.discussion ?? [],
+          current_plan: r.current_plan ?? '',
+          doi_references: r.doi_references ?? [],
+          is_finalized: r.is_finalized,
+          author_response: r.author_response ?? '',
+          action_taken: r.action_taken ?? '',
+          manuscript_changes: r.manuscript_changes ?? '',
+        }));
+        setCommentPlans(plans);
+        autoInitTriggeredRef.current = new Set(
+          plans.map((p) => `${p.reviewer_number}-${p.comment_number}`)
+        );
       }).catch(() => {});
     }
   }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -349,6 +359,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         manuscript_text: manuscriptText,
         journal_name: journalName,
         parsed_comments: parsedComments,
+        round_number: activeRound,
       });
       setSuggestions(out);
     } catch (e: any) {
@@ -383,6 +394,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         reviewer_number: plan.reviewer_number,
         comment_number: plan.comment_number,
         user_message: initMessage,
+        round_number: activeRound,
         history: [],
         current_plan: '',
         doi_references: [],
@@ -431,6 +443,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         reviewer_number: plan.reviewer_number,
         comment_number: plan.comment_number,
         user_message: message,
+        round_number: activeRound,
         history: plan.discussion,
         current_plan: plan.current_plan,
         doi_references: plan.doi_references,
@@ -456,26 +469,38 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   function handleAddDoi() {
     const doi = doiInput.trim();
     if (!doi) return;
+    const plan = commentPlans[activeCommentIdx];
+    if (!plan || plan.doi_references.includes(doi)) return;
+    const newDois = [...plan.doi_references, doi];
     setCommentPlans((prev) => prev.map((p, i) =>
-      i === activeCommentIdx && !p.doi_references.includes(doi)
-        ? { ...p, doi_references: [...p.doi_references, doi] }
-        : p
+      i === activeCommentIdx ? { ...p, doi_references: newDois } : p
     ));
     setDoiInput('');
+    updateCommentWork(projectId, activeRound, plan.reviewer_number, plan.comment_number, { doi_references: newDois }).catch(() => {});
   }
 
   function handleRemoveDoi(doi: string) {
+    const plan = commentPlans[activeCommentIdx];
+    if (!plan) return;
+    const newDois = plan.doi_references.filter((d) => d !== doi);
     setCommentPlans((prev) => prev.map((p, i) =>
-      i === activeCommentIdx
-        ? { ...p, doi_references: p.doi_references.filter((d) => d !== doi) }
-        : p
+      i === activeCommentIdx ? { ...p, doi_references: newDois } : p
     ));
+    updateCommentWork(projectId, activeRound, plan.reviewer_number, plan.comment_number, { doi_references: newDois }).catch(() => {});
   }
 
   function handleUpdatePlan(value: string) {
+    const plan = commentPlans[activeCommentIdx];
     setCommentPlans((prev) => prev.map((p, i) =>
       i === activeCommentIdx ? { ...p, current_plan: value } : p
     ));
+    // Debounced save (user is typing)
+    if (plan) {
+      if (planSaveTimerRef.current) clearTimeout(planSaveTimerRef.current);
+      planSaveTimerRef.current = setTimeout(() => {
+        updateCommentWork(projectId, activeRound, plan.reviewer_number, plan.comment_number, { current_plan: value }).catch(() => {});
+      }, 500);
+    }
   }
 
   async function handleFinalizeComment() {
@@ -490,6 +515,7 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         reviewer_number: plan.reviewer_number,
         comment_number: plan.comment_number,
         finalized_plan: plan.current_plan,
+        round_number: activeRound,
         manuscript_text: manuscriptText,
       });
 
@@ -521,30 +547,57 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   }
 
   function handleUnfinalizeComment(idx: number) {
+    const plan = commentPlans[idx];
     setCommentPlans((prev) => prev.map((p, i) =>
       i === idx ? { ...p, is_finalized: false, author_response: '', action_taken: '', manuscript_changes: '' } : p
     ));
     setActiveCommentIdx(idx);
     changeStep('responses');
+    if (plan) {
+      updateCommentWork(projectId, activeRound, plan.reviewer_number, plan.comment_number, { is_finalized: false }).catch(() => {});
+    }
   }
 
   // ── Handler: Generate documents ───────────────────────────────────────────
 
-  async function handleGenerateFromPlans() {
+  function handleGenerateFromPlans() {
     if (!commentPlans.every((p) => p.is_finalized)) return;
+    // Show author dialog — actual generation happens in handleGenerateAllDocs
+    (async () => {
+      try {
+        const s = await fetchSettings();
+        setTrackChangesAuthor(s.track_changes_author || 'Amit');
+      } catch { setTrackChangesAuthor('Amit'); }
+    })();
+    setGenerateError(null);
+    setShowAuthorDialog(true);
+  }
+
+  async function handleGenerateAllDocs() {
+    const author = trackChangesAuthor.trim() || 'Amit';
+    setShowAuthorDialog(false);
     setGenerateLoading(true);
     setGenerateError(null);
     try {
-      const round = await generateFromPlans(projectId, {
+      await generateAllDocs(projectId, {
+        round_number: activeRound,
+        author,
+      });
+      const roundData: RevisionRound = {
         round_number: activeRound,
         journal_name: journalName,
-        finalized_plans: commentPlans,
-      });
-      setCurrentRound(round);
+        raw_comments: rawComments,
+        parsed_comments: parsedComments,
+        responses: [],
+        revised_article: '',
+        point_by_point_md: '',
+        created_at: new Date().toISOString(),
+      };
+      setCurrentRound(roundData);
       setRounds((prev) => {
-        const idx = prev.findIndex((r) => r.round_number === round.round_number);
-        if (idx >= 0) { const next = [...prev]; next[idx] = round; return next; }
-        return [...prev, round];
+        const idx = prev.findIndex((r) => r.round_number === activeRound);
+        if (idx >= 0) { const next = [...prev]; next[idx] = roundData; return next; }
+        return [...prev, roundData];
       });
     } catch (e: any) {
       setGenerateError(e.message ?? 'Generation failed');
@@ -566,12 +619,37 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
 
   // ── Handlers: Edit Comments ───────────────────────────────────────────────
 
+  function _persistComments(updated: RealReviewerComment[]) {
+    replaceComments(projectId, activeRound, updated.map((c) => ({
+      reviewer_number: c.reviewer_number,
+      comment_number: c.comment_number,
+      original_comment: c.original_comment,
+      category: c.category,
+      severity: c.severity,
+      domain: c.domain,
+      requirement_level: c.requirement_level,
+      ambiguity_flag: c.ambiguity_flag,
+      ambiguity_question: c.ambiguity_question,
+      intent_interpretation: c.intent_interpretation,
+    }))).catch(() => {});
+  }
+
   function handleEditComment(idx: number, field: 'original_comment' | 'category', value: string) {
-    setParsedComments((prev) => prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c)));
+    setParsedComments((prev) => {
+      const updated = prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c));
+      // Debounce edit persistence — user may be typing
+      if (planSaveTimerRef.current) clearTimeout(planSaveTimerRef.current);
+      planSaveTimerRef.current = setTimeout(() => _persistComments(updated), 500);
+      return updated;
+    });
   }
 
   function handleDeleteComment(idx: number) {
-    setParsedComments((prev) => _renumberComments(prev.filter((_, i) => i !== idx)));
+    setParsedComments((prev) => {
+      const updated = _renumberComments(prev.filter((_, i) => i !== idx));
+      _persistComments(updated);
+      return updated;
+    });
   }
 
   function handleCombineComments(idx: number) {
@@ -583,7 +661,9 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
         original_comment: next[idx].original_comment + '\n\n' + next[idx + 1].original_comment,
       };
       next.splice(idx, 2, combined);
-      return _renumberComments(next);
+      const updated = _renumberComments(next);
+      _persistComments(updated);
+      return updated;
     });
   }
 
@@ -598,17 +678,21 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
           ? [c.original_comment.slice(0, splitIdx).trim(), c.original_comment.slice(splitIdx + 2).trim()]
           : [c.original_comment.slice(0, mid).trim(), c.original_comment.slice(mid).trim()];
       next.splice(idx, 1, { ...c, original_comment: first }, { ...c, original_comment: second });
-      return _renumberComments(next);
+      const updated = _renumberComments(next);
+      _persistComments(updated);
+      return updated;
     });
   }
 
   function handleAddComment(reviewerNumber: number) {
-    setParsedComments((prev) =>
-      _renumberComments([
+    setParsedComments((prev) => {
+      const updated = _renumberComments([
         ...prev,
         { reviewer_number: reviewerNumber, comment_number: 0, original_comment: '', category: 'major' as const },
-      ])
-    );
+      ]);
+      _persistComments(updated);
+      return updated;
+    });
   }
 
   // ── Computed ──────────────────────────────────────────────────────────────
@@ -621,35 +705,39 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+    <div className="min-h-screen" style={{ background: 'var(--bg-base)' }}>
+      <div className="max-w-5xl mx-auto px-4 py-6 space-y-5">
 
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Manuscript Revision</h1>
-            <p className="text-sm text-slate-500 mt-1">Real peer-review response workflow</p>
+            <h1 style={{
+              fontFamily: "Newsreader, Georgia, serif",
+              fontWeight: 600,
+              fontSize: '1.9rem',
+              color: 'var(--text-bright)',
+              letterSpacing: '-0.02em',
+              lineHeight: 1.15,
+            }}>
+              Manuscript Revision
+            </h1>
+            <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+              Peer-review response workflow · Round {activeRound}
+            </p>
           </div>
-          {/* Round selector */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 pt-0.5 flex-shrink-0">
             {rounds.map((r) => (
               <button
                 key={r.round_number}
                 onClick={() => { setActiveRound(r.round_number); setCurrentRound(r); changeStep('download'); }}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                  activeRound === r.round_number
-                    ? 'bg-brand-600 text-white'
-                    : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-                }`}
+                className="rev-round-btn"
+                style={activeRound === r.round_number ? { background: 'var(--gold)', borderColor: 'var(--gold)', color: '#fff' } : undefined}
               >
                 Round {r.round_number}
               </button>
             ))}
             {rounds.length > 0 && (
-              <button
-                onClick={handleNewRound}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
-              >
+              <button onClick={handleNewRound} className="rev-round-btn rev-round-btn--new">
                 + New Round
               </button>
             )}
@@ -658,37 +746,62 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
 
         {/* Auto-processing banner */}
         {(importLoading || parseLoading) && (
-          <div className="flex items-center gap-2 text-sm text-brand-700 bg-brand-50 border border-brand-200 rounded-xl px-4 py-2.5">
-            <LoadingLottie className="w-6 h-6" />
+          <div className="flex items-center gap-3 rounded-xl px-4 py-3 text-sm animate-in" style={{
+            background: 'var(--gold-faint)',
+            border: '1px solid var(--border-muted)',
+            color: 'var(--gold)',
+            fontWeight: 500,
+          }}>
+            <LoadingLottie className="w-5 h-5 flex-shrink-0" />
             Processing your manuscript and parsing reviewer comments…
           </div>
         )}
 
-        {/* Step nav */}
-        <div className="flex gap-1 bg-white border border-slate-200 rounded-xl p-1.5">
-          {STEPS.map(({ id, label }) => (
-            <button
-              key={id}
-              onClick={() => changeStep(id)}
-              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
-                step === id
-                  ? 'bg-brand-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-50'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        {/* Stepper */}
+        <div className="rev-step-bar animate-in delay-0">
+          {STEPS.map(({ id, label }, index) => {
+            const stepOrder = STEPS.findIndex(s => s.id === step);
+            const isDone = index < stepOrder;
+            const isActive = step === id;
+            const cleanLabel = label.replace(/^\d+\. /, '');
+            return (
+              <Fragment key={id}>
+                {index > 0 && (
+                  <div className={`rev-step-connector${isDone ? ' done' : ''}`} />
+                )}
+                <div className="rev-step-node">
+                  <button
+                    onClick={() => changeStep(id)}
+                    className={`rev-step-circle${isDone ? ' is-done' : isActive ? ' is-active' : ''}`}
+                  >
+                    {isDone ? '✓' : index + 1}
+                  </button>
+                  <span className={`rev-step-label${isDone ? ' is-done' : isActive ? ' is-active' : ''}`}>
+                    {cleanLabel}
+                  </span>
+                </div>
+              </Fragment>
+            );
+          })}
         </div>
 
         {/* ── Step 1: Manuscript ─────────────────────────────────────────────── */}
         {step === 'manuscript' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-slate-800">Manuscript</h2>
+          <div className="rev-card animate-in delay-75 space-y-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="rev-heading">
+                  {importResult ? 'Manuscript Imported' : 'Import Your Manuscript'}
+                </h2>
+                <p className="rev-subheading">
+                  {importResult
+                    ? 'Structure extracted. Review the summary and proceed to reviewer comments.'
+                    : 'Paste the full text or upload a .docx file to extract structure, sections, and references.'}
+                </p>
+              </div>
               {importResult && (
-                <label className="cursor-pointer text-sm text-brand-600 hover:text-brand-800 underline underline-offset-2 font-medium">
-                  ↺ Replace manuscript
+                <label style={{ flexShrink: 0, padding: '6px 14px', borderRadius: 10, border: '1px solid var(--border-muted)', color: 'var(--text-secondary)', fontSize: 12, fontWeight: 600, fontFamily: 'Manrope', cursor: 'pointer', background: 'transparent', whiteSpace: 'nowrap' }}>
+                  ↺ Replace
                   <input type="file" accept=".docx,.doc,.txt" className="hidden"
                     onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportFile(f); e.target.value = ''; }} />
                 </label>
@@ -696,126 +809,192 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
             </div>
 
             {importLoading && (
-              <div className="flex items-center gap-2 text-sm text-slate-500 bg-slate-50 rounded-xl p-4 border border-slate-200">
-                <LoadingLottie className="w-6 h-6" />
-                Processing manuscript…
+              <div className="flex items-center gap-3 py-8 justify-center" style={{ color: 'var(--text-muted)' }}>
+                <LoadingLottie className="w-8 h-8" />
+                <span className="text-sm">Analysing manuscript structure…</span>
               </div>
             )}
 
             {importError && (
-              <p className="text-sm text-rose-600 bg-rose-50 rounded-lg p-3">{importError}</p>
+              <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'rgba(200,50,50,0.08)', border: '1px solid rgba(200,50,50,0.2)', color: '#c05050' }}>
+                {importError}
+              </div>
             )}
 
             {importResult ? (
-              <div className="grid grid-cols-3 gap-4">
-                {[
-                  { label: 'Word count', value: importResult.word_count.toLocaleString() },
-                  { label: 'Sections found', value: importResult.sections_found.length },
-                  { label: 'References', value: importResult.references_found },
-                ].map(({ label, value }) => (
-                  <div key={label} className="bg-slate-50 rounded-xl p-3 text-center">
-                    <div className="text-xl font-bold text-slate-800">{value}</div>
-                    <div className="text-xs text-slate-500 mt-1">{label}</div>
-                  </div>
-                ))}
-                <div className="col-span-3 bg-blue-50 border border-blue-100 rounded-xl p-4">
-                  <p className="text-xs font-semibold text-blue-700 mb-1 uppercase tracking-wide">Manuscript Summary</p>
-                  <p className="text-sm text-slate-700">{importResult.manuscript_summary}</p>
+              <div className="space-y-5">
+                {/* Stats */}
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { label: 'WORDS',      value: importResult.word_count.toLocaleString() },
+                    { label: 'SECTIONS',   value: importResult.sections_found.length },
+                    { label: 'REFERENCES', value: importResult.references_found },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="rev-stat animate-in">
+                      <div className="rev-stat-value">{value}</div>
+                      <div className="rev-stat-label">{label}</div>
+                    </div>
+                  ))}
                 </div>
+                {/* Summary */}
+                <div className="rounded-xl p-4" style={{ background: 'var(--bg-base)', border: '1px solid var(--border-faint)' }}>
+                  <p className="text-xs font-semibold mb-1.5 uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Manuscript Summary</p>
+                  <p className="text-sm leading-relaxed" style={{ color: 'var(--text-body)' }}>{importResult.manuscript_summary}</p>
+                </div>
+                {/* Revision-ready */}
+                {(importResult.prepared_docx || importResult.reference_pdf_ready || importResult.reference_pdf_warning) && (
+                  <div className="rounded-xl p-4 space-y-2" style={{ background: 'var(--gold-faint)', border: '1px solid var(--border-muted)' }}>
+                    <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: 'var(--gold)' }}>Revision-Ready Source</p>
+                    <p className="text-sm" style={{ color: 'var(--text-body)' }}>
+                      {importResult.prepared_docx
+                        ? 'Track changes and continuous line numbering were enabled on the uploaded .docx.'
+                        : 'The manuscript was imported, but revision-ready Word settings could not be confirmed.'}
+                    </p>
+                    {importResult.reference_pdf_ready && (
+                      <a href={downloadManuscriptReferencePdf(projectId)} download
+                        className="inline-flex items-center gap-1.5 text-sm font-semibold underline underline-offset-2"
+                        style={{ color: 'var(--gold)' }}>
+                        ↓ Download line-numbered reference PDF
+                      </a>
+                    )}
+                    {importResult.reference_pdf_warning && (
+                      <p className="text-xs" style={{ color: 'var(--rev-accent)' }}>{importResult.reference_pdf_warning}</p>
+                    )}
+                  </div>
+                )}
+                {/* Sections */}
                 {importResult.sections_found.length > 0 && (
-                  <div className="col-span-3">
-                    <p className="text-xs text-slate-500 mb-2">Sections detected:</p>
+                  <div>
+                    <p className="text-xs uppercase tracking-widest mb-2" style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Sections Detected</p>
                     <div className="flex flex-wrap gap-1.5">
                       {importResult.sections_found.map((s) => (
-                        <span key={s} className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">{s}</span>
+                        <span key={s} className="text-xs px-2.5 py-0.5 rounded-full"
+                          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-faint)', color: 'var(--text-secondary)' }}>
+                          {s}
+                        </span>
                       ))}
                     </div>
                   </div>
                 )}
-                <div className="col-span-3">
-                  <button
-                    onClick={() => changeStep('comments')}
-                    className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700"
-                  >
-                    Next: Reviewer Comments →
-                  </button>
-                </div>
+                <button
+                  onClick={() => changeStep('comments')}
+                  className="rev-btn"
+                  style={{ background: 'var(--gold)', color: '#fff' }}
+                >
+                  Continue to Reviewer Comments →
+                </button>
               </div>
-            ) : (
-              !importLoading && (
-                <>
-                  <p className="text-sm text-slate-500">
-                    Paste or upload your manuscript. We'll extract its structure, references, and generate a summary.
-                  </p>
+            ) : !importLoading && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* Paste */}
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Paste Text</p>
                   <textarea
-                    rows={12}
+                    rows={10}
                     value={manuscriptText}
                     onChange={(e) => setManuscriptText(e.target.value)}
                     placeholder="Paste your full manuscript here…"
-                    className="w-full rounded-xl border-2 border-slate-200 p-3 text-sm text-slate-800
-                      placeholder-slate-400 resize-none focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                    className="w-full rounded-xl p-3 resize-none focus:outline-none"
+                    style={{
+                      background: 'var(--bg-base)',
+                      border: '1.5px solid var(--border-muted)',
+                      color: 'var(--text-body)',
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 11.5,
+                      lineHeight: 1.7,
+                    }}
                   />
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={handleImportText}
-                      disabled={!manuscriptText.trim()}
-                      className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-brand-600
-                        hover:bg-brand-700 disabled:opacity-40 transition-colors"
-                    >
-                      Process Manuscript
-                    </button>
-                    <label className="cursor-pointer text-sm text-brand-600 hover:text-brand-800 underline underline-offset-2">
-                      Upload .docx
-                      <input type="file" accept=".docx,.doc,.txt" className="hidden"
-                        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportFile(f); e.target.value = ''; }} />
-                    </label>
-                  </div>
-                </>
-              )
+                  <button
+                    onClick={handleImportText}
+                    disabled={!manuscriptText.trim()}
+                    className="rev-btn"
+                    style={{
+                      background: manuscriptText.trim() ? 'var(--gold)' : 'var(--bg-elevated)',
+                      color: manuscriptText.trim() ? '#fff' : 'var(--text-muted)',
+                      opacity: manuscriptText.trim() ? 1 : 0.5,
+                      cursor: manuscriptText.trim() ? 'pointer' : 'not-allowed',
+                    }}
+                  >
+                    Process Text
+                  </button>
+                </div>
+                {/* Upload */}
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Upload File</p>
+                  <label className="rev-dropzone" style={{ minHeight: 220 }}>
+                    <div style={{ width: 52, height: 52, borderRadius: 14, background: 'var(--bg-elevated)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>📄</div>
+                    <div className="text-center">
+                      <p className="text-sm font-semibold" style={{ color: 'var(--text-body)' }}>Drop your .docx here</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>or click to browse · .docx, .doc, .txt</p>
+                    </div>
+                    <input type="file" accept=".docx,.doc,.txt" className="hidden"
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportFile(f); e.target.value = ''; }} />
+                  </label>
+                </div>
+              </div>
             )}
           </div>
         )}
 
         {/* ── Step 2: Reviewer Comments ──────────────────────────────────────── */}
         {step === 'comments' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-            <h2 className="text-lg font-semibold text-slate-800">Reviewer Comments</h2>
-            <p className="text-sm text-slate-500">
-              Paste the full reviewer decision letter. The AI will parse individual comments grouped by reviewer.
-            </p>
+          <div className="rev-card animate-in delay-75 space-y-5">
+            <div>
+              <h2 className="rev-heading">Reviewer Comments</h2>
+              <p className="rev-subheading">
+                Paste the full decision letter. The AI will identify and categorise each reviewer's comments.
+              </p>
+            </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                Journal name <span className="text-slate-400 font-normal">(optional)</span>
+              <label className="text-xs font-semibold uppercase tracking-widest block mb-2" style={{ color: 'var(--text-muted)' }}>
+                Target Journal <span className="normal-case font-normal" style={{ color: 'var(--text-faint)' }}>(optional)</span>
               </label>
               <input
                 type="text"
                 value={journalName}
                 onChange={(e) => setJournalName(e.target.value)}
-                placeholder="e.g. PLOS ONE, BMJ…"
-                className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                placeholder="e.g. PLOS ONE, BMJ, Nature Medicine…"
+                className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
+                style={{ background: 'var(--bg-base)', border: '1.5px solid var(--border-muted)', color: 'var(--text-body)' }}
               />
             </div>
 
-            <textarea
-              rows={12}
-              value={rawComments}
-              onChange={(e) => setRawComments(e.target.value)}
-              placeholder="Paste journal decision letter with reviewer comments here…"
-              className="w-full rounded-xl border-2 border-slate-200 p-3 text-sm text-slate-800
-                placeholder-slate-400 resize-none focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
-            />
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-widest block mb-2" style={{ color: 'var(--text-muted)' }}>
+                Decision Letter
+              </label>
+              <textarea
+                rows={10}
+                value={rawComments}
+                onChange={(e) => setRawComments(e.target.value)}
+                placeholder="Paste the full journal decision letter with reviewer comments here…"
+                className="w-full rounded-xl p-3 resize-none focus:outline-none"
+                style={{
+                  background: 'var(--bg-base)',
+                  border: '1.5px solid var(--border-muted)',
+                  color: 'var(--text-body)',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 11.5,
+                  lineHeight: 1.7,
+                }}
+              />
+            </div>
 
             <div className="flex items-center gap-3">
               <button
                 onClick={handleParseComments}
                 disabled={!rawComments.trim() || parseLoading}
-                className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-brand-600
-                  hover:bg-brand-700 disabled:opacity-40 transition-colors"
+                className="rev-btn"
+                style={{
+                  background: 'var(--gold)', color: '#fff',
+                  opacity: (!rawComments.trim() || parseLoading) ? 0.4 : 1,
+                  cursor: (!rawComments.trim() || parseLoading) ? 'not-allowed' : 'pointer',
+                }}
               >
                 {parseLoading ? 'Parsing…' : 'Parse Comments'}
               </button>
-              <label className="cursor-pointer text-sm text-brand-600 hover:text-brand-800 underline underline-offset-2">
+              <label className="text-sm font-medium cursor-pointer" style={{ color: 'var(--gold)', textDecoration: 'underline', textUnderlineOffset: 3 }}>
                 Upload .docx
                 <input type="file" accept=".docx,.doc,.txt" className="hidden"
                   onChange={(e) => { const f = e.target.files?.[0]; if (f) handleParseCommentsFile(f); e.target.value = ''; }} />
@@ -823,64 +1002,79 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
             </div>
 
             {parseError && (
-              <p className="text-sm text-rose-600 bg-rose-50 rounded-lg p-3">{parseError}</p>
+              <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'rgba(200,50,50,0.08)', border: '1px solid rgba(200,50,50,0.2)', color: '#c05050' }}>
+                {parseError}
+              </div>
             )}
 
             {parsedComments.length > 0 && (
-              <div className="space-y-3">
-                <p className="text-sm font-medium text-slate-700">{parsedComments.length} comments parsed:</p>
+              <div className="space-y-3 animate-in">
+                <p className="text-sm font-medium" style={{ color: 'var(--text-body)' }}>
+                  <span style={{ color: 'var(--gold)', fontWeight: 700 }}>{parsedComments.length}</span> comments parsed across {new Set(parsedComments.map(c => c.reviewer_number)).size} reviewer{new Set(parsedComments.map(c => c.reviewer_number)).size !== 1 ? 's' : ''}
+                </p>
                 {Array.from(new Set(parsedComments.map((c) => c.reviewer_number))).sort().map((revNum) => (
-                  <div key={revNum} className="rounded-xl border border-slate-200 overflow-hidden">
-                    <div className="bg-slate-50 px-4 py-2 border-b border-slate-200">
-                      <h3 className="text-sm font-semibold text-slate-700">Reviewer #{revNum}</h3>
+                  <div key={revNum} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border-faint)' }}>
+                    <div className="px-4 py-2.5 flex items-center gap-2" style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border-faint)' }}>
+                      <div className="w-5 h-5 rounded-full text-xs font-bold flex items-center justify-center text-white" style={{ background: 'var(--gold)' }}>
+                        {revNum}
+                      </div>
+                      <h3 className="text-sm font-semibold" style={{ color: 'var(--text-body)' }}>Reviewer {revNum}</h3>
+                      <span className="text-xs ml-auto" style={{ color: 'var(--text-muted)' }}>
+                        {parsedComments.filter(c => c.reviewer_number === revNum).length} comments
+                      </span>
                     </div>
-                    <div className="divide-y divide-slate-100">
-                      {parsedComments
-                        .filter((c) => c.reviewer_number === revNum)
-                        .map((c) => (
-                          <div key={`${c.reviewer_number}-${c.comment_number}`} className="p-4 space-y-2">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-medium text-slate-500">Comment {c.comment_number}</span>
-                              <CategoryBadge category={c.severity ?? c.category} />
-                              {c.domain && <MetaBadge text={c.domain} />}
-                              {c.requirement_level && <MetaBadge text={c.requirement_level} />}
-                            </div>
-                            {c.intent_interpretation && (
-                              <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-md px-2 py-1">
-                                <span className="font-semibold">Interpretation:</span> {c.intent_interpretation}
-                              </p>
-                            )}
-                            {c.ambiguity_flag && (
-                              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
-                                <span className="font-semibold">Needs clarification:</span> {c.ambiguity_question || 'Please clarify this reviewer request before drafting changes.'}
-                              </p>
-                            )}
-                            <textarea
-                              rows={3}
-                              defaultValue={c.original_comment}
-                              onChange={(e) => {
-                                setParsedComments((prev) =>
-                                  prev.map((p) =>
-                                    p.reviewer_number === c.reviewer_number && p.comment_number === c.comment_number
-                                      ? { ...p, original_comment: e.target.value }
-                                      : p
-                                  )
-                                );
-                              }}
-                              className="w-full text-sm text-slate-700 border border-slate-200 rounded-lg p-2
-                                resize-none focus:outline-none focus:border-brand-400"
-                            />
+                    <div style={{ background: 'var(--bg-surface)' }}>
+                      {parsedComments.filter((c) => c.reviewer_number === revNum).map((c) => (
+                        <div key={`${c.reviewer_number}-${c.comment_number}`} className="p-4 space-y-2" style={{ borderBottom: '1px solid var(--border-faint)' }}>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>#{c.comment_number}</span>
+                            <CategoryBadge category={c.severity ?? c.category} />
+                            {c.domain && <MetaBadge text={c.domain} />}
+                            {c.requirement_level && <MetaBadge text={c.requirement_level} />}
                           </div>
-                        ))}
+                          {c.intent_interpretation && (
+                            <p className="text-xs rounded-lg px-2.5 py-1.5" style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-faint)' }}>
+                              <span className="font-semibold">Interpretation:</span> {c.intent_interpretation}
+                            </p>
+                          )}
+                          {c.ambiguity_flag && (
+                            <p className="text-xs rounded-lg px-2.5 py-1.5" style={{ background: 'var(--rev-accent-faint)', border: '1px solid var(--rev-accent-ring)', color: 'var(--rev-accent)' }}>
+                              <span className="font-semibold">Needs clarification:</span> {c.ambiguity_question || 'Please clarify this reviewer request before drafting changes.'}
+                            </p>
+                          )}
+                          <textarea
+                            rows={3}
+                            defaultValue={c.original_comment}
+                            onChange={(e) => {
+                              setParsedComments((prev) =>
+                                prev.map((p) =>
+                                  p.reviewer_number === c.reviewer_number && p.comment_number === c.comment_number
+                                    ? { ...p, original_comment: e.target.value }
+                                    : p
+                                )
+                              );
+                            }}
+                            className="w-full rounded-lg p-2 resize-none focus:outline-none"
+                            style={{
+                              background: 'var(--bg-base)',
+                              border: '1px solid var(--border-faint)',
+                              color: 'var(--text-body)',
+                              fontFamily: "'JetBrains Mono', monospace",
+                              fontSize: 11,
+                              lineHeight: 1.6,
+                            }}
+                          />
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ))}
-
                 <button
                   onClick={() => changeStep('edit_comments')}
-                  className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700"
+                  className="rev-btn"
+                  style={{ background: 'var(--gold)', color: '#fff' }}
                 >
-                  Next: Edit Comments →
+                  Continue to Edit Comments →
                 </button>
               </div>
             )}
@@ -889,16 +1083,16 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
 
         {/* ── Step 3: Edit Comments ──────────────────────────────────────────── */}
         {step === 'edit_comments' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
+          <div className="rev-card animate-in delay-75 space-y-5">
             <div>
-              <h2 className="text-lg font-semibold text-slate-800">Edit Comments</h2>
-              <p className="text-sm text-slate-500 mt-1">
-                Review the parsed comments. Combine merged items, split oversized ones, delete noise, or add missing comments before the AI coach begins.
+              <h2 className="rev-heading">Edit Comments</h2>
+              <p className="rev-subheading">
+                Review each parsed comment. Combine, split, delete, or add comments before the AI coach begins.
               </p>
             </div>
 
             {parsedComments.length === 0 ? (
-              <div className="text-center py-10 text-slate-500 text-sm">
+              <div className="py-12 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                 No comments yet. Go back to Step 2 to parse reviewer comments.
               </div>
             ) : (
@@ -908,23 +1102,30 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                     .map((c, globalIdx) => ({ c, globalIdx }))
                     .filter(({ c }) => c.reviewer_number === revNum);
                   return (
-                    <div key={revNum} className="rounded-xl border border-slate-200 overflow-hidden">
-                      <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-slate-700">Reviewer #{revNum}</h3>
-                        <span className="text-xs text-slate-400">{revComments.length} comment{revComments.length !== 1 ? 's' : ''}</span>
+                    <div key={revNum} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border-faint)' }}>
+                      <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border-faint)' }}>
+                        <div className="flex items-center gap-2">
+                          <div className="w-5 h-5 rounded-full text-xs font-bold flex items-center justify-center text-white" style={{ background: 'var(--gold)' }}>
+                            {revNum}
+                          </div>
+                          <h3 className="text-sm font-semibold" style={{ color: 'var(--text-body)' }}>Reviewer {revNum}</h3>
+                        </div>
+                        <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                          {revComments.length} comment{revComments.length !== 1 ? 's' : ''}
+                        </span>
                       </div>
-                      <div className="divide-y divide-slate-100">
+                      <div style={{ background: 'var(--bg-surface)' }}>
                         {revComments.map(({ c, globalIdx }, revLocalIdx) => (
-                          <div key={globalIdx} className="p-4 space-y-2">
-                            {/* Header row */}
+                          <div key={globalIdx} className="p-4 space-y-2" style={{ borderBottom: '1px solid var(--border-faint)' }}>
                             <div className="flex items-center gap-2">
-                              <span className="text-xs font-semibold text-slate-500 w-20 flex-shrink-0">
-                                Comment {c.comment_number}
+                              <span className="text-xs font-semibold" style={{ color: 'var(--text-muted)', minWidth: 68 }}>
+                                #{c.comment_number}
                               </span>
                               <select
                                 value={c.category}
                                 onChange={(e) => handleEditComment(globalIdx, 'category', e.target.value)}
-                                className="text-xs border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:border-brand-400 bg-white"
+                                className="text-xs rounded-lg px-2 py-1 focus:outline-none"
+                                style={{ border: '1px solid var(--border-muted)', background: 'var(--bg-base)', color: 'var(--text-body)' }}
                               >
                                 <option value="major">major</option>
                                 <option value="minor">minor</option>
@@ -933,37 +1134,40 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                               <div className="flex items-center gap-1.5 ml-auto">
                                 <button
                                   onClick={() => handleSplitComment(globalIdx)}
-                                  title="Split at first blank line (or midpoint)"
-                                  className="text-xs px-2 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors"
+                                  className="text-xs px-2.5 py-1 rounded-lg transition-colors"
+                                  style={{ border: '1px solid var(--border-muted)', color: 'var(--text-secondary)', background: 'transparent' }}
                                 >
                                   Split
                                 </button>
                                 <button
                                   onClick={() => handleDeleteComment(globalIdx)}
-                                  title="Delete this comment"
-                                  className="text-xs px-2 py-1 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 transition-colors"
+                                  className="text-xs px-2.5 py-1 rounded-lg transition-colors"
+                                  style={{ border: '1px solid rgba(200,80,80,0.3)', color: '#d06060', background: 'transparent' }}
                                 >
                                   ✕ Delete
                                 </button>
                               </div>
                             </div>
-
-                            {/* Editable text */}
                             <textarea
                               rows={4}
                               value={c.original_comment}
                               onChange={(e) => handleEditComment(globalIdx, 'original_comment', e.target.value)}
-                              className="w-full text-sm text-slate-700 border border-slate-200 rounded-lg p-2
-                                resize-none focus:outline-none focus:border-brand-400 focus:ring-1 focus:ring-brand-100"
+                              className="w-full rounded-lg p-2 resize-none focus:outline-none"
+                              style={{
+                                background: 'var(--bg-base)',
+                                border: '1px solid var(--border-faint)',
+                                color: 'var(--text-body)',
+                                fontFamily: "'JetBrains Mono', monospace",
+                                fontSize: 11,
+                                lineHeight: 1.6,
+                              }}
                             />
-
-                            {/* Combine button between consecutive same-reviewer comments */}
                             {revLocalIdx < revComments.length - 1 && (
                               <div className="flex justify-center pt-1">
                                 <button
                                   onClick={() => handleCombineComments(globalIdx)}
-                                  title="Merge this comment with the next one"
-                                  className="text-xs px-3 py-1 rounded-full border border-amber-200 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
+                                  className="text-xs px-3 py-1 rounded-full transition-colors"
+                                  style={{ border: '1px solid var(--rev-accent-ring)', color: 'var(--rev-accent)', background: 'var(--rev-accent-faint)' }}
                                 >
                                   Combine ↓
                                 </button>
@@ -972,61 +1176,71 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                           </div>
                         ))}
                       </div>
-
-                      {/* Add comment per reviewer */}
-                      <div className="px-4 py-3 bg-slate-50 border-t border-slate-100">
+                      <div className="px-4 py-3" style={{ background: 'var(--bg-base)', borderTop: '1px solid var(--border-faint)' }}>
                         <button
                           onClick={() => handleAddComment(revNum)}
-                          className="text-xs text-brand-600 hover:text-brand-800 underline underline-offset-2 font-medium"
+                          style={{ color: 'var(--gold)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, textDecoration: 'underline', textUnderlineOffset: 3 }}
                         >
-                          + Add Comment to Reviewer #{revNum}
+                          + Add Comment to Reviewer {revNum}
                         </button>
                       </div>
                     </div>
                   );
                 })}
 
-                <div className="space-y-3 pt-2 border-t border-slate-100">
+                <div className="space-y-3 pt-4" style={{ borderTop: '1px solid var(--border-faint)' }}>
                   <div className="flex items-center gap-3">
                     <button
                       onClick={handleGenerateSuggestions}
                       disabled={parsedComments.length === 0 || suggestLoading}
-                      className="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 transition-colors"
+                      className="rev-btn"
+                      style={{
+                        background: 'var(--bg-elevated)',
+                        color: 'var(--text-body)',
+                        border: '1px solid var(--border-muted)',
+                        opacity: (parsedComments.length === 0 || suggestLoading) ? 0.4 : 1,
+                        cursor: (parsedComments.length === 0 || suggestLoading) ? 'not-allowed' : 'pointer',
+                      }}
                     >
-                      {suggestLoading ? 'Generating Suggestions…' : 'Generate AI Change Suggestions'}
+                      {suggestLoading ? '⚙ Generating…' : '✦ Generate AI Change Suggestions'}
                     </button>
-                    {suggestError && <span className="text-xs text-rose-600">{suggestError}</span>}
+                    {suggestError && <span className="text-xs" style={{ color: '#c05050' }}>{suggestError}</span>}
                   </div>
 
                   {suggestions.length > 0 && (
-                    <div className="space-y-2 max-h-72 overflow-y-auto rounded-xl border border-indigo-100 bg-indigo-50 p-3">
+                    <div className="rounded-xl p-3 space-y-2 max-h-72 overflow-y-auto" style={{ background: 'var(--bg-base)', border: '1px solid var(--border-faint)' }}>
                       {suggestions.map((s) => (
-                        <div key={`${s.reviewer_number}-${s.comment_number}`} className="rounded-lg border border-indigo-200 bg-white p-3 space-y-1">
-                          <p className="text-xs font-semibold text-indigo-700">R{s.reviewer_number} C{s.comment_number} · {s.action_type}</p>
-                          {s.interpretation && <p className="text-xs text-slate-700"><span className="font-semibold">Interpretation:</span> {s.interpretation}</p>}
-                          {s.copy_paste_text && <p className="text-xs text-slate-700"><span className="font-semibold">Copy-paste text:</span> {s.copy_paste_text}</p>}
-                          {s.response_snippet && <p className="text-xs text-slate-700"><span className="font-semibold">Response snippet:</span> {s.response_snippet}</p>}
-                          <p className="text-[11px] text-slate-500">Evidence: {s.evidence_check_status}{s.citation_needed ? ' · citation needed' : ''}</p>
-                          {s.ambiguity_flag && <p className="text-[11px] text-amber-700">Ambiguity: {s.ambiguity_question || 'Please clarify before editing.'}</p>}
+                        <div key={`${s.reviewer_number}-${s.comment_number}`} className="rounded-lg p-3 space-y-1" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-faint)' }}>
+                          <p className="text-xs font-semibold" style={{ color: 'var(--gold)' }}>R{s.reviewer_number} C{s.comment_number} · {s.action_type}</p>
+                          {s.interpretation && <p className="text-xs" style={{ color: 'var(--text-body)' }}><span className="font-semibold">Interpretation:</span> {s.interpretation}</p>}
+                          {s.copy_paste_text && <p className="text-xs" style={{ color: 'var(--text-body)' }}><span className="font-semibold">Copy-paste:</span> {s.copy_paste_text}</p>}
+                          {s.response_snippet && <p className="text-xs" style={{ color: 'var(--text-body)' }}><span className="font-semibold">Response:</span> {s.response_snippet}</p>}
+                          <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Evidence: {s.evidence_check_status}{s.citation_needed ? ' · citation needed' : ''}</p>
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
 
-                <div className="flex items-center justify-between pt-2">
+                <div className="flex items-center justify-between pt-3" style={{ borderTop: '1px solid var(--border-faint)' }}>
                   <button
                     onClick={() => changeStep('comments')}
-                    className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors"
+                    className="text-sm font-medium px-4 py-2 rounded-xl"
+                    style={{ border: '1px solid var(--border-muted)', color: 'var(--text-secondary)', background: 'transparent' }}
                   >
                     ← Back
                   </button>
                   <button
                     onClick={() => changeStep('responses')}
                     disabled={parsedComments.length === 0}
-                    className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-40 transition-colors"
+                    className="rev-btn"
+                    style={{
+                      background: 'var(--gold)', color: '#fff',
+                      opacity: parsedComments.length === 0 ? 0.4 : 1,
+                      cursor: parsedComments.length === 0 ? 'not-allowed' : 'pointer',
+                    }}
                   >
-                    Confirm Comments →
+                    Confirm &amp; Discuss →
                   </button>
                 </div>
               </>
@@ -1034,110 +1248,167 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
           </div>
         )}
 
-        {/* ── Step 4: Per-comment Discussion ─────────────────────────────────── */}
+        {/* ── Step 4: Discuss & Finalize ─────────────────────────────────────── */}
         {step === 'responses' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-
+          <div className="rev-card animate-in delay-75 space-y-4">
             {commentPlans.length === 0 ? (
-              <div className="text-center py-10 text-slate-500 text-sm">
+              <div className="py-12 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                 No comments to discuss. Go to Step 2 to parse reviewer comments first.
               </div>
             ) : (
               <>
-                {/* Progress chips */}
-                <div className="flex items-center gap-2 flex-wrap">
+                {/* Header with progress counter */}
+                <div className="flex items-center gap-4 pb-3" style={{ borderBottom: '1px solid var(--border-faint)' }}>
+                  <div className="flex-1">
+                    <h2 className="rev-heading" style={{ fontSize: '1.4rem' }}>Discuss &amp; Finalize</h2>
+                    <p className="rev-subheading" style={{ marginTop: '0.15rem' }}>Work through each comment with the AI coach.</p>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <div style={{ fontSize: '1.75rem', fontWeight: 700, fontFamily: 'Manrope', letterSpacing: '-0.03em', color: finalizedCount === commentPlans.length ? 'var(--rev-done)' : 'var(--text-bright)' }}>
+                      {finalizedCount}<span style={{ fontSize: '1rem', fontWeight: 400, color: 'var(--text-muted)' }}>/{commentPlans.length}</span>
+                    </div>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Finalized</p>
+                  </div>
+                </div>
+
+                {/* Comment chips */}
+                <div className="flex items-center gap-1.5 flex-wrap">
                   {commentPlans.map((plan, idx) => (
-                    <CommentChip
+                    <button
                       key={`${plan.reviewer_number}-${plan.comment_number}`}
-                      plan={plan}
-                      isActive={idx === activeCommentIdx}
                       onClick={() => setActiveCommentIdx(idx)}
-                    />
+                      className="rev-chip"
+                      style={
+                        plan.is_finalized
+                          ? { background: 'var(--rev-done-faint)', borderColor: 'var(--rev-done)', color: 'var(--rev-done)' }
+                          : idx === activeCommentIdx
+                            ? { background: 'var(--gold)', borderColor: 'var(--gold)', color: '#fff' }
+                            : undefined
+                      }
+                      title={plan.original_comment.slice(0, 80)}
+                    >
+                      R{plan.reviewer_number}·C{plan.comment_number}{plan.is_finalized ? ' ✓' : idx === activeCommentIdx ? ' ●' : ''}
+                    </button>
                   ))}
-                  <span className="text-xs text-slate-500 ml-auto">
-                    {finalizedCount} / {commentPlans.length} finalized
-                  </span>
                 </div>
 
                 {activePlan && (
                   activePlan.is_finalized ? (
-                    /* Finalized view — 4-column read-only card */
-                    <div className="space-y-3">
+                    <div className="space-y-3 animate-in">
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-slate-700">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold" style={{ color: 'var(--text-bright)' }}>
                             Reviewer {activePlan.reviewer_number}, Comment {activePlan.comment_number}
                           </span>
                           <CategoryBadge category={activePlan.category} />
-                          <span className="text-xs font-medium text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-200">
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
+                            style={{ background: 'var(--rev-done-faint)', color: 'var(--rev-done)', border: '1px solid var(--rev-done)' }}>
                             ✓ Finalized
                           </span>
                         </div>
                         <button
                           onClick={() => handleUnfinalizeComment(activeCommentIdx)}
-                          className="text-xs text-brand-600 hover:text-brand-800 underline underline-offset-2"
+                          style={{ color: 'var(--gold)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, textDecoration: 'underline', textUnderlineOffset: 3 }}
                         >
                           Edit
                         </button>
                       </div>
-
                       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                        {[
-                          { label: 'Reviewer Comment', value: activePlan.original_comment, color: 'slate' },
-                          { label: 'Change Plan', value: activePlan.current_plan, color: 'blue' },
-                          { label: 'Author Response', value: activePlan.author_response, color: 'brand' },
-                          { label: 'Action Taken', value: activePlan.action_taken, color: 'emerald' },
-                        ].map(({ label, value, color }) => (
-                          <div key={label} className={`rounded-xl border border-${color}-200 bg-${color}-50 p-3 space-y-1`}>
-                            <p className={`text-xs font-semibold text-${color}-700 uppercase tracking-wide`}>{label}</p>
-                            <p className={`text-sm text-${color}-900 leading-relaxed whitespace-pre-wrap`}>{value || '—'}</p>
+                        {([
+                          {
+                            label: 'Reviewer Comment',
+                            desc:  'Original critique',
+                            icon:  '❝',
+                            value: activePlan.original_comment,
+                            bgCls:     'bg-slate-200',
+                            borderCls: 'border-slate-300',
+                            stripe:    '#64748b',
+                            labelCls:  'text-slate-600',
+                          },
+                          {
+                            label: 'Change Plan',
+                            desc:  'Revision strategy',
+                            icon:  '◈',
+                            value: activePlan.current_plan,
+                            bgCls:     'bg-amber-50',
+                            borderCls: 'border-amber-200',
+                            stripe:    '#d97706',
+                            labelCls:  'text-amber-700',
+                          },
+                          {
+                            label: 'Author Response',
+                            desc:  'Written reply',
+                            icon:  '✦',
+                            value: activePlan.author_response,
+                            bgCls:     'bg-blue-50',
+                            borderCls: 'border-blue-200',
+                            stripe:    '#4f46e5',
+                            labelCls:  'text-blue-700',
+                          },
+                          {
+                            label: 'Action Taken',
+                            desc:  'Manuscript edit',
+                            icon:  '✓',
+                            value: activePlan.action_taken,
+                            bgCls:     'bg-emerald-50',
+                            borderCls: 'border-emerald-200',
+                            stripe:    '#10b981',
+                            labelCls:  'text-emerald-700',
+                          },
+                        ] as const).map(({ label, desc, icon, value, bgCls, borderCls, stripe, labelCls }) => (
+                          <div key={label} className={`rounded-xl overflow-hidden border ${borderCls} ${bgCls} flex flex-col`}>
+                            {/* Colored top stripe */}
+                            <div style={{ height: 3, background: stripe, flexShrink: 0 }} />
+                            <div className="p-3 space-y-1.5 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`text-sm leading-none ${labelCls}`} style={{ fontFamily: 'serif' }}>{icon}</span>
+                                <p className={`text-[9.5px] font-bold uppercase tracking-widest ${labelCls}`}>{label}</p>
+                              </div>
+                              <p className="text-[9.5px]" style={{ color: 'var(--text-faint)', fontFamily: 'Manrope' }}>{desc}</p>
+                              <p className="text-xs leading-relaxed whitespace-pre-wrap pt-0.5" style={{ color: 'var(--text-body)' }}>
+                                {value || <span style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>—</span>}
+                              </p>
+                            </div>
                           </div>
                         ))}
                       </div>
                     </div>
                   ) : (
-                    /* Discussion view */
-                    <div className="space-y-4">
-                      {/* Active comment header */}
-                      <div className="flex items-center gap-2 py-2 border-b border-slate-100">
-                        <span className="text-sm font-semibold text-slate-700">
+                    <div className="space-y-4 animate-in">
+                      <div className="flex items-center gap-2 py-2" style={{ borderBottom: '1px solid var(--border-faint)' }}>
+                        <span className="text-sm font-semibold" style={{ color: 'var(--text-bright)' }}>
                           Reviewer {activePlan.reviewer_number}, Comment {activePlan.comment_number}
                         </span>
                         <CategoryBadge category={activePlan.category} />
                       </div>
-                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
-                        <p className="text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wide">Original Comment</p>
-                        <p className="text-sm text-slate-700 leading-relaxed">{activePlan.original_comment}</p>
+                      <div className="rounded-xl p-3.5" style={{ background: 'var(--bg-base)', border: '1px solid var(--border-faint)' }}>
+                        <p className="text-[10px] font-semibold uppercase tracking-widest mb-1.5" style={{ color: 'var(--text-muted)' }}>Original Comment</p>
+                        <p className="leading-relaxed" style={{ color: 'var(--text-body)', fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.7 }}>
+                          {activePlan.original_comment}
+                        </p>
                       </div>
 
-                      {/* Two-panel body */}
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-
-                        {/* Left: Discussion chat */}
+                        {/* Left: Chat */}
                         <div className="space-y-3">
-                          <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Discussion</p>
-
+                          <p className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>AI Coach Discussion</p>
                           {discussLoading && activePlan.discussion.length === 0 && (
-                            <div className="flex items-center gap-2 text-sm text-slate-500 py-4">
-                              <LoadingLottie className="w-8 h-8" />
-                              Generating initial change plan…
+                            <div className="flex items-center gap-3 py-5" style={{ color: 'var(--text-muted)' }}>
+                              <LoadingLottie className="w-7 h-7" />
+                              <span className="text-sm">Generating initial change plan…</span>
                             </div>
                           )}
-
-                          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
                             {activePlan.discussion.map((msg: DiscussionMessage, i: number) => (
-                              <div
-                                key={i}
-                                className={`flex ${msg.role === 'ai' ? 'justify-start' : 'justify-end'}`}
-                              >
-                                <div
-                                  className={`max-w-[85%] rounded-2xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap border ${
-                                    msg.role === 'ai'
-                                      ? 'bg-brand-50 text-brand-900 border-brand-100 rounded-bl-md'
-                                      : 'bg-slate-100 text-slate-800 border-slate-200 rounded-br-md'
-                                  }`}
-                                >
-                                  <span className={`text-[11px] font-semibold block mb-1 ${msg.role === 'ai' ? 'text-brand-600' : 'text-slate-500'}`}>
+                              <div key={i} className={`flex ${msg.role === 'ai' ? 'justify-start' : 'justify-end'}`}>
+                                {msg.role === 'ai' && (
+                                  <div className="w-6 h-6 rounded-full text-[9px] font-bold flex items-center justify-center mr-2 mt-0.5 flex-shrink-0"
+                                    style={{ background: 'var(--gold)', color: '#fff' }}>
+                                    AI
+                                  </div>
+                                )}
+                                <div className={msg.role === 'ai' ? 'rev-bubble-ai' : 'rev-bubble-user'}>
+                                  <span className="text-[10px] font-semibold block mb-1" style={{ color: msg.role === 'ai' ? 'var(--gold)' : 'var(--text-muted)' }}>
                                     {msg.role === 'ai' ? 'AI Coach' : 'You'}
                                   </span>
                                   {msg.content}
@@ -1145,14 +1416,12 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                               </div>
                             ))}
                             {discussLoading && activePlan.discussion.length > 0 && (
-                              <div className="flex items-center gap-2 text-xs text-slate-400 py-1">
-                                <LoadingLottie className="w-6 h-6" />
-                                Thinking…
+                              <div className="flex items-center gap-2 py-1">
+                                <LoadingLottie className="w-5 h-5" />
+                                <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Thinking…</span>
                               </div>
                             )}
                           </div>
-
-                          {/* Message input */}
                           <div className="space-y-2">
                             <textarea
                               rows={3}
@@ -1166,21 +1435,27 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                               }}
                               placeholder="Ask a question or refine the plan… (Cmd+Enter to send)"
                               disabled={discussLoading}
-                              className="w-full rounded-xl border-2 border-slate-200 p-2.5 text-sm
-                                placeholder-slate-400 resize-none focus:outline-none focus:border-brand-500
-                                focus:ring-2 focus:ring-brand-100 disabled:opacity-50"
+                              className="w-full rounded-xl p-2.5 resize-none focus:outline-none"
+                              style={{
+                                background: 'var(--bg-base)',
+                                border: '1.5px solid var(--border-muted)',
+                                color: 'var(--text-body)',
+                                fontSize: 13,
+                                opacity: discussLoading ? 0.5 : 1,
+                              }}
                             />
                             <button
                               onClick={handleSendMessage}
                               disabled={!discussInput.trim() || discussLoading}
-                              className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-brand-600
-                                hover:bg-brand-700 disabled:opacity-40 transition-colors"
+                              className="rev-btn"
+                              style={{
+                                background: 'var(--gold)', color: '#fff', padding: '7px 18px', borderRadius: 8,
+                                opacity: (!discussInput.trim() || discussLoading) ? 0.4 : 1,
+                              }}
                             >
                               Send
                             </button>
                           </div>
-
-                          {/* DOI input row */}
                           <div className="space-y-1.5">
                             <div className="flex gap-2">
                               <input
@@ -1189,107 +1464,133 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
                                 onChange={(e) => setDoiInput(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddDoi(); } }}
                                 placeholder="10.xxxx/yyyy — DOI to cite"
-                                className="flex-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs
-                                  focus:outline-none focus:border-brand-400"
+                                className="flex-1 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none"
+                                style={{ border: '1px solid var(--border-muted)', background: 'var(--bg-base)', color: 'var(--text-body)' }}
                               />
                               <button
                                 onClick={handleAddDoi}
                                 disabled={!doiInput.trim()}
-                                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-100
-                                  hover:bg-slate-200 text-slate-700 disabled:opacity-40 transition-colors"
+                                className="text-xs px-3 py-1.5 rounded-lg"
+                                style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-muted)', opacity: doiInput.trim() ? 1 : 0.4 }}
                               >
-                                + Add DOI ref
+                                + DOI
                               </button>
                             </div>
                             {activePlan.doi_references.length > 0 && (
                               <div className="flex flex-wrap gap-1">
                                 {activePlan.doi_references.map((doi) => (
-                                  <span key={doi} className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-2 py-0.5">
+                                  <span key={doi} className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full"
+                                    style={{ background: 'var(--gold-faint)', color: 'var(--gold)', border: '1px solid var(--border-muted)' }}>
                                     {doi}
-                                    <button onClick={() => handleRemoveDoi(doi)} className="text-blue-400 hover:text-blue-600 ml-0.5">×</button>
+                                    <button onClick={() => handleRemoveDoi(doi)} style={{ color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, marginLeft: 2 }}>×</button>
                                   </span>
                                 ))}
                               </div>
                             )}
                           </div>
-
                           {discussError && (
-                            <p className="text-xs text-rose-600 bg-rose-50 rounded-lg p-2">{discussError}</p>
+                            <div className="rounded-lg px-3 py-2 text-xs" style={{ background: 'rgba(200,50,50,0.08)', color: '#c05050' }}>
+                              {discussError}
+                            </div>
                           )}
                         </div>
 
-                        {/* Right: Current change plan */}
+                        {/* Right: Change plan */}
                         <div className="space-y-2">
-                          <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Current Change Plan</p>
+                          <p className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Current Change Plan</p>
                           <textarea
                             rows={16}
                             value={activePlan.current_plan}
                             onChange={(e) => handleUpdatePlan(e.target.value)}
                             placeholder="The AI will propose a change plan here after the first message…"
-                            className="w-full rounded-xl border-2 border-blue-200 bg-blue-50 p-3 text-sm text-blue-900
-                              placeholder-slate-400 resize-none focus:outline-none focus:border-blue-400
-                              focus:ring-2 focus:ring-blue-100"
+                            className="w-full rounded-xl p-3 resize-none focus:outline-none"
+                            style={{
+                              background: 'var(--gold-faint)',
+                              border: '1.5px solid var(--border-muted)',
+                              color: 'var(--text-body)',
+                              lineHeight: 1.65,
+                              fontSize: 13,
+                            }}
                           />
-                          <p className="text-xs text-slate-400">You can also edit this plan directly.</p>
+                          <p className="text-xs" style={{ color: 'var(--text-faint)' }}>You can edit this plan directly.</p>
                         </div>
                       </div>
 
-                      {/* Bottom action row */}
-                      <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                      <div className="flex items-center justify-between pt-3" style={{ borderTop: '1px solid var(--border-faint)' }}>
                         <button
                           onClick={() => setActiveCommentIdx(Math.max(0, activeCommentIdx - 1))}
                           disabled={activeCommentIdx === 0}
-                          className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-200
-                            text-slate-700 hover:bg-slate-50 disabled:opacity-30 transition-colors"
+                          className="text-sm font-medium px-4 py-2 rounded-xl"
+                          style={{ border: '1px solid var(--border-muted)', color: 'var(--text-secondary)', background: 'transparent', opacity: activeCommentIdx === 0 ? 0.3 : 1 }}
                         >
-                          ← Prev Comment
+                          ← Prev
                         </button>
-
                         <button
                           onClick={handleFinalizeComment}
                           disabled={!activePlan.current_plan.trim() || finalizeLoading || discussLoading}
-                          className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-emerald-600
-                            hover:bg-emerald-700 disabled:opacity-40 transition-colors"
+                          className="rev-btn"
+                          style={{
+                            background: 'var(--rev-done)', color: '#fff', padding: '10px 28px', borderRadius: 10,
+                            opacity: (!activePlan.current_plan.trim() || finalizeLoading || discussLoading) ? 0.4 : 1,
+                          }}
                         >
-                          {finalizeLoading ? 'Finalizing…' : 'Finalize This Comment →'}
+                          {finalizeLoading ? 'Finalizing…' : 'Finalize Comment ✓'}
                         </button>
-
                         <button
                           onClick={() => setActiveCommentIdx(Math.min(commentPlans.length - 1, activeCommentIdx + 1))}
                           disabled={activeCommentIdx === commentPlans.length - 1}
-                          className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-200
-                            text-slate-700 hover:bg-slate-50 disabled:opacity-30 transition-colors"
+                          className="text-sm font-medium px-4 py-2 rounded-xl"
+                          style={{ border: '1px solid var(--border-muted)', color: 'var(--text-secondary)', background: 'transparent', opacity: activeCommentIdx === commentPlans.length - 1 ? 0.3 : 1 }}
                         >
-                          Next Comment →
+                          Next →
                         </button>
                       </div>
                     </div>
                   )
+                )}
+
+                {allFinalized && (
+                  <div className="rounded-xl p-4 flex items-center justify-between animate-in"
+                    style={{ background: 'var(--rev-done-faint)', border: '1px solid var(--rev-done)' }}>
+                    <div>
+                      <p className="text-sm font-semibold" style={{ color: 'var(--rev-done)' }}>All {commentPlans.length} comments finalized</p>
+                      <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Ready to generate the revision package</p>
+                    </div>
+                    <button
+                      onClick={() => changeStep('download')}
+                      className="rev-btn"
+                      style={{ background: 'var(--rev-done)', color: '#fff', padding: '9px 20px', borderRadius: 10 }}
+                    >
+                      Generate Documents →
+                    </button>
+                  </div>
                 )}
               </>
             )}
           </div>
         )}
 
-        {/* ── Step 4: Download ───────────────────────────────────────────────── */}
+        {/* ── Step 5: Download ───────────────────────────────────────────────── */}
         {step === 'download' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-            <h2 className="text-lg font-semibold text-slate-800">Download Documents</h2>
+          <div className="rev-card animate-in delay-75 space-y-5">
+            <div>
+              <h2 className="rev-heading">Download Documents</h2>
+              <p className="rev-subheading">Generate and download the complete revision package for journal submission.</p>
+            </div>
 
-            {/* Gate: not all finalized */}
             {!allFinalized && commentPlans.length > 0 && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2">
-                <p className="text-sm font-semibold text-amber-800">
-                  {commentPlans.length - finalizedCount} comment{commentPlans.length - finalizedCount !== 1 ? 's' : ''} still need to be finalized before generating documents.
+              <div className="rounded-xl p-4 space-y-3" style={{ background: 'var(--rev-accent-faint)', border: '1px solid var(--rev-accent-ring)' }}>
+                <p className="text-sm font-semibold" style={{ color: 'var(--rev-accent)' }}>
+                  {commentPlans.length - finalizedCount} comment{commentPlans.length - finalizedCount !== 1 ? 's' : ''} still need to be finalized.
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {commentPlans.filter((p) => !p.is_finalized).map((p, _i) => {
+                  {commentPlans.filter((p) => !p.is_finalized).map((p) => {
                     const idx = commentPlans.indexOf(p);
                     return (
                       <button
                         key={`${p.reviewer_number}-${p.comment_number}`}
                         onClick={() => { setActiveCommentIdx(idx); changeStep('responses'); }}
-                        className="text-xs text-amber-700 underline underline-offset-2 hover:text-amber-900"
+                        style={{ color: 'var(--rev-accent)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, textDecoration: 'underline', textUnderlineOffset: 3 }}
                       >
                         R{p.reviewer_number} C{p.comment_number}
                       </button>
@@ -1299,88 +1600,137 @@ export default function RealRevisionPanel({ projectId, initialData, onOpenSettin
               </div>
             )}
 
-            {/* Generate button (only shown when all finalized but no round yet) */}
-            {allFinalized && !roundForDownload && (
+            {allFinalized && (
               <div className="space-y-3">
-                <p className="text-sm text-slate-500">
-                  All {commentPlans.length} comments finalized. Click to generate the revised manuscript and download documents.
+                <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+                  {roundForDownload
+                    ? `Round ${activeRound} documents already exist. Generate again to replace with fresh documents from the current finalized changes.`
+                    : `All ${commentPlans.length} comments finalized. Generate the complete revision package.`}
                 </p>
                 <button
                   onClick={handleGenerateFromPlans}
                   disabled={generateLoading}
-                  className="px-6 py-2.5 rounded-lg text-sm font-semibold text-white bg-brand-600
-                    hover:bg-brand-700 disabled:opacity-40 transition-colors"
+                  className="rev-btn"
+                  style={{ background: 'var(--gold)', color: '#fff', padding: '11px 28px', opacity: generateLoading ? 0.5 : 1 }}
                 >
                   {generateLoading
-                    ? 'Generating…'
-                    : `Generate Documents (applies ${commentPlans.length} finalized change${commentPlans.length !== 1 ? 's' : ''})`}
+                    ? '⚙ Generating…'
+                    : roundForDownload
+                      ? `Regenerate Documents (Round ${activeRound})`
+                      : `Generate Documents — ${commentPlans.length} Change${commentPlans.length !== 1 ? 's' : ''}`}
                 </button>
                 {generateLoading && (
-                  <div className="text-center py-6 text-slate-500 text-sm">
-                    <LoadingLottie className="w-12 h-12 mx-auto mb-2" />
-                    Applying changes and generating revised manuscript… this may take 1–2 minutes.
+                  <div className="flex flex-col items-center py-8 gap-3" style={{ color: 'var(--text-muted)' }}>
+                    <LoadingLottie className="w-12 h-12" />
+                    <p className="text-sm">Applying changes and building revision package… this may take 1–2 minutes.</p>
                   </div>
                 )}
                 {generateError && (
-                  <p className="text-sm text-rose-600 bg-rose-50 rounded-lg p-3">{generateError}</p>
+                  <div className="rounded-xl px-4 py-3 text-sm" style={{ background: 'rgba(200,50,50,0.08)', border: '1px solid rgba(200,50,50,0.2)', color: '#c05050' }}>
+                    {generateError}
+                  </div>
                 )}
               </div>
             )}
 
-            {/* Download card */}
             {roundForDownload && (
-              <>
-                <p className="text-sm text-slate-500">
-                  Round {activeRound} complete. Download your point-by-point reply document below.
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <a
-                    href={downloadPointByPointDocx(projectId, activeRound)}
-                    download
-                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 border-brand-200 bg-brand-50 hover:bg-brand-100 hover:border-brand-500 transition-colors text-center shadow-sm"
-                  >
-                    <span className="text-4xl">📄</span>
-                    <p className="text-sm font-bold text-brand-900">Point-by-Point Reply</p>
-                    <p className="text-xs text-brand-700">Comment/Response/Change plan</p>
+              <div className="space-y-4 animate-in">
+                <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Round {activeRound} revision package ready.</p>
+                <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+                  <a href={downloadPointByPointDocx(projectId, activeRound)} download className="rev-dl-tile rev-dl-tile--reply">
+                    <div className="rev-dl-icon" style={{ background: 'var(--gold-faint)' }}>📄</div>
+                    <div>
+                      <p className="text-sm font-bold" style={{ color: 'var(--text-bright)' }}>Point-by-Point Reply</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Comment + Response + Plan</p>
+                      <p className="text-[10px] mt-1.5 font-semibold" style={{ color: 'var(--gold)' }}>.docx</p>
+                    </div>
                   </a>
-
-                  <a
-                    href={downloadRevisedManuscriptDocx(projectId, activeRound)}
-                    download
-                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 hover:border-emerald-500 transition-colors text-center shadow-sm"
-                  >
-                    <span className="text-4xl">📝</span>
-                    <p className="text-sm font-bold text-emerald-900">Revised Manuscript</p>
-                    <p className="text-xs text-emerald-700">Clean version (.docx)</p>
+                  <a href={downloadRevisedManuscriptDocx(projectId, activeRound)} download className="rev-dl-tile rev-dl-tile--clean">
+                    <div className="rev-dl-icon" style={{ background: 'var(--rev-done-faint)' }}>📝</div>
+                    <div>
+                      <p className="text-sm font-bold" style={{ color: 'var(--text-bright)' }}>Revised Manuscript</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Clean version</p>
+                      <p className="text-[10px] mt-1.5 font-semibold" style={{ color: 'var(--rev-done)' }}>.docx</p>
+                    </div>
                   </a>
-
-                  <a
-                    href={downloadTrackChangesDocx(projectId, activeRound)}
-                    download
-                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 border-violet-200 bg-violet-50 hover:bg-violet-100 hover:border-violet-500 transition-colors text-center shadow-sm"
-                  >
-                    <span className="text-4xl">🔍</span>
-                    <p className="text-sm font-bold text-violet-900">Track Changes</p>
-                    <p className="text-xs text-violet-700">Word tracked changes (.docx)</p>
+                  <a href={downloadRevisedManuscriptPdf(projectId, activeRound)} download className="rev-dl-tile rev-dl-tile--pdf">
+                    <div className="rev-dl-icon" style={{ background: 'rgba(14,116,144,0.08)' }}>📑</div>
+                    <div>
+                      <p className="text-sm font-bold" style={{ color: 'var(--text-bright)' }}>Line-Numbered PDF</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Revised manuscript</p>
+                      <p className="text-[10px] mt-1.5 font-semibold" style={{ color: '#0e7490' }}>.pdf</p>
+                    </div>
+                  </a>
+                  <a href={downloadTrackChangesDocx(projectId, activeRound)} download className="rev-dl-tile rev-dl-tile--track">
+                    <div className="rev-dl-icon" style={{ background: 'rgba(109,40,217,0.08)' }}>🔍</div>
+                    <div>
+                      <p className="text-sm font-bold" style={{ color: 'var(--text-bright)' }}>Track Changes</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Inline tracked changes</p>
+                      <p className="text-[10px] mt-1.5 font-semibold" style={{ color: '#7c3aed' }}>.docx</p>
+                    </div>
                   </a>
                 </div>
-                <p className="text-xs text-slate-400 text-center">
-                  Apply the changes in the last column directly to your manuscript, then submit both files to the journal.
+                <p className="text-xs text-center" style={{ color: 'var(--text-faint)' }}>
+                  Submit the point-by-point reply, clean manuscript, track-changes version, and line-numbered PDF for complete resubmission.
                 </p>
-              </>
+              </div>
             )}
 
-            <div className="pt-2">
+            <div className="pt-2" style={{ borderTop: '1px solid var(--border-faint)' }}>
               <button
                 onClick={handleNewRound}
-                className="px-5 py-2 rounded-lg text-sm font-medium border border-slate-200 text-slate-700 hover:bg-slate-50"
+                className="text-sm font-medium px-5 py-2 rounded-xl"
+                style={{ border: '1.5px dashed var(--border-muted)', color: 'var(--text-secondary)', background: 'transparent' }}
               >
                 + Start Round {activeRound + 1}
               </button>
             </div>
           </div>
         )}
+
       </div>
+
+      {/* ── Author Name Dialog ──────────────────────────────────────────────── */}
+      {showAuthorDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }}>
+          <div className="rounded-2xl p-6 w-full max-w-sm mx-4 space-y-4 animate-in"
+            style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-muted)', boxShadow: '0 24px 60px rgba(0,0,0,0.35)' }}>
+            <div>
+              <h3 style={{ fontFamily: "Newsreader, Georgia, serif", fontWeight: 600, fontSize: '1.35rem', color: 'var(--text-bright)', letterSpacing: '-0.02em' }}>
+                Author Name
+              </h3>
+              <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                This name appears as the change author in Word's track changes.
+              </p>
+            </div>
+            <input
+              type="text"
+              value={trackChangesAuthor}
+              onChange={(e) => setTrackChangesAuthor(e.target.value)}
+              placeholder="Your name"
+              className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
+              style={{ background: 'var(--bg-base)', border: '1.5px solid var(--border-muted)', color: 'var(--text-body)' }}
+              autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter') handleGenerateAllDocs(); }}
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowAuthorDialog(false)}
+                style={{ color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '8px 16px' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleGenerateAllDocs}
+                className="rev-btn"
+                style={{ background: 'var(--gold)', color: '#fff', padding: '8px 20px', borderRadius: 10 }}
+              >
+                Generate Documents
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

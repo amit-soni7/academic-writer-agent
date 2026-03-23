@@ -28,7 +28,7 @@ export default function StepOne({ mode, onSelect }: Props) {
     <div>
       <h2
         className="text-2xl font-light mb-1 leading-snug"
-        style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', color: 'var(--text-bright)' }}
+        style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}
       >
         What are you working on?
       </h2>

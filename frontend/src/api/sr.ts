@@ -32,6 +32,7 @@ export interface SRProtocol {
   search_strategies: Record<string, string>;
   registration_status: string;
   osf_registration_id?: string | null;
+  evidence_pack?: EvidencePack | null;
 }
 
 export interface PRISMAFlow {
@@ -122,6 +123,7 @@ export interface PrismaPAdministrative {
   funding_sources?: string;        // 5a
   sponsor_name?: string;           // 5b
   sponsor_role?: string;           // 5c
+  competing_interests?: string;
 }
 
 export interface PrismaPIntroduction {
@@ -132,6 +134,8 @@ export interface PrismaPIntroduction {
   schema_template?: string;
   alternative_phrasings?: string[];
   methodological_cautions?: string;
+  background_text?: string;
+  review_objective?: string;
 }
 
 export interface PrismaPMethodsEligibility {
@@ -154,6 +158,12 @@ export interface PrismaPMethodsDataCollection {
   data_management_tool?: string;   // 11a
   selection_process?: string;      // 11b
   data_collection_notes?: string;  // 11c
+  extraction_method?: string;
+  extraction_team?: string;
+  pilot_testing?: string;
+  disagreement_resolution?: string;
+  software?: string;
+  author_contact?: string;
   extraction_schema?: SchemaField[]; // 12
   outcome_prioritization?: string; // 13
 }
@@ -170,6 +180,33 @@ export interface PrismaPMethodsSynthesis {
   grade_plan?: string;             // 17
 }
 
+export interface ProtocolBuilderPhaseSnapshot {
+  status: 'pending' | 'generating' | 'draft' | 'completed';
+  messages: ChatMessage[];
+  content: Record<string, unknown>;
+}
+
+export interface ProtocolBuilderSnapshot {
+  version: 1;
+  review_family: string;
+  review_type: string;
+  active_phase: PhaseId;
+  p2_sub: 'framework' | 'elements' | 'rq';
+  selected_framework: string;
+  framework_elements: Record<string, string>;
+  generated_rq: {
+    review_question: string;
+    alternative_phrasings: string[];
+    methodological_cautions: string;
+  } | null;
+  chosen_rq: string;
+  phases: Partial<Record<PhaseId, ProtocolBuilderPhaseSnapshot>>;
+  evidence_pack?: EvidencePack | null;
+  bg_n_articles?: number;
+  bg_warnings?: string[];
+  doc_chat_messages?: ChatMessage[];
+}
+
 export interface PrismaPData {
   administrative?: PrismaPAdministrative;
   introduction?: PrismaPIntroduction;
@@ -177,6 +214,7 @@ export interface PrismaPData {
   methods_search?: PrismaPMethodsSearch;
   methods_data_collection?: PrismaPMethodsDataCollection;
   methods_synthesis?: PrismaPMethodsSynthesis;
+  protocol_builder?: ProtocolBuilderSnapshot;
 }
 
 export interface PrismaPScore {
@@ -198,6 +236,13 @@ export async function savePrismaP(
   sectionData: Partial<PrismaPData[typeof section]>,
 ): Promise<void> {
   await api.put(`/api/sr/${projectId}/prisma_p`, { section, data: sectionData });
+}
+
+export async function saveFullPrismaP(
+  projectId: string,
+  prismaP: PrismaPData,
+): Promise<void> {
+  await api.put(`/api/sr/${projectId}/prisma_p`, { prisma_p: prismaP });
 }
 
 export async function getPrismaPScore(projectId: string): Promise<PrismaPScore> {
@@ -277,6 +322,8 @@ export interface EvidencePack {
   references_md: string;
   references_json: Record<string, unknown>[];
   bibtex: string;
+  saved_bib_path?: string | null;
+  saved_full_papers_path?: string | null;
 }
 
 export interface BackgroundDraft {
@@ -324,6 +371,15 @@ export async function writeRationale(
     review_type: params.reviewType ?? 'systematic_review',
   });
   return data;
+}
+
+export async function downloadProtocolReferencesBib(projectId: string): Promise<void> {
+  const { data } = await api.post(
+    `/api/sr/${projectId}/protocol/export_references_bib`,
+    undefined,
+    { responseType: 'blob' },
+  );
+  triggerBlobDownload(data as Blob, `SR_Protocol_References_${projectId}.bib`);
 }
 
 export interface GeneratedReviewQuestion {
@@ -407,6 +463,17 @@ export async function getProtocol(projectId: string): Promise<SRProtocol> {
   return data;
 }
 
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+}
+
 export function streamGenerateProtocol(projectId: string): EventSource {
   return new EventSource(
     `${(import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8010'}/api/sr/${projectId}/protocol/generate`,
@@ -422,6 +489,24 @@ export async function registerOSF(projectId: string, osfToken: string): Promise<
 export async function getSearchStrings(projectId: string): Promise<Record<string, string>> {
   const { data } = await api.get<{ search_strategies: Record<string, string> }>(`/api/sr/${projectId}/search_strings`);
   return data.search_strategies;
+}
+
+export async function downloadProtocolDocx(projectId: string): Promise<void> {
+  const { data } = await api.post(
+    `/api/sr/${projectId}/protocol/export_docx`,
+    undefined,
+    { responseType: 'blob' },
+  );
+  triggerBlobDownload(data as Blob, `SR_Protocol_${projectId}.docx`);
+}
+
+export async function downloadPrismaPChecklistDocx(projectId: string): Promise<void> {
+  const { data } = await api.post(
+    `/api/sr/${projectId}/protocol/export_prisma_p_docx`,
+    undefined,
+    { responseType: 'blob' },
+  );
+  triggerBlobDownload(data as Blob, `PRISMA-P_Checklist_${projectId}.docx`);
 }
 
 export function streamGenerateProtocolFetch(

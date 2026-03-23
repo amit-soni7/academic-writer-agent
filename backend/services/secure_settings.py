@@ -22,7 +22,7 @@ from services.db import create_engine_async, user_settings
 SUPPORTED_PROVIDERS = ("openai", "gemini", "claude", "ollama", "llamacpp")
 
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
-    "openai": "gpt-4o",
+    "openai": "gpt-5.4",
     "gemini": "gemini-2.5-flash",
     "claude": "claude-sonnet-4-6",
     "ollama": "qwen2.5:7b",
@@ -64,6 +64,9 @@ def _decrypt(value: Optional[str]) -> str:
     return f.decrypt(value.encode("utf-8")).decode("utf-8")
 
 
+_DEFAULT_SCIHUB_MIRRORS = ["https://sci-hub.su", "https://www.sci-hub.ren"]
+
+
 def _masked_config(cfg: AIProviderConfig, has_api_key: bool) -> AIProviderConfig:
     return AIProviderConfig(
         provider=cfg.provider,
@@ -71,10 +74,14 @@ def _masked_config(cfg: AIProviderConfig, has_api_key: bool) -> AIProviderConfig
         api_key="",
         base_url=cfg.base_url,
         has_api_key=has_api_key,
+        auth_method=cfg.auth_method,
+        oauth_connected=cfg.oauth_connected,
         pdf_save_enabled=cfg.pdf_save_enabled,
         pdf_save_path=cfg.pdf_save_path,
         sci_hub_enabled=cfg.sci_hub_enabled,
         http_proxy=cfg.http_proxy,
+        track_changes_author=cfg.track_changes_author,
+        scihub_mirrors=cfg.scihub_mirrors,
     )
 
 
@@ -178,6 +185,19 @@ def _build_key_map_from_row(row: dict[str, Any]) -> dict[str, str]:
     return key_map
 
 
+def _load_scihub_mirrors(raw: Optional[str]) -> list[str]:
+    """Parse scihub_mirrors_json, falling back to the two confirmed-working defaults."""
+    if not raw:
+        return list(_DEFAULT_SCIHUB_MIRRORS)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and all(isinstance(u, str) for u in parsed):
+            return parsed or list(_DEFAULT_SCIHUB_MIRRORS)
+    except Exception:
+        pass
+    return list(_DEFAULT_SCIHUB_MIRRORS)
+
+
 def _build_active_config(row: dict[str, Any], key_map: dict[str, str], profiles: dict[str, ProviderConfigEntry]) -> AIProviderConfig:
     provider = str(row.get("provider") or "openai")
     profile = profiles.get(provider)
@@ -188,10 +208,14 @@ def _build_active_config(row: dict[str, Any], key_map: dict[str, str], profiles:
         api_key=api_key,
         base_url=(profile.base_url if profile else row.get("base_url")),
         has_api_key=bool(api_key),
+        auth_method=(profile.auth_method if profile else "api_key"),
+        oauth_connected=bool(profile.oauth_connected) if profile else False,
         pdf_save_enabled=_bool_from_text(row.get("pdf_save_enabled")),
         pdf_save_path=row.get("pdf_save_path"),
         sci_hub_enabled=_bool_from_text(row.get("sci_hub_enabled")),
         http_proxy=row.get("http_proxy"),
+        track_changes_author=row.get("track_changes_author"),
+        scihub_mirrors=_load_scihub_mirrors(row.get("scihub_mirrors_json")),
     )
 
 
@@ -249,12 +273,12 @@ async def save_user_ai_settings(user_id: str, config: AIProviderConfig) -> AIPro
 
     current_profile = provider_profiles.get(config.provider, ProviderConfigEntry(model=config.model, base_url=config.base_url))
     provider_profiles[config.provider] = ProviderConfigEntry(
-        auth_method=current_profile.auth_method,
+        auth_method=config.auth_method or current_profile.auth_method,
         api_key="",  # not persisted here directly; key map handles it
         has_api_key=bool(config.api_key) or bool(current_profile.has_api_key),
         model=config.model,
         base_url=config.base_url,
-        oauth_connected=current_profile.oauth_connected,
+        oauth_connected=bool(config.oauth_connected or current_profile.oauth_connected),
     )
 
     update_req = AppSettingsUpdateRequest(
@@ -284,7 +308,7 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
             oauth_connected=bool(incoming.oauth_connected or False),
         )
         if incoming.api_key:
-            existing_keys[provider] = incoming.api_key
+            existing_keys[provider] = incoming.api_key.strip()
         elif incoming.has_api_key is False and provider in existing_keys:
             # explicit clear if frontend sends has_api_key=false and empty key
             existing_keys.pop(provider, None)
@@ -302,7 +326,7 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
             oauth_connected=p.oauth_connected,
         )
     if config.api_key:
-        existing_keys[active_provider] = config.api_key
+        existing_keys[active_provider] = config.api_key.strip()
     elif active_provider not in existing_keys and existing_row:
         # legacy fallback (preserve old active key if no v2 map present)
         legacy_key = _decrypt(existing_row.get("api_key_encrypted"))
@@ -338,6 +362,8 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
             "pdf_save_path": config.pdf_save_path,
             "sci_hub_enabled": "true" if config.sci_hub_enabled else "false",
             "http_proxy": config.http_proxy,
+            "track_changes_author": config.track_changes_author,
+            "scihub_mirrors_json": json.dumps(config.scihub_mirrors) if config.scihub_mirrors else json.dumps(_DEFAULT_SCIHUB_MIRRORS),
             "provider_profiles_json": profiles_json,
             "provider_api_keys_encrypted_json": encrypted_key_map,
         }
@@ -355,8 +381,12 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
         api_key=active_key,
         base_url=effective_base_url,
         has_api_key=bool(active_key),
+        auth_method=active_profile.auth_method if active_profile else "api_key",
+        oauth_connected=bool(active_profile.oauth_connected) if active_profile else False,
         pdf_save_enabled=config.pdf_save_enabled,
         pdf_save_path=config.pdf_save_path,
         sci_hub_enabled=config.sci_hub_enabled,
         http_proxy=config.http_proxy,
+        track_changes_author=config.track_changes_author,
+        scihub_mirrors=config.scihub_mirrors or list(_DEFAULT_SCIHUB_MIRRORS),
     )

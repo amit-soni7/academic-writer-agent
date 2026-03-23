@@ -24,7 +24,7 @@ export default function StepThree({ value, onChange, description = '', onDescrip
     <div>
       <h2
         className="text-2xl font-light mb-1 leading-snug"
-        style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', color: 'var(--text-bright)' }}
+        style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}
       >
         Describe your key idea
       </h2>

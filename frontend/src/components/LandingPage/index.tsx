@@ -9,7 +9,7 @@ interface Props {
 
 // ── Reusable inline styles ──────────────────────────────────────────────────
 
-const serif = { fontFamily: '"Cormorant Garamond", Georgia, serif' };
+const serif = { fontFamily: 'Newsreader, Georgia, serif' };
 const mono  = { fontFamily: '"JetBrains Mono", Menlo, monospace' };
 
 // ── Mini app-preview mockups ─────────────────────────────────────────────────

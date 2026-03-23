@@ -154,6 +154,41 @@ ARTICLE_SECTIONS: dict[str, list[str]] = {
         "References",
     ],
 
+    # ── Study protocol (SPIRIT 2013) ──────────────────────────────────────────
+    "study_protocol": [
+        "Title (descriptive; include study design e.g. 'a protocol for a randomized controlled trial'; SPIRIT item {1})",
+        "Administrative Information (trial registration number and registry, protocol version, funding, "
+        "author details, sponsor name and role; SPIRIT items {2a–5c})",
+        "Abstract (structured: Background, Methods, Discussion, Trial registration)",
+        "Introduction — Background and Rationale (problem statement, evidence gap, justification for trial; SPIRIT item {6a})",
+        "Introduction — Objectives (primary hypothesis/research question; SPIRIT item {7})",
+        "Trial Design (study type, framework, allocation ratio, superiority/non-inferiority; SPIRIT item {8})",
+        "Methods — Study Setting (site(s), enrollment period, infrastructure; SPIRIT item {9})",
+        "Methods — Eligibility Criteria (inclusion and exclusion criteria; SPIRIT item {10})",
+        "Methods — Interventions (detailed description of each arm, adherence strategies, "
+        "permitted/prohibited co-interventions, post-trial care; SPIRIT items {11a–11d, 30})",
+        "Methods — Outcomes (primary and secondary outcomes with measurement instruments, "
+        "thresholds, and timepoints; SPIRIT item {12})",
+        "Methods — Participant Timeline (schedule of enrolment, interventions, and assessments — "
+        "SPIRIT Figure as a markdown table; SPIRIT item {13})",
+        "Methods — Sample Size (calculation: effect size, power, alpha, dropout rate; SPIRIT item {14})",
+        "Methods — Recruitment (strategies to achieve adequate enrolment; SPIRIT item {15})",
+        "Methods — Assignment of Interventions: Allocation (sequence generation, concealment mechanism, "
+        "implementation; SPIRIT items {16a–16c})",
+        "Methods — Blinding (who is blinded, procedure for unblinding if needed; SPIRIT items {17a–17b})",
+        "Methods — Data Collection and Management (assessment plans, retention, data entry, "
+        "quality control, confidentiality; SPIRIT items {18a–19, 27})",
+        "Methods — Statistical Methods (primary and secondary analysis, subgroup analyses, "
+        "missing data handling; SPIRIT items {20a–20c})",
+        "Methods — Oversight and Monitoring (coordinating centre, data monitoring committee, "
+        "adverse event reporting, auditing, protocol amendments; SPIRIT items {5d, 21a–23, 25})",
+        "Ethics and Dissemination (ethics approval, consent procedures, access to data, "
+        "dissemination plans; SPIRIT items {24, 26a–26b, 28–29, 31a–31c, 32–33})",
+        "Discussion",
+        "Trial Status",
+        "References",
+    ],
+
     # ── Generic review fallback ───────────────────────────────────────────────
     "review": [
         "Abstract",
@@ -228,6 +263,20 @@ CASE REPORT REQUIREMENTS:
 - Include a Patient Consent Statement section.
 - The Discussion should compare with at least 3–5 published cases or series.
 """,
+    "study_protocol": """\
+STUDY PROTOCOL REQUIREMENTS:
+- This is a STUDY PROTOCOL paper — you are writing the protocol BEFORE data collection.
+- Use FUTURE TENSE throughout ('will be', 'will receive', 'will be randomised').
+- Follow SPIRIT 2013 (Standard Protocol Items: Recommendations for Intervention Trials).
+- Reference the SPIRIT checklist item numbers in section headings where indicated.
+- For RCTs: describe CONSORT-aligned randomisation, allocation concealment, and blinding in detail.
+- For observational designs (cohort, cross-sectional, case-control): adapt SPIRIT sections
+  accordingly and reference STROBE-Protocol where relevant; omit/modify the blinding section.
+- The SPIRIT Figure (Participant Timeline) must be rendered as a markdown table with
+  timepoints as column headers and all enrolment/intervention/assessment items as rows.
+- Trial registration is mandatory — include registry name and registration ID.
+- Do NOT report results, outcome data, or conclusions drawn from data.
+""",
 }
 
 
@@ -238,6 +287,72 @@ _SECTION_TAG = {
     "discussion": "DI",
     "conclusion": "CO",
 }
+
+# Rhetorical order of citation purposes within each manuscript section
+_PURPOSE_ORDER_IN_SECTION: dict[str, list[str]] = {
+    "introduction": [
+        "background", "prevalence_epidemiology", "theory",
+        "empirical_support", "identify_gap", "justify_study",
+        "original_source", "support_claim",
+    ],
+    "methods": [
+        "methodology", "original_source", "empirical_support", "support_claim",
+    ],
+    "results": [
+        "empirical_support", "support_claim",
+    ],
+    "discussion": [
+        "compare_findings", "theory", "original_source",
+        "empirical_support", "identify_gap", "support_claim",
+    ],
+}
+
+_PURPOSE_ABBREV = {
+    "background": "BKG",
+    "prevalence_epidemiology": "PREV",
+    "theory": "THRY",
+    "identify_gap": "GAP",
+    "justify_study": "JUST",
+    "methodology": "METH",
+    "original_source": "ORIG",
+    "compare_findings": "CMP",
+    "empirical_support": "EMP",
+    "support_claim": "SUP",
+}
+
+_PURPOSE_INSTRUCTIONS = """
+CITATION PURPOSE RULES — use these when placing citations:
+  [BKG]  background      → cite for established context, general knowledge
+  [PREV] prevalence      → cite for population figures, incidence, burden statistics
+  [THRY] theory          → cite when introducing or applying a theoretical framework
+  [GAP]  identify_gap    → cite to show what is unresolved or missing in literature
+  [JUST] justify_study   → cite to support why this study is needed
+  [METH] methodology     → cite for scales, instruments, tools, statistical methods
+  [ORIG] original_source → cite as the seminal originator (theory, scale, construct)
+  [CMP]  compare_findings→ cite when comparing results with prior work
+         ↳ consistent   = findings agree;  contradicts = findings conflict
+  [EMP]  empirical_support → cite for direct empirical evidence backing a claim
+  [SUP]  support_claim   → generic fallback (prefer more specific labels above)
+
+RHETORICAL DRAFTING RULES:
+Introduction:
+  1. Open with [BKG]/[PREV] for established context and prevalence
+  2. Introduce [THRY] when naming a theoretical framework
+  3. Summarise [EMP] prior evidence
+  4. Use [GAP] sentences to show what is unresolved
+  5. Use [JUST] to explain why this study is needed
+  6. Credit [ORIG] for foundational theories/scales
+Methods:
+  - Cite [METH] and [ORIG] for all instruments, scales, and statistical procedures
+Discussion:
+  - Use [CMP][consistent] when results align with prior work
+  - Use [CMP][contradicts] when explaining discrepancies — don't just list, interpret
+  - Anchor interpretation to [THRY] and [ORIG] sources
+Prose quality rules:
+  - Write coherent academic prose FIRST; citations serve the argument, not the reverse
+  - NEVER dump ≥4 citations in a row without synthesis prose between them
+  - NEVER cite a secondary paper for a fact when the original source is available
+"""
 
 
 def _format_one_summary(i: int, s: dict, label_prefix: str = "") -> str:
@@ -265,7 +380,7 @@ def _format_one_summary(i: int, s: dict, label_prefix: str = "") -> str:
 
     sentence_bank = s.get("sentence_bank", [])
     if sentence_bank:
-        # Group by target manuscript section (use_in), high-importance first within each group
+        # Group by target manuscript section (use_in)
         _USE_IN_ORDER = ["introduction", "methods", "results", "discussion"]
         groups: dict[str, list] = {k: [] for k in _USE_IN_ORDER}
         for sent in sentence_bank:
@@ -280,6 +395,20 @@ def _format_one_summary(i: int, s: dict, label_prefix: str = "") -> str:
             if not group:
                 continue
             lines.append(f"  -- {group_key.upper()} --")
+
+            # Sort by rhetorical purpose order within the section, then importance
+            purpose_order = _PURPOSE_ORDER_IN_SECTION.get(group_key, [])
+            def _sent_sort_key(sent: dict) -> tuple:
+                pp = (sent.get("primary_purpose") or "").lower()
+                try:
+                    purpose_rank = purpose_order.index(pp)
+                except ValueError:
+                    purpose_rank = 99
+                importance_rank = 0 if sent.get("importance") == "high" else 1
+                return (purpose_rank, importance_rank)
+
+            group.sort(key=_sent_sort_key)
+
             for sent in group:
                 sec   = (sent.get("section") or "").lower()
                 tag   = _SECTION_TAG.get(sec, sec[:2].upper() if sec else "??")
@@ -291,7 +420,19 @@ def _format_one_summary(i: int, s: dict, label_prefix: str = "") -> str:
                 importance = sent.get("importance", "medium")
                 marker     = "★" if importance == "high" else " "
 
-                line = f"  {marker}[{tag}] {text}"
+                # Citation purpose label
+                primary_purpose = (sent.get("primary_purpose") or "").lower()
+                purpose_abbrev  = _PURPOSE_ABBREV.get(primary_purpose, "")
+                compare_sent    = (sent.get("compare_sentiment") or "").lower()
+                is_seminal      = sent.get("is_seminal", False)
+
+                purpose_tag = f"[{purpose_abbrev}]" if purpose_abbrev else ""
+                if primary_purpose == "compare_findings" and compare_sent:
+                    purpose_tag += f"[{compare_sent}]"
+                if is_seminal:
+                    purpose_tag += "[seminal]"
+
+                line = f"  {marker}[{tag}]{purpose_tag} {text}"
                 if stats and stats not in ("NR", ""):
                     line += f" ({stats})"
                 if quote and quote not in ("NR", "") and sec == "results":
@@ -366,6 +507,91 @@ def build_summary_block(summaries: list[dict]) -> str:
     return block
 
 
+def build_evidence_blocks(manuscript_packs: dict | None) -> str:
+    """Format ManuscriptPack data as per-section evidence blocks for the LLM prompt.
+
+    When manuscript packs are available, this provides structured evidence guidance
+    per manuscript section — theme clusters with citations, narrative arcs, and
+    contradiction alerts.  Falls back to empty string when no packs exist.
+    """
+    if not manuscript_packs:
+        return ""
+
+    section_packs = manuscript_packs.get("section_packs", {})
+    if not section_packs:
+        return ""
+
+    blocks: list[str] = []
+    blocks.append("=== STRUCTURED EVIDENCE PACKS (from deep synthesis) ===")
+    blocks.append(
+        "Use these section-specific evidence packs to ground your writing. "
+        "Each theme cluster contains pre-analyzed, citation-ready evidence.\n"
+    )
+
+    central = manuscript_packs.get("central_argument", "")
+    if central:
+        blocks.append(f"Central argument: {central}\n")
+
+    strength = manuscript_packs.get("evidence_strength_summary", "")
+    if strength:
+        blocks.append(f"Evidence strength: {strength}\n")
+
+    for section_key in ["introduction", "methods", "results", "discussion"]:
+        pack = section_packs.get(section_key)
+        if not pack:
+            continue
+
+        pack_data = pack if isinstance(pack, dict) else (
+            pack.model_dump() if hasattr(pack, "model_dump") else {}
+        )
+
+        section_name = pack_data.get("section_name", section_key).title()
+        blocks.append(f"\n=== EVIDENCE FOR: {section_name} ===")
+
+        narrative = pack_data.get("narrative_arc", "")
+        if narrative:
+            blocks.append(f"Narrative arc: {narrative}")
+
+        clusters = pack_data.get("theme_clusters", [])
+        for ci, cluster in enumerate(clusters, 1):
+            cluster_data = cluster if isinstance(cluster, dict) else (
+                cluster.model_dump() if hasattr(cluster, "model_dump") else {}
+            )
+            label = cluster_data.get("theme_label", f"Theme {ci}")
+            papers = cluster_data.get("paper_keys", [])
+            papers_str = ", ".join(papers[:8])
+            blocks.append(f"\n  Theme {ci}: \"{label}\" (papers: {papers_str})")
+
+            # Show sentences (max 5 per cluster to keep prompt manageable)
+            for sent in cluster_data.get("sentences", [])[:5]:
+                sent_data = sent if isinstance(sent, dict) else {}
+                purpose = sent_data.get("primary_purpose", "")
+                abbrev = _PURPOSE_ABBREV.get(purpose, purpose.upper()[:3]) if purpose else "?"
+                text = sent_data.get("text", "")[:200]
+                paper = sent_data.get("paper_key", "")
+                stats = sent_data.get("stats", "")
+                line = f"    [{abbrev}] \"{text}\""
+                if stats:
+                    line += f" ({stats})"
+                line += f" — {paper}"
+                blocks.append(line)
+
+            # Show contradictions in this cluster
+            for contra in cluster_data.get("contradictions", [])[:2]:
+                contra_data = contra if isinstance(contra, dict) else {}
+                blocks.append(
+                    f"    ⚠ CONTRADICTION: {contra_data.get('topic', '')} — "
+                    f"{contra_data.get('likely_reason', '')}"
+                )
+
+            # Show gaps
+            for gap in cluster_data.get("gaps", [])[:3]:
+                blocks.append(f"    ◇ GAP: {gap}")
+
+    blocks.append("\n=== END EVIDENCE PACKS ===\n")
+    return "\n".join(blocks)
+
+
 async def build_article_prompt(
     session: dict,
     article_type: str,
@@ -431,6 +657,29 @@ async def build_article_prompt(
         "Adjust section depth to stay within the band; do NOT truncate any section mid-way."
     )
 
+    # ── Evidence packs (deep synthesis → structured per-section evidence) ───
+    # Check for manuscript packs from synthesis result or deep synthesis
+    manuscript_packs = None
+    synthesis_result = session.get("synthesis_result")
+    if isinstance(synthesis_result, str):
+        try:
+            synthesis_result = __import__("json").loads(synthesis_result)
+        except (ValueError, TypeError):
+            synthesis_result = None
+    if isinstance(synthesis_result, dict):
+        manuscript_packs = synthesis_result.get("manuscript_packs")
+    # Also check deep_synthesis_result (Phase 2+)
+    deep_result = session.get("deep_synthesis_result")
+    if isinstance(deep_result, str):
+        try:
+            deep_result = __import__("json").loads(deep_result)
+        except (ValueError, TypeError):
+            deep_result = None
+    if isinstance(deep_result, dict) and deep_result.get("manuscript_packs"):
+        manuscript_packs = deep_result["manuscript_packs"]
+
+    evidence_block = build_evidence_blocks(manuscript_packs)
+
     # ── User message ─────────────────────────────────────────────────────────
     user_msg = (
         f"Manuscript title (approved, do NOT change): {manuscript_title}\n"
@@ -439,8 +688,15 @@ async def build_article_prompt(
         f"Article type: {article_type.replace('_', ' ').title()}\n"
         f"{word_strict}\n"
         f"Required sections: {', '.join(sections)}\n\n"
-        f"Paper summaries ({tier_note} papers):\n{summary_block}\n\n"
     )
+    if evidence_block:
+        user_msg += (
+            f"{evidence_block}\n\n"
+            "IMPORTANT: Use the evidence packs above to ground each section. "
+            "Follow the narrative arcs and cite papers as indicated by the evidence clusters. "
+            "The paper summaries below provide full bibliographic details.\n\n"
+        )
+    user_msg += f"Paper summaries ({tier_note} papers):\n{summary_block}\n\n"
     if ref_list:
         user_msg += (
             "Pre-formatted reference list — copy this VERBATIM into your References section "
@@ -448,8 +704,13 @@ async def build_article_prompt(
             f"{ref_list}\n\n"
         )
     user_msg += (
-        "Write the complete article now, section by section, in Markdown. "
-        "Begin with the approved manuscript title as a level-1 Markdown heading (# Title)."
+        f"TASK — Write the COMPLETE, FULLY EXPANDED academic manuscript now. "
+        f"Write EVERY section in full scholarly prose from start to finish. "
+        f"Do NOT write an outline, a plan, or a summary of what you will write. "
+        f"Do NOT stop after the abstract or introduction. "
+        f"Write through ALL required sections ({', '.join(sections)}) and end with the References list. "
+        f"You MUST produce {tol_low}–{tol_high} words of manuscript body text. "
+        f"Begin immediately with the manuscript title as a level-1 Markdown heading (# Title)."
     )
 
     # ── System prompt ────────────────────────────────────────────────────────
@@ -501,8 +762,11 @@ async def build_article_prompt(
         )
         effective_system += f"\n\n{ref_cap_text}"
 
-    # 10. Two-tier citation instruction (injected whenever cross-refs are present)
-    crossref_count = sum(
+    # 10. Purpose-aware citation instructions (always injected)
+    effective_system += f"\n\n{_PURPOSE_INSTRUCTIONS}"
+
+    # 11. Two-tier citation instruction (injected whenever cross-refs are present)
+    crossref_count = sum(  # noqa: SIM118
         1 for s in summaries if (s if isinstance(s, dict) else {}).get("depth", 0) > 0
     )
     if crossref_count > 0:

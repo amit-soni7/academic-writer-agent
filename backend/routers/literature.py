@@ -31,13 +31,34 @@ from services.ai_provider import AIProvider
 from services.literature_engine import LiteratureEngine
 from services.paper_fetcher import FetchSettings
 from services.paper_summarizer import summarize_paper
-from services.query_expander import expand_query, heuristic_expand_query
-from services.project_repo import load_project as load_session
+from services.provider_resolver import build_provider_for_user_config
+from services.query_expander import (
+    expand_query,
+    generate_tentative_title,
+    heuristic_expand_query,
+    heuristic_tentative_title,
+)
+from services.project_repo import (
+    load_project as load_session,
+    replace_project_papers,
+    save_literature_search_state,
+)
+from services.token_context import TokenContext
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["literature"])
 
 _engine = LiteratureEngine(ncbi_api_key=os.getenv("NCBI_API_KEY"))
+_SEARCH_SOURCES = [
+    "pubmed",
+    "pmc",
+    "openalex",
+    "semantic_scholar",
+    "crossref",
+    "europe_pmc",
+    "clinical_trials",
+    "arxiv",
+]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,8 +76,9 @@ def _get_provider() -> AIProvider | None:
 
 async def _get_provider_for_user(user_id: str) -> AIProvider | None:
     cfg = await load_settings_for_user(user_id)
-    if cfg.api_key or cfg.provider in ("ollama", "llamacpp"):
-        return AIProvider(cfg)
+    provider = await build_provider_for_user_config(user_id, cfg)
+    if provider:
+        return provider
     logger.warning(
         "No usable AI provider for user %s (provider=%r, has_api_key=%s). "
         "User may not have saved settings or key decryption failed.",
@@ -96,17 +118,81 @@ async def search_stream(payload: StreamSearchRequest, user=Depends(get_current_u
     """
 
     async def generate():
+        search_state: dict = {
+            "status": "streaming",
+            "query": payload.query,
+            "total_limit": payload.total_limit,
+            "warnings": [],
+            "source_progress": {},
+            "sources_done": [],
+            "sources_error": {},
+            "is_deduplicating": False,
+            "ranking_info": None,
+            "is_enriching": False,
+            "expanded_queries": [],
+            "pubmed_queries": [],
+            "mesh_terms": [],
+            "boolean_query": "",
+            "pico": {},
+            "framework_elements": {},
+            "framework_used": "",
+            "question_type": None,
+            "secondary_frameworks_considered": [],
+            "study_type_filters": [],
+            "ai_rationale": "",
+            "facets": {},
+            "strategy_notes": [],
+            "tentative_title": "",
+            "source_papers": {},
+            "current_papers": [],
+        }
+
+        async def _persist() -> None:
+            if payload.project_id:
+                await save_literature_search_state(payload.project_id, search_state, query=payload.query)
+
         try:
+            if payload.project_id:
+                project = await load_session(user["id"], payload.project_id)
+                if project is None:
+                    yield _sse({"type": "error", "message": "Project not found."})
+                    return
+
             # 1. AI query expansion ────────────────────────────────────────────
             queries = [payload.query]
             pubmed_queries: list[str] = []
+            await _persist()
             if payload.use_ai_expansion:
                 provider = await _get_provider_for_user(user["id"])
                 if provider:
                     try:
-                        expanded = await expand_query(provider, payload.query, article_type=payload.article_type or "")
+                        async with TokenContext(project_id=payload.project_id, user_id=user["id"], stage="query_expansion"):
+                            generated_title = await generate_tentative_title(
+                                provider,
+                                payload.query,
+                                article_type=payload.article_type or "",
+                            )
+                            expanded = await expand_query(provider, payload.query, article_type=payload.article_type or "")
                         queries = expanded.queries
                         pubmed_queries = expanded.pubmed_queries
+                        search_state.update({
+                            "expanded_queries": expanded.queries,
+                            "pubmed_queries": expanded.pubmed_queries,
+                            "mesh_terms": expanded.mesh_terms,
+                            "boolean_query": expanded.boolean_query,
+                            "pico": expanded.pico or expanded.framework_elements,
+                            "framework_elements": expanded.framework_elements,
+                            "framework_used": expanded.framework_used,
+                            "framework_justification": expanded.framework_justification,
+                            "question_type": expanded.question_type,
+                            "secondary_frameworks_considered": expanded.secondary_frameworks_considered,
+                            "study_type_filters": expanded.study_type_filters,
+                            "ai_rationale": expanded.rationale,
+                            "facets": expanded.facets,
+                            "strategy_notes": expanded.strategy_notes,
+                            "tentative_title": generated_title or expanded.tentative_title or "",
+                        })
+                        await _persist()
                         yield _sse({
                             "type": "ai_queries",
                             "data": {
@@ -114,14 +200,17 @@ async def search_stream(payload: StreamSearchRequest, user=Depends(get_current_u
                                 "pubmed_queries":           expanded.pubmed_queries,
                                 "mesh_terms":               expanded.mesh_terms,
                                 "boolean_query":            expanded.boolean_query,
-                                "pico":                     expanded.pico,
+                                "pico":                     expanded.pico or expanded.framework_elements,
+                                "framework_elements":       expanded.framework_elements,
                                 "study_type_filters":       expanded.study_type_filters,
                                 "rationale":                expanded.rationale,
                                 "facets":                   expanded.facets,
                                 "strategy_notes":           expanded.strategy_notes,
                                 "framework_used":           expanded.framework_used,
                                 "framework_justification":  expanded.framework_justification,
-                                "tentative_title":          expanded.tentative_title,
+                                "question_type":            expanded.question_type,
+                                "secondary_frameworks_considered": expanded.secondary_frameworks_considered,
+                                "tentative_title":          generated_title or expanded.tentative_title,
                             },
                         })
                     except Exception as exc:
@@ -129,11 +218,53 @@ async def search_stream(payload: StreamSearchRequest, user=Depends(get_current_u
                         fallback = heuristic_expand_query(payload.query, article_type=payload.article_type or "")
                         queries = fallback.queries
                         pubmed_queries = fallback.pubmed_queries
+                        search_state.update({
+                            "expanded_queries": fallback.queries,
+                            "pubmed_queries": fallback.pubmed_queries,
+                            "mesh_terms": fallback.mesh_terms,
+                            "boolean_query": fallback.boolean_query,
+                            "pico": fallback.pico or fallback.framework_elements,
+                            "framework_elements": fallback.framework_elements,
+                            "framework_used": fallback.framework_used,
+                            "framework_justification": fallback.framework_justification,
+                            "question_type": fallback.question_type,
+                            "secondary_frameworks_considered": fallback.secondary_frameworks_considered,
+                            "study_type_filters": fallback.study_type_filters,
+                            "ai_rationale": fallback.rationale,
+                            "facets": fallback.facets,
+                            "strategy_notes": fallback.strategy_notes,
+                            "tentative_title": fallback.tentative_title or "",
+                        })
+                        search_state["warnings"].append(
+                            f"AI expansion unavailable: {exc}. Using heuristic keyword search strategy."
+                        )
+                        await _persist()
                         yield _sse({"type": "warning", "message": f"AI expansion unavailable: {exc}. Using heuristic keyword search strategy."})
                 else:
                     fallback = heuristic_expand_query(payload.query, article_type=payload.article_type or "")
                     queries = fallback.queries
                     pubmed_queries = fallback.pubmed_queries
+                    search_state.update({
+                        "expanded_queries": fallback.queries,
+                        "pubmed_queries": fallback.pubmed_queries,
+                        "mesh_terms": fallback.mesh_terms,
+                        "boolean_query": fallback.boolean_query,
+                        "pico": fallback.pico or fallback.framework_elements,
+                        "framework_elements": fallback.framework_elements,
+                        "framework_used": fallback.framework_used,
+                        "framework_justification": fallback.framework_justification,
+                        "question_type": fallback.question_type,
+                        "secondary_frameworks_considered": fallback.secondary_frameworks_considered,
+                        "study_type_filters": fallback.study_type_filters,
+                        "ai_rationale": fallback.rationale,
+                        "facets": fallback.facets,
+                        "strategy_notes": fallback.strategy_notes,
+                        "tentative_title": fallback.tentative_title or heuristic_tentative_title(payload.query, article_type=payload.article_type or ""),
+                    })
+                    search_state["warnings"].append(
+                        "No AI provider configured. Using heuristic keyword search strategy instead of raw query."
+                    )
+                    await _persist()
                     yield _sse({"type": "warning", "message": "No AI provider configured. Using heuristic keyword search strategy instead of raw query."})
 
             # 2. Concurrent paginated search (streams events as sources finish) ─
@@ -141,10 +272,63 @@ async def search_stream(payload: StreamSearchRequest, user=Depends(get_current_u
                 queries, payload.total_limit,
                 pubmed_queries=pubmed_queries or None,
             ):
+                event_type = event.get("type")
+                source = event.get("source")
+                if event_type == "papers" and source:
+                    batch = event.get("papers") or []
+                    search_state["source_progress"][source] = event.get("count", len(batch))
+                    search_state["source_papers"][source] = batch
+                    current = list(search_state.get("current_papers") or [])
+                    current.extend(batch)
+                    search_state["current_papers"] = current
+                    await _persist()
+                elif event_type == "source_done" and source:
+                    done = set(search_state.get("sources_done") or [])
+                    done.add(source)
+                    search_state["sources_done"] = sorted(done)
+                    await _persist()
+                elif event_type == "source_error" and source:
+                    errors = dict(search_state.get("sources_error") or {})
+                    errors[source] = event.get("message") or "Unknown source failure"
+                    search_state["sources_error"] = errors
+                    done = set(search_state.get("sources_done") or [])
+                    done.add(source)
+                    search_state["sources_done"] = sorted(done)
+                    await _persist()
+                elif event_type == "deduplicating":
+                    search_state["is_deduplicating"] = True
+                    await _persist()
+                elif event_type == "ranking":
+                    search_state["ranking_info"] = {
+                        "candidates": event.get("candidates", 0),
+                        "selected": event.get("selected", 0),
+                        "requested": event.get("requested", payload.total_limit),
+                    }
+                    await _persist()
+                elif event_type == "enriching":
+                    search_state["is_enriching"] = True
+                    await _persist()
+                elif event_type == "complete":
+                    final_papers = event.get("papers") or []
+                    search_state["status"] = "done"
+                    search_state["is_enriching"] = False
+                    search_state["sources_done"] = list(_SEARCH_SOURCES)
+                    search_state["current_papers"] = final_papers
+                    await _persist()
+                    if payload.project_id:
+                        await replace_project_papers(payload.project_id, final_papers)
+                elif event_type == "warning" and event.get("message"):
+                    warnings = list(search_state.get("warnings") or [])
+                    warnings.append(event["message"])
+                    search_state["warnings"] = warnings
+                    await _persist()
                 yield _sse(event)
 
         except Exception as exc:
             logger.exception("search_stream fatal error")
+            search_state["status"] = "error"
+            search_state["error"] = str(exc)
+            await _persist()
             yield _sse({"type": "error", "message": str(exc)})
 
     return StreamingResponse(
@@ -160,12 +344,13 @@ async def search_stream(payload: StreamSearchRequest, user=Depends(get_current_u
 
 # ── Per-paper detailed summary ─────────────────────────────────────────────────
 
-async def _fetch_settings_for_user(user_id: str) -> FetchSettings:
+async def _fetch_settings_for_user(user_id: str, project_folder: str | None = None) -> FetchSettings:
     """Load user's PDF/Sci-Hub preferences and build a FetchSettings instance."""
     cfg = await load_settings_for_user(user_id)
     return FetchSettings(
-        pdf_save_enabled=cfg.pdf_save_enabled,
+        pdf_save_enabled=cfg.pdf_save_enabled or bool(project_folder),
         pdf_save_path=cfg.pdf_save_path,
+        project_folder=project_folder,
         sci_hub_enabled=cfg.sci_hub_enabled,
         http_proxy=cfg.http_proxy,
     )
@@ -180,11 +365,18 @@ async def summarize_paper_endpoint(payload: SummarizePaperRequest, user=Depends(
     provider = await _get_provider_for_user(user["id"])
     if not provider:
         raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings to add one.")
-    fs = await _fetch_settings_for_user(user["id"])
-    return await summarize_paper(
-        provider, payload.paper, payload.query,
-        fetch_settings=fs, session_id=payload.session_id,
-    )
+    project_id = payload.project_id or payload.session_id
+    project_folder: str | None = None
+    if project_id:
+        project = await load_session(user["id"], project_id)
+        if project is not None:
+            project_folder = project.get("project_folder")
+    fs = await _fetch_settings_for_user(user["id"], project_folder)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="summarize_paper"):
+        return await summarize_paper(
+            provider, payload.paper, payload.query,
+            fetch_settings=fs, session_id=project_id,
+        )
 
 
 # ── Critical summary ───────────────────────────────────────────────────────────
@@ -299,14 +491,16 @@ async def stream_cross_references_endpoint(
     async def generate():
         try:
             from services.cross_reference_engine import stream_cross_references
-            async for event in stream_cross_references(
-                session_id=session_id,
-                depth=payload.depth,
-                provider=provider,
-                query=session_query,
-                fetch_settings=fs,
-            ):
-                yield _sse(event)
+            async with TokenContext(project_id=session_id, user_id=user["id"], stage="cross_reference"):
+                async for event in stream_cross_references(
+                    session_id=session_id,
+                    depth=payload.depth,
+                    provider=provider,
+                    query=session_query,
+                    fetch_settings=fs,
+                    purpose_filter=payload.purpose_filter or [],
+                ):
+                    yield _sse(event)
         except Exception as exc:
             logger.exception("stream_cross_references fatal error")
             yield _sse({"type": "error", "message": str(exc)})

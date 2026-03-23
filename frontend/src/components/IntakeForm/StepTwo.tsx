@@ -12,6 +12,17 @@ type OptionGroup = {
 
 const OPTION_GROUPS: OptionGroup[] = [
   {
+    group: 'Study Protocols',
+    items: [
+      {
+        value: 'study_protocol',
+        label: 'Study Protocol',
+        description:
+          'Full protocol paper for an interventional or observational study before data collection. Follows SPIRIT 2013 guidelines. Covers RCT, cohort, cross-sectional, and other designs.',
+      },
+    ],
+  },
+  {
     group: 'Primary Research',
     items: [
       {

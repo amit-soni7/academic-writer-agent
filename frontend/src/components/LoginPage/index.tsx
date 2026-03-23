@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import appLogo from '../../assets/firstquill-logo.png';
 
-const serif = { fontFamily: '"Cormorant Garamond", Georgia, serif' };
+const serif = { fontFamily: 'Newsreader, Georgia, serif' };
 const mono  = { fontFamily: '"JetBrains Mono", Menlo, monospace' };
 
 const BENEFITS = [

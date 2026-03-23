@@ -9,10 +9,19 @@ except Exception:
     # Optional in case python-dotenv is not installed yet.
     pass
 
-from fastapi import FastAPI, Body, Depends, Response
+from fastapi import FastAPI, Body, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from routers import intent, journals, literature, projects, settings
+from routers import intent, journals, literature, projects, settings, usage
+from services.llm_errors import (
+    LLMAuthError,
+    LLMBillingError,
+    LLMError,
+    LLMQuotaExhaustedError,
+    LLMRateLimitError,
+    LLMServerError,
+)
 from routers.sr_pipeline import router as sr_router
 from services.db import init_db as init_db_pg
 from services.auth import login_with_google, get_current_user, AUTH_COOKIE_NAME
@@ -22,6 +31,9 @@ from services.auth import login_with_google, get_current_user, AUTH_COOKIE_NAME
 async def lifespan(_app: FastAPI):
     await init_db_pg()
     yield
+    # Flush any pending token usage records on shutdown
+    from services.token_tracker import flush_pending
+    await flush_pending()
 
 app = FastAPI(
     title="Academic Writer Agent",
@@ -58,6 +70,24 @@ app.include_router(projects.router)
 app.include_router(settings.router)
 app.include_router(journals.router)
 app.include_router(sr_router)
+app.include_router(usage.router)
+
+
+# ── Global LLM error handler ────────────────────────────────────────────────
+
+_LLM_STATUS_MAP = {
+    LLMRateLimitError: 429,
+    LLMQuotaExhaustedError: 429,
+    LLMAuthError: 401,
+    LLMBillingError: 402,
+    LLMServerError: 503,
+}
+
+
+@app.exception_handler(LLMError)
+async def llm_error_handler(request: Request, exc: LLMError):
+    status = _LLM_STATUS_MAP.get(type(exc), 500)
+    return JSONResponse(status_code=status, content=exc.to_dict())
 
 
 @app.get("/health", tags=["meta"])

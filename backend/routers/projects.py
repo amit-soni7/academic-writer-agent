@@ -21,18 +21,22 @@ Project lifecycle endpoints:
 """
 
 import asyncio
+import io
 import json
 import logging
+import os
 import re
+import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from models import (
     ApproveTitleRequest,
     CreateProjectRequest,
     DiscussCommentRequest,
     FinalizeCommentRequest,
+    GenerateAllDocsRequest,
     GenerateFromPlansRequest,
     GenerateTitleRequest,
     GenerateRealRevisionRequest,
@@ -42,7 +46,9 @@ from models import (
     ParseCommentsRequest,
     PeerReviewReport,
     ProjectMeta,
+    Paper,
     RealReviewerComment,
+    ReplaceCommentsRequest,
     ReviseAfterReviewRequest,
     RevisionResult,
     RevisionRound,
@@ -52,6 +58,7 @@ from models import (
     SummarizeAllRequest,
     SynthesisResult,
     TitleSuggestions,
+    UpdateCommentWorkRequest,
     WriteArticleRequest,
 )
 from services.journal_style_service import (
@@ -62,8 +69,13 @@ from routers.settings import load_settings, load_settings_for_user
 from services.auth import get_current_user
 from services.ai_provider import AIProvider
 from services.project_repo import (
+    auto_project_title,
+    append_discussion_message,
+    clear_round_exports,
     create_project,
     delete_project,
+    get_comment_work_rows,
+    clear_project_summaries,
     get_existing_summary_keys,
     get_revision_rounds,
     get_screenings,
@@ -76,6 +88,11 @@ from services.project_repo import (
     save_article,
     save_article_type,
     save_base_manuscript,
+    save_comment_finalization,
+    save_manuscript_files,
+    get_original_docx_bytes,
+    save_round_export,
+    save_manuscript_paths,
     save_journal_recs,
     save_manuscript_title,
     save_peer_review_result,
@@ -83,11 +100,17 @@ from services.project_repo import (
     save_revision_wip,
     get_revision_wip,
     save_screening,
+    save_literature_search_state,
     save_summary,
     save_synthesis_result,
+    save_deep_synthesis_result,
+    get_deep_synthesis_result,
     slugify_project_name,
+    update_comment_work_fields,
     update_project_name,
     update_project_phase,
+    upsert_comment_work_batch,
+    upsert_comment_suggestions_batch,
 )
 from services.title_generator import (
     TitleSuggestions as _TitleSuggestions,
@@ -102,12 +125,144 @@ from services.article_builder import (
 from services.cross_paper_synthesizer import synthesize
 from services.journal_recommender import recommend_journals
 from services.paper_fetcher import FetchSettings
+from services.provider_resolver import build_provider_for_user_config
+from services.paper_fetcher import ensure_saved_pdf
 from services.paper_summarizer import summarize_paper
 from services.peer_reviewer import generate_peer_review
+from services.query_expander import (
+    expand_query,
+    generate_tentative_title,
+    heuristic_tentative_title,
+    looks_like_low_quality_title,
+    sanitize_project_title,
+)
+from services.project_storage import normalize_project_storage_for_user
 from services.revision_writer import generate_revision_package
+from services.token_context import TokenContext
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["projects"])
+
+# ── In-memory background-task registry ───────────────────────────────────────
+# Maps project_id → live status dict so any endpoint can poll progress.
+_BG_TASKS: dict[str, dict] = {}
+
+
+def _bg_status(project_id: str) -> dict:
+    """Return a safe copy of the current background task status."""
+    return dict(_BG_TASKS.get(project_id, {"running": False, "current": 0, "total": 0, "current_title": "", "errors": 0}))
+
+
+def _parse_section_index(raw: str | None) -> list[dict] | None:
+    """Deserialise the JSON section_index stored in the DB, or return None."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _paper_key_dict(paper: dict) -> str:
+    doi = str(paper.get("doi") or "").strip().lower()
+    if doi:
+        return doi
+    return str(paper.get("title") or "")[:60].lower().strip()
+
+
+def _looks_like_legacy_project_title(project_name: str, query: str) -> bool:
+    """Detect old query-derived project names that should be replaced with a real AI title."""
+    name = sanitize_project_title(project_name)
+    source = sanitize_project_title(query)
+    if not name:
+        return True
+    if name == source:
+        return True
+
+    name_slug = slugify_project_name(name, max_len=120)
+    query_slug = slugify_project_name(source, max_len=240)
+    if not name_slug:
+        return True
+    if name_slug == query_slug:
+        return True
+    if query_slug.startswith(name_slug):
+        return True
+
+    name_words = re.findall(r"[a-z0-9]+", name.lower())
+    source_words = re.findall(r"[a-z0-9]+", source.lower())
+    if len(name_words) >= 4 and source_words[:len(name_words)] == name_words:
+        return True
+
+    if name.lower().startswith((
+        "most research",
+        "most psychological research",
+        "this study",
+        "the present study",
+        "the current study",
+        "background",
+        "objective",
+        "research on",
+        "little is known",
+    )):
+        return True
+    return False
+
+
+def _humanize_project_title(project_name: str) -> str:
+    return sanitize_project_title(project_name)
+
+
+def _looks_like_weak_generated_title(project_name: str) -> bool:
+    name = _humanize_project_title(project_name)
+    return looks_like_low_quality_title(name) or (name.endswith(": A Literature Review") and len(re.findall(r"[A-Za-z0-9]+", name)) <= 7)
+
+
+def _needs_title_backfill(project: dict) -> bool:
+    query = str(project.get("query") or "").strip()
+    project_name = str(project.get("project_name") or "").strip()
+    search_state = project.get("literature_search_state") or {}
+    saved_title = str(search_state.get("tentative_title") or "").strip()
+    if _looks_like_legacy_project_title(project_name, query):
+        return True
+    if _looks_like_weak_generated_title(project_name):
+        return True
+    if saved_title and _looks_like_legacy_project_title(saved_title, query):
+        return True
+    if saved_title and _looks_like_weak_generated_title(saved_title):
+        return True
+    if not saved_title and (project.get("project_type") or "write") != "revision":
+        return True
+    return bool(project_name and project_name != _humanize_project_title(project_name))
+
+
+async def _resolve_project_title(user_id: str, project: dict) -> str:
+    query = str(project.get("query") or "").strip()
+    article_type = str(project.get("article_type") or "").strip()
+    search_state = project.get("literature_search_state") or {}
+    saved_title = _humanize_project_title(str(search_state.get("tentative_title") or ""))
+    project_name = _humanize_project_title(str(project.get("project_name") or ""))
+
+    if saved_title and not _looks_like_legacy_project_title(saved_title, query) and not _looks_like_weak_generated_title(saved_title):
+        return saved_title
+    if project_name and not _looks_like_legacy_project_title(project_name, query) and not _looks_like_weak_generated_title(project_name):
+        return project_name
+
+    provider = await _get_provider_for_user(user_id)
+    if provider:
+        title = await generate_tentative_title(provider, query, article_type=article_type)
+        title = _humanize_project_title(title)
+        if title and not _looks_like_legacy_project_title(title, query):
+            return title
+        try:
+            expanded = await expand_query(provider, query, article_type=article_type)
+            title = _humanize_project_title(expanded.tentative_title or "")
+            if title and not _looks_like_legacy_project_title(title, query):
+                return title
+        except Exception as exc:
+            logger.warning("Fallback expansion title generation failed for %s: %s", project.get("project_id"), exc)
+
+    fallback = _humanize_project_title(heuristic_tentative_title(query, article_type=article_type))
+    return fallback or auto_project_title(query)
 
 
 def _sse(data: dict) -> str:
@@ -116,15 +271,14 @@ def _sse(data: dict) -> str:
 
 async def _get_provider_for_user(user_id: str) -> AIProvider | None:
     cfg = await load_settings_for_user(user_id)
-    if cfg.api_key or cfg.provider in ("ollama", "llamacpp"):
-        return AIProvider(cfg)
-    # For Gemini: try OAuth token if no API key is stored
-    if cfg.provider == "gemini":
-        from services.gemini_oauth import get_valid_gemini_access_token
-        token = await get_valid_gemini_access_token(user_id)
-        if token:
-            cfg.gemini_oauth_access_token = token
-            return AIProvider(cfg)
+    provider = await build_provider_for_user_config(user_id, cfg)
+    if provider:
+        return provider
+    if cfg.provider == "gemini" and cfg.auth_method == "oauth" and cfg.api_key:
+        logger.warning(
+            "Gemini OAuth primary path is unavailable for user %s; API key fallback is saved but runtime setup failed before request dispatch.",
+            user_id,
+        )
     logger.warning(
         "No usable AI provider for user %s (provider=%r, has_api_key=%s). "
         "User may not have saved settings or key decryption failed.",
@@ -141,6 +295,7 @@ async def _fetch_settings_for_user(user_id: str, project_folder: str | None = No
         project_folder=project_folder,
         sci_hub_enabled=cfg.sci_hub_enabled,
         http_proxy=cfg.http_proxy,
+        scihub_mirrors=cfg.scihub_mirrors,
     )
 
 
@@ -171,6 +326,7 @@ async def create_project_endpoint(payload: CreateProjectRequest, user=Depends(ge
         pdf_save_path=cfg.pdf_save_path,
         project_name=payload.project_name,
         project_type=project_type,
+        literature_search_state=payload.literature_search_state,
     )
     # Update phase based on project type
     if project_type == 'revision':
@@ -247,6 +403,48 @@ async def get_project(project_id: str, user=Depends(get_current_user)) -> dict:
     return data
 
 
+@router.get("/projects/{project_id}/paper_pdf")
+async def get_project_paper_pdf(
+    project_id: str,
+    paper_key: str,
+    user=Depends(get_current_user),
+):
+    """Open the saved full-text PDF for a project paper, or fall back to the OA link."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    target_key = str(paper_key or "").strip().lower()
+    if not target_key:
+        raise HTTPException(status_code=400, detail="paper_key is required.")
+
+    paper_dict = next(
+        (p for p in project.get("papers", []) if _paper_key_dict(p) == target_key),
+        None,
+    )
+    if not paper_dict:
+        raise HTTPException(status_code=404, detail="Paper not found in project.")
+
+    paper = Paper(**paper_dict)
+    project_folder = project.get("project_folder")
+    fs = await _fetch_settings_for_user(user["id"], project_folder)
+    pdf_path = await ensure_saved_pdf(paper, fs)
+    if pdf_path and os.path.exists(pdf_path):
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=os.path.basename(pdf_path),
+            headers={"Content-Disposition": f'inline; filename="{os.path.basename(pdf_path)}"'},
+        )
+
+    if paper.oa_pdf_url:
+        return RedirectResponse(url=paper.oa_pdf_url)
+    if paper.doi:
+        return RedirectResponse(url=f"https://doi.org/{paper.doi}")
+
+    raise HTTPException(status_code=404, detail="No PDF or open-access link available for this paper.")
+
+
 @router.delete("/projects/{project_id}")
 async def delete_project_endpoint(project_id: str, user=Depends(get_current_user)) -> dict:
     ok = await delete_project(user["id"], project_id)
@@ -313,43 +511,32 @@ async def summarize_all(project_id: str, payload: SummarizeAllRequest, user=Depe
         errors = 0
 
         existing_keys = await get_existing_summary_keys(effective_project_id)
-        paper_screenings = await get_screenings(effective_project_id)
 
+        # Pre-filter: count and skip already-summarized papers up front
+        papers_to_summarize: list[tuple[int, Paper]] = []
         for i, paper in enumerate(papers):
             paper_key = (paper.doi or paper.title[:60]).lower().strip()
-
             if paper_key in existing_keys:
-                yield _sse({
-                    "type": "progress",
-                    "current": i + 1,
-                    "total": len(papers),
-                    "title": paper.title[:80],
-                    "skipped": True,
-                    "skip_reason": "already_summarized",
-                })
                 done += 1
-                continue
+            else:
+                papers_to_summarize.append((i, paper))
 
-            # Skip excluded papers (unless overridden by user)
-            screen = paper_screenings.get(paper_key, {})
-            if (
-                getattr(payload, "skip_excluded", True)
-                and screen.get("decision") == "exclude"
-                and not screen.get("overridden", False)
-            ):
-                yield _sse({
-                    "type": "progress",
-                    "current": i + 1,
-                    "total": len(papers),
-                    "title": paper.title[:80],
-                    "skipped": True,
-                    "skip_reason": "excluded",
-                })
-                continue
-
+        # Notify frontend of pre-existing summaries in a single event
+        if done > 0:
             yield _sse({
                 "type": "progress",
-                "current": i + 1,
+                "current": done,
+                "total": len(papers),
+                "title": "",
+                "skipped": True,
+                "skip_reason": "already_summarized",
+                "skipped_count": done,
+            })
+
+        for i, paper in papers_to_summarize:
+            yield _sse({
+                "type": "progress",
+                "current": done + 1,
                 "total": len(papers),
                 "title": paper.title[:80],
                 "skipped": False,
@@ -362,17 +549,30 @@ async def summarize_all(project_id: str, payload: SummarizeAllRequest, user=Depe
                 async def _progress_cb(step: str, _q: asyncio.Queue = q) -> None:
                     await _q.put(step)
 
-                task = asyncio.create_task(
-                    summarize_paper(
-                        provider, paper, payload.query,
-                        fetch_settings=fs, session_id=effective_project_id,
-                        progress_cb=_progress_cb,
+                async with TokenContext(project_id=effective_project_id, user_id=user["id"], stage="summarize_paper"):
+                    task = asyncio.create_task(
+                        summarize_paper(
+                            provider, paper, payload.query,
+                            fetch_settings=fs, session_id=effective_project_id,
+                            progress_cb=_progress_cb,
+                        )
                     )
-                )
 
-                # Drain queue while task runs, emitting step_progress events
-                while not task.done():
-                    try:
+                    # Drain queue while task runs, emitting step_progress events
+                    while not task.done():
+                        try:
+                            step = q.get_nowait()
+                            yield _sse({
+                                "type": "step_progress",
+                                "step": step,
+                                "current": i + 1,
+                                "total": len(papers),
+                            })
+                        except asyncio.QueueEmpty:
+                            await asyncio.sleep(0.05)
+
+                    # Drain any remaining events after task completes
+                    while not q.empty():
                         step = q.get_nowait()
                         yield _sse({
                             "type": "step_progress",
@@ -380,20 +580,8 @@ async def summarize_all(project_id: str, payload: SummarizeAllRequest, user=Depe
                             "current": i + 1,
                             "total": len(papers),
                         })
-                    except asyncio.QueueEmpty:
-                        await asyncio.sleep(0.05)
 
-                # Drain any remaining events after task completes
-                while not q.empty():
-                    step = q.get_nowait()
-                    yield _sse({
-                        "type": "step_progress",
-                        "step": step,
-                        "current": i + 1,
-                        "total": len(papers),
-                    })
-
-                summary = task.result()
+                    summary = task.result()
                 summary_dict = summary.model_dump()
                 await save_summary(effective_project_id, summary.paper_key, summary_dict)
                 done += 1
@@ -425,6 +613,161 @@ async def summarize_all(project_id: str, payload: SummarizeAllRequest, user=Depe
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
+
+
+# ── Reset summaries ───────────────────────────────────────────────────────────
+
+@router.delete("/projects/{project_id}/summaries")
+async def reset_summaries(project_id: str, user=Depends(get_current_user)):
+    """Delete all summaries for a project so summarization can restart from scratch."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    deleted = await clear_project_summaries(project_id)
+    return {"deleted": deleted, "project_id": project_id}
+
+
+# ── Background summarise-all task ────────────────────────────────────────────
+
+@router.post("/projects/{project_id}/summarize_all/start")
+async def start_summarize_all_bg(
+    project_id: str,
+    payload: SummarizeAllRequest,
+    user=Depends(get_current_user),
+):
+    """
+    Launch summarisation as a backend background task so it survives frontend
+    navigation.  Returns immediately; poll /summarize_all/status for progress.
+    """
+    # Guard: only one concurrent run per project
+    existing = _BG_TASKS.get(project_id, {})
+    if existing.get("running"):
+        return {"started": False, "reason": "already_running", **_bg_status(project_id)}
+
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_folder = project.get("project_folder")
+
+    async def _run():
+        _BG_TASKS[project_id] = {"running": True, "current": 0, "total": len(payload.papers), "current_title": "", "errors": 0}
+        try:
+            provider = await _get_provider_for_user(user["id"])
+            if not provider:
+                _BG_TASKS[project_id]["running"] = False
+                _BG_TASKS[project_id]["error"] = "No AI provider configured"
+                return
+
+            fs = await _fetch_settings_for_user(user["id"], project_folder)
+            existing_keys = await get_existing_summary_keys(project_id)
+            done = sum(1 for p in payload.papers if (p.doi or p.title[:60]).lower().strip() in existing_keys)
+            _BG_TASKS[project_id]["current"] = done
+
+            for paper in payload.papers:
+                paper_key = (paper.doi or paper.title[:60]).lower().strip()
+                if paper_key in existing_keys:
+                    continue
+                _BG_TASKS[project_id]["current_title"] = paper.title[:80]
+                try:
+                    summary = await summarize_paper(provider, paper, payload.query, fetch_settings=fs, session_id=project_id)
+                    await save_summary(project_id, summary.paper_key, summary.model_dump())
+                    existing_keys.add(paper_key)
+                    done += 1
+                    _BG_TASKS[project_id]["current"] = done
+                except Exception as exc:
+                    _BG_TASKS[project_id]["errors"] = _BG_TASKS[project_id].get("errors", 0) + 1
+                    logger.warning("BG summarise failed for %r: %s", paper.title[:40], exc)
+        finally:
+            status = _BG_TASKS.get(project_id, {})
+            status["running"] = False
+            status["current_title"] = ""
+            _BG_TASKS[project_id] = status
+
+    asyncio.create_task(_run())
+    return {"started": True, **_bg_status(project_id)}
+
+
+@router.get("/projects/{project_id}/summarize_all/status")
+async def summarize_all_status(project_id: str, user=Depends(get_current_user)):
+    """Poll the background summarisation progress for a project."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    # Also count summaries actually saved (source of truth)
+    existing_keys = await get_existing_summary_keys(project_id)
+    status = _bg_status(project_id)
+    status["saved"] = len(existing_keys)
+    return status
+
+
+# ── PDF / text backfill ────────────────────────────────────────────────────────
+
+@router.post("/projects/{project_id}/backfill_files")
+async def backfill_files(project_id: str, user=Depends(get_current_user)):
+    """
+    Retroactively save a file (PDF or .txt fallback) for every paper that has
+    already been summarised but has no corresponding file in full_papers/.
+
+    Returns counts of newly saved files, already-existing files, and failures.
+    """
+    from services.paper_fetcher import ensure_saved_pdf, _save_text_to_disk, _txt_filename, _pdf_filename
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_folder = project.get("project_folder")
+    if not project_folder:
+        raise HTTPException(status_code=400, detail="Project has no folder configured")
+
+    save_path = os.path.join(project_folder, "full_papers")
+    fs = await _fetch_settings_for_user(user["id"], project_folder)
+
+    papers_raw = project.get("papers", [])
+    existing_keys = await get_existing_summary_keys(project_id)
+
+    # Only backfill papers that have been summarised
+    summarised_papers = [
+        Paper(**p) if isinstance(p, dict) else p
+        for p in papers_raw
+        if (p.get("doi") or p.get("title", "")[:60]).lower().strip() in existing_keys
+    ]
+
+    saved = 0
+    already_existed = 0
+    failed = 0
+
+    for paper in summarised_papers:
+        # Check if any file already exists for this paper
+        pdf_path = os.path.join(save_path, _pdf_filename(paper))
+        txt_path = os.path.join(save_path, _txt_filename(paper))
+        if os.path.exists(pdf_path) or os.path.exists(txt_path):
+            already_existed += 1
+            continue
+
+        try:
+            result = await ensure_saved_pdf(paper, fs)
+            if result and os.path.exists(result):
+                saved += 1
+            elif paper.abstract:
+                # ensure_saved_pdf found no PDF — save abstract as text
+                r = _save_text_to_disk(paper.abstract.strip(), save_path, paper)
+                if r:
+                    saved += 1
+                else:
+                    failed += 1
+            else:
+                failed += 1
+        except Exception as exc:
+            logger.warning("Backfill failed for %r: %s", paper.title[:40], exc)
+            failed += 1
+
+    return {
+        "saved": saved,
+        "already_existed": already_existed,
+        "failed": failed,
+        "total_summarised": len(summarised_papers),
+    }
 
 
 # ── Screening ─────────────────────────────────────────────────────────────────
@@ -537,7 +880,8 @@ async def recommend_journals_endpoint(project_id: str, user=Depends(get_current_
     query  = project.get("query", "")
 
     provider = await _get_provider_for_user(user["id"])
-    recs = await recommend_journals(provider, papers, query)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="journal_recommendation"):
+        recs = await recommend_journals(provider, papers, query)
 
     recs_dicts = [r.model_dump() for r in recs]
     await save_journal_recs(project_id, recs_dicts)
@@ -572,13 +916,14 @@ async def generate_title_endpoint(
     project_summaries = list(project.get("summaries", {}).values())
     snapshot = build_summaries_snapshot(project_summaries) if project_summaries else ""
 
-    suggestions = await generate_title_suggestions(
-        provider=provider,
-        query=query,
-        article_type=payload.article_type,
-        journal=payload.selected_journal,
-        summaries_snapshot=snapshot,
-    )
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="generate_title"):
+        suggestions = await generate_title_suggestions(
+            provider=provider,
+            query=query,
+            article_type=payload.article_type,
+            journal=payload.selected_journal,
+            summaries_snapshot=snapshot,
+        )
     return TitleSuggestions(
         best_title=suggestions.best_title,
         best_title_rationale=suggestions.best_title_rationale,
@@ -607,12 +952,70 @@ async def approve_title_endpoint(
 
     await save_manuscript_title(project_id, title)
 
-    # Update project name from approved title (slugified) — renames folder on disk too
-    clean_name = slugify_project_name(title, max_len=80)
-    if clean_name:
-        await update_project_name(project_id, clean_name)
+    # Update project name from approved title — folder slug is handled internally.
+    await update_project_name(project_id, title)
 
     return {"status": "approved", "manuscript_title": title}
+
+
+@router.post("/projects/{project_id}/ensure_tentative_title")
+async def ensure_tentative_title_endpoint(project_id: str, user=Depends(get_current_user)) -> dict:
+    """Return a human-readable project title, generating one for older projects when missing."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    query = (project.get("query") or "").strip()
+    project_name = str(project.get("project_name") or "").strip()
+    search_state = project.get("literature_search_state") or {}
+    title = await _resolve_project_title(user["id"], project)
+    search_state["tentative_title"] = title
+    await save_literature_search_state(project_id, search_state, query=query)
+
+    if _looks_like_legacy_project_title(project_name, query) or _humanize_project_title(project_name) != title:
+        await update_project_name(project_id, title)
+
+    return {
+        "project_id": project_id,
+        "tentative_title": title,
+        "project_slug": slugify_project_name(title),
+    }
+
+
+@router.post("/projects/backfill_legacy_titles")
+async def backfill_legacy_titles_endpoint(user=Depends(get_current_user)) -> dict:
+    """One-time backfill to replace legacy query-derived project names with generated titles."""
+    items = await list_projects(user["id"])
+    updated: list[dict] = []
+
+    for item in items:
+        if (item.get("project_type") or "write") == "revision":
+            continue
+        project = await load_project(user["id"], item["project_id"])
+        if project is None or not _needs_title_backfill(project):
+            continue
+
+        title = await _resolve_project_title(user["id"], project)
+        search_state = project.get("literature_search_state") or {}
+        search_state["tentative_title"] = title
+        await save_literature_search_state(project["project_id"], search_state, query=project.get("query") or "")
+        await update_project_name(project["project_id"], title)
+        updated.append({
+            "project_id": project["project_id"],
+            "project_name": title,
+            "project_slug": slugify_project_name(title),
+        })
+
+    return {
+        "updated_count": len(updated),
+        "projects": updated,
+    }
+
+
+@router.post("/projects/normalize_storage")
+async def normalize_project_storage_endpoint(user=Depends(get_current_user)) -> dict:
+    """Normalize legacy mixed-root project files into canonical per-project folders."""
+    return await normalize_project_storage_for_user(user["id"])
 
 
 # ── Article writer system prompt ──────────────────────────────────────────────
@@ -721,12 +1124,42 @@ async def write_article(project_id: str, payload: WriteArticleRequest, user=Depe
         )
 
         try:
-            article_text = await provider.complete(
-                system=effective_system,
-                user=user_msg,
-                json_mode=False,
-                temperature=0.4,
-            )
+            article_tokens = max(16384, payload.word_limit * 4)
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="write_article"):
+                article_text = await provider.complete(
+                    system=effective_system,
+                    user=user_msg,
+                    json_mode=False,
+                    temperature=0.4,
+                    max_tokens=article_tokens,
+                )
+
+            # If model stopped short (< 60% of target), retry with expansion prompt
+            actual_words = len(article_text.split())
+            if actual_words < payload.word_limit * 0.6:
+                logger.warning(
+                    "Article too short (%d words, target %d) — attempting expansion",
+                    actual_words, payload.word_limit,
+                )
+                yield _sse({"type": "progress", "message": f"Draft too short ({actual_words} words) — expanding to full length…"})
+                expansion_msg = (
+                    f"The draft is only {actual_words} words, far below the {payload.word_limit}-word requirement.\n\n"
+                    f"Incomplete draft:\n\n{article_text}\n\n"
+                    f"---\n\n"
+                    f"CONTINUE and EXPAND this into a complete {payload.word_limit}-word article. "
+                    f"Keep all existing content. Expand every section with full scholarly analysis, "
+                    f"evidence-based prose, and inline citations. Add all missing sections. "
+                    f"The final article MUST reach {payload.word_limit} words."
+                )
+                async with TokenContext(project_id=project_id, user_id=user["id"], stage="write_article"):
+                    article_text = await provider.complete(
+                        system=effective_system,
+                        user=expansion_msg,
+                        json_mode=False,
+                        temperature=0.4,
+                        max_tokens=article_tokens,
+                    )
+
             if manuscript_title and not article_text.lstrip().startswith(f"# {manuscript_title}"):
                 article_text = f"# {manuscript_title}\n\n{article_text}"
             await save_article(project_id, article_text, payload.selected_journal)
@@ -789,12 +1222,40 @@ async def write_article_sync(project_id: str, payload: WriteArticleRequest, user
         article_type_override=effective_article_type_sync,
     )
 
-    article_text = await provider.complete(
-        system=effective_system,
-        user=user_msg,
-        json_mode=False,
-        temperature=0.4,
-    )
+    article_tokens_sync = max(16384, payload.word_limit * 4)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="write_article"):
+        article_text = await provider.complete(
+            system=effective_system,
+            user=user_msg,
+            json_mode=False,
+            temperature=0.4,
+            max_tokens=article_tokens_sync,
+        )
+
+    actual_words_sync = len(article_text.split())
+    if actual_words_sync < payload.word_limit * 0.6:
+        logger.warning(
+            "Article too short (%d words, target %d) — attempting expansion",
+            actual_words_sync, payload.word_limit,
+        )
+        expansion_msg_sync = (
+            f"The draft is only {actual_words_sync} words, far below the {payload.word_limit}-word requirement.\n\n"
+            f"Incomplete draft:\n\n{article_text}\n\n"
+            f"---\n\n"
+            f"CONTINUE and EXPAND this into a complete {payload.word_limit}-word article. "
+            f"Keep all existing content. Expand every section with full scholarly analysis, "
+            f"evidence-based prose, and inline citations. Add all missing sections. "
+            f"The final article MUST reach {payload.word_limit} words."
+        )
+        async with TokenContext(project_id=project_id, user_id=user["id"], stage="write_article"):
+            article_text = await provider.complete(
+                system=effective_system,
+                user=expansion_msg_sync,
+                json_mode=False,
+                temperature=0.4,
+                max_tokens=article_tokens_sync,
+            )
+
     if manuscript_title_sync and not article_text.lstrip().startswith(f"# {manuscript_title_sync}"):
         article_text = f"# {manuscript_title_sync}\n\n{article_text}"
     await save_article(project_id, article_text, payload.selected_journal)
@@ -857,11 +1318,214 @@ async def synthesize_papers(project_id: str, user=Depends(get_current_user)) -> 
     from models import PaperSummary as PS
     project_summaries = [PS(**v) for v in summaries_raw.values()]
     query = project.get("query", "")
+    article_type = project.get("article_type", "review")
 
-    result = await synthesize(provider, project_summaries, query)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="cross_paper_synthesis"):
+        result = await synthesize(
+            provider, project_summaries, query,
+            article_type=article_type,
+            build_packs=True,
+        )
     await update_project_phase(project_id, 'cross_reference')
     await save_synthesis_result(project_id, result.model_dump())
     return result
+
+
+# ── Deep synthesis ─────────────────────────────────────────────────────────────
+
+class DeepSynthesizeRequest(BaseModel):
+    auto_fetch_enabled: bool = True
+
+@router.post("/projects/{project_id}/deep_synthesize")
+async def deep_synthesize_endpoint(
+    project_id: str,
+    payload: DeepSynthesizeRequest = DeepSynthesizeRequest(),
+    user=Depends(get_current_user),
+) -> StreamingResponse:
+    """Run multi-stage deep synthesis pipeline with SSE streaming progress."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    summaries_raw = project.get("summaries", {})
+    if not summaries_raw:
+        raise HTTPException(status_code=400, detail="No summaries found. Run summarize_all first.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
+
+    from models import PaperSummary as PS
+    project_summaries = [PS(**v) for v in summaries_raw.values()]
+    query = project.get("query", "")
+    article_type = project.get("article_type", "review")
+
+    from services.deep_synthesizer import deep_synthesize
+
+    async def _stream():
+        import json as _json
+        result_data = None
+        async with TokenContext(project_id=project_id, user_id=user["id"], stage="deep_synthesis"):
+            async for event in deep_synthesize(
+                provider=provider,
+                summaries=project_summaries,
+                query=query,
+                article_type=article_type,
+                project_id=project_id,
+                auto_fetch_enabled=payload.auto_fetch_enabled,
+            ):
+                if event.get("type") == "complete":
+                    result_data = event.get("result")
+                yield f"data: {_json.dumps(event, ensure_ascii=False)}\n\n"
+
+        # Save the result to DB
+        if result_data:
+            await save_deep_synthesis_result(project_id, result_data)
+            await update_project_phase(project_id, 'cross_reference')
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@router.get("/projects/{project_id}/deep_synthesis_result")
+async def get_deep_synthesis(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Fetch the saved deep synthesis result for a project."""
+    result = await get_deep_synthesis_result(project_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No deep synthesis result found.")
+    return result
+
+
+# ── Citation Audit ─────────────────────────────────────────────────────────────
+
+@router.post("/projects/{project_id}/citation_audit")
+async def citation_audit(project_id: str, user=Depends(get_current_user)) -> dict:
+    """
+    Section-sensitive citation audit of the project's current draft manuscript.
+
+    Checks for:
+    - Unsupported claims (factual statements without citations where expected)
+    - Missing citation purposes by section (e.g. no identify_gap paper in Introduction)
+    - Uncited seminal/key papers that are in the Citation Base but absent from the draft
+    - Citation stacking (≥4 citations in sequence with no synthesis prose)
+
+    Returns a structured audit report.
+    """
+    import json as _json
+    import re as _re
+
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    draft = project.get("article_draft") or project.get("article") or ""
+    if not draft:
+        raise HTTPException(status_code=400, detail="No draft found. Generate a manuscript first.")
+
+    summaries_raw = project.get("summaries", {})
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
+
+    from models import PaperSummary as PS
+    project_summaries = [PS(**v) for v in summaries_raw.values()]
+    query = project.get("query", "")
+
+    # Collect seminal papers not cited in draft
+    seminal_uncited: list[dict] = []
+    for ps in project_summaries:
+        if ps.is_seminal:
+            if ps.paper_key not in draft and ps.bibliography.title not in draft:
+                seminal_uncited.append({
+                    "paper_key": ps.paper_key,
+                    "title": ps.bibliography.title or ps.paper_key,
+                    "reason": "seminal — present in Citation Base but not found in draft text",
+                })
+
+    # Build audit prompt
+    audit_system = """You are an expert academic manuscript editor specializing in citation quality.
+You will audit a draft manuscript for citation issues.
+
+Return ONLY a valid JSON object with these fields:
+{
+  "unsupported_claims": [
+    {"text": "sentence from draft", "section": "introduction|methods|results|discussion", "suggested_purpose": "background|theory|..."}
+  ],
+  "missing_purposes_by_section": {
+    "introduction": ["identify_gap", "theory"],
+    "methods": ["methodology"]
+  },
+  "citation_stacking": [
+    {"section": "discussion", "excerpt": "short excerpt showing stacking"}
+  ],
+  "purpose_mismatch": [
+    {"excerpt": "text excerpt", "issue": "description of the mismatch"}
+  ]
+}
+
+SECTION-SPECIFIC AUDIT RULES:
+Introduction:
+  - Every prevalence/epidemiology claim needs a citation
+  - The rationale for the gap should have at least one [identify_gap] citation
+  - Theory/framework statements should have [theory] or [original_source] citations
+  - MISSING: flag if none of these purposes appear: identify_gap, background, theory
+
+Methods:
+  - Every named scale, instrument, or validated tool should have a citation
+  - Statistical methods that are not standard should be cited
+  - MISSING: flag if methodology citations are absent
+
+Results:
+  - Minimal citations expected — do NOT flag absence of citations here
+  - Only flag if citations appear out of place
+
+Discussion:
+  - Comparisons with prior work should cite specific papers
+  - Do NOT flag as "unsupported" if the claim refers to the study's own findings
+  - MISSING: flag if compare_findings citations are absent entirely
+
+Citation stacking:
+  - Flag ONLY when 4+ distinct citations appear consecutively with no synthesis prose
+
+Do NOT flag:
+  - Results section statements about the study's own data
+  - Methodological descriptions of the current study's procedure
+  - Standard sentences that do not require citations (e.g., objectives, aims)
+"""
+
+    audit_user = f"""Research question: {query}
+
+Known seminal papers NOT cited in draft (pre-detected):
+{_json.dumps(seminal_uncited, indent=2)}
+
+DRAFT MANUSCRIPT:
+{draft[:12000]}
+
+Audit the draft according to the rules. Return only the JSON object."""
+
+    try:
+        async with TokenContext(project_id=project_id, user_id=user["id"], stage="citation_audit"):
+            raw = await provider.generate(audit_system, audit_user, json_mode=True, temperature=0.1)
+        result = _json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        result = {}
+
+    # Merge pre-detected seminal papers
+    result.setdefault("uncited_key_papers", [])
+    result["uncited_key_papers"] = seminal_uncited + result.get("uncited_key_papers", [])
+    result.setdefault("unsupported_claims", [])
+    result.setdefault("missing_purposes_by_section", {})
+    result.setdefault("citation_stacking", [])
+    result.setdefault("purpose_mismatch", [])
+
+    return result
+
+
+@router.post("/sessions/{project_id}/citation_audit")
+async def citation_audit_compat(project_id: str, user=Depends(get_current_user)) -> dict:
+    return await citation_audit(project_id, user)
 
 
 # ── Peer review ────────────────────────────────────────────────────────────────
@@ -886,7 +1550,8 @@ async def peer_review(project_id: str, user=Depends(get_current_user)) -> PeerRe
     query   = project.get("query", "")
     article = project.get("article", "") or ""
 
-    report = await generate_peer_review(provider, project_summaries, query, article)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="peer_review"):
+        report = await generate_peer_review(provider, project_summaries, query, article)
     await save_peer_review_result(project_id, report.model_dump())
     return report
 
@@ -916,14 +1581,15 @@ async def revise_after_review(
     project_summaries = [PS(**v) for v in summaries_raw.values()]
     query = project.get("query", "")
 
-    result = await generate_revision_package(
-        provider=provider,
-        summaries=project_summaries,
-        query=query,
-        article=payload.article or (project.get("article") or ""),
-        review=payload.review,
-        journal=payload.selected_journal or (project.get("selected_journal") or ""),
-    )
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision"):
+        result = await generate_revision_package(
+            provider=provider,
+            summaries=project_summaries,
+            query=query,
+            article=payload.article or (project.get("article") or ""),
+            review=payload.review,
+            journal=payload.selected_journal or (project.get("selected_journal") or ""),
+        )
     if result.revised_article.strip():
         await save_article(project_id, result.revised_article, payload.selected_journal or (project.get("selected_journal") or ""))
     return result
@@ -943,19 +1609,34 @@ async def import_manuscript_endpoint(
     generates an AI summary, and saves to projects.base_manuscript.
     Accepts multipart/form-data with either `file` (.docx) or `text` field.
     """
+    from services.docx_pdf_converter import convert_docx_to_pdf
     from services.manuscript_importer import extract_text_from_docx, import_manuscript
+    from services.revision_docx_builder import prepare_revision_manuscript_docx
 
     # Verify project ownership
     proj = await load_project_minimal(project_id)
     if not proj or proj.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    # Extract text
+    # Extract text (and preserve raw .docx bytes for formatting-safe exports)
     manuscript_text = ""
+    docx_bytes: bytes | None = None
+    prepared_docx = False
+    reference_pdf_ready = False
+    reference_pdf_warning = ""
     if file and file.filename:
         file_bytes = await file.read()
         if file.filename.endswith('.docx'):
             manuscript_text = extract_text_from_docx(file_bytes)
+            try:
+                docx_bytes = prepare_revision_manuscript_docx(file_bytes)
+                prepared_docx = True
+            except Exception as exc:
+                logger.warning("Failed to prepare uploaded manuscript .docx for revision: %s", exc)
+                docx_bytes = file_bytes
+                reference_pdf_warning = (
+                    "The manuscript was imported, but enabling track changes and line numbering failed."
+                )
         else:
             manuscript_text = file_bytes.decode('utf-8', errors='replace')
     elif text:
@@ -965,11 +1646,54 @@ async def import_manuscript_endpoint(
         raise HTTPException(status_code=400, detail="No manuscript text provided.")
 
     provider = await _get_provider_for_user(user["id"])
-    result = await import_manuscript(provider, manuscript_text)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="import_manuscript"):
+        result = await import_manuscript(provider, manuscript_text)
 
-    # Persist the manuscript text
-    await save_base_manuscript(project_id, manuscript_text)
+    # Optionally create Gemini cache
+    gemini_cache_name = ""
+    if provider and provider.config.provider == "gemini":
+        try:
+            gemini_cache_name = await provider.create_gemini_cache(
+                system="You are an expert academic manuscript revision assistant.",
+                content=f"FULL MANUSCRIPT:\n{manuscript_text}",
+                ttl_seconds=7200,
+            ) or ""
+        except Exception:
+            pass
 
+    # Persist the manuscript text + metadata to DB
+    await save_base_manuscript(
+        project_id,
+        manuscript_text,
+        summary=result.get("manuscript_summary", ""),
+        section_index=result.get("section_index"),
+        gemini_cache_name=gemini_cache_name,
+    )
+
+    # Save files to project folder on disk
+    project_folder = proj.get("project_folder") or ""
+    if project_folder:
+        file_paths = save_manuscript_files(project_folder, docx_bytes=docx_bytes, markdown_text=manuscript_text)
+        reference_pdf_path = os.path.join(project_folder, "original_manuscript_reference.pdf")
+        if docx_bytes and file_paths.get("original_docx"):
+            try:
+                pdf_path = convert_docx_to_pdf(file_paths["original_docx"], reference_pdf_path)
+                file_paths["original_reference_pdf"] = pdf_path
+                reference_pdf_ready = True
+            except Exception as exc:
+                logger.warning("Failed to generate manuscript reference PDF for %s: %s", project_id, exc)
+                if os.path.exists(reference_pdf_path):
+                    os.remove(reference_pdf_path)
+                if not reference_pdf_warning:
+                    reference_pdf_warning = str(exc)
+        elif os.path.exists(reference_pdf_path):
+            os.remove(reference_pdf_path)
+        if file_paths:
+            await save_manuscript_paths(project_id, file_paths)
+
+    result["prepared_docx"] = prepared_docx
+    result["reference_pdf_ready"] = reference_pdf_ready
+    result["reference_pdf_warning"] = reference_pdf_warning
     return result
 
 
@@ -987,7 +1711,13 @@ async def parse_reviewer_comments_endpoint(
         raise HTTPException(status_code=404, detail="Project not found.")
 
     provider = await _get_provider_for_user(user["id"])
-    return await parse_reviewer_comments(provider, payload.raw_comments)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="parse_comments"):
+        comments = await parse_reviewer_comments(provider, payload.raw_comments)
+    # Persist parsed comments to comment_work table immediately
+    comment_dicts = [c if isinstance(c, dict) else c.model_dump() if hasattr(c, 'model_dump') else dict(c)
+                     for c in comments]
+    await upsert_comment_work_batch(project_id, payload.round_number, comment_dicts)
+    return comments
 
 
 @router.post("/projects/{project_id}/revision_rounds/parse_docx")
@@ -1011,7 +1741,12 @@ async def parse_reviewer_comments_docx_endpoint(
         raw_text = file_bytes.decode('utf-8', errors='replace')
 
     provider = await _get_provider_for_user(user["id"])
-    return await parse_reviewer_comments(provider, raw_text)
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="parse_comments"):
+        comments = await parse_reviewer_comments(provider, raw_text)
+    comment_dicts = [c if isinstance(c, dict) else c.model_dump() if hasattr(c, 'model_dump') else dict(c)
+                     for c in comments]
+    await upsert_comment_work_batch(project_id, 1, comment_dicts)
+    return comments
 
 
 @router.post("/projects/{project_id}/revision_rounds/suggest_changes")
@@ -1029,12 +1764,21 @@ async def suggest_changes_endpoint(
 
     provider = await _get_provider_for_user(user["id"])
     manuscript_text = payload.manuscript_text or proj.get("base_manuscript") or ""
-    suggestions = await suggest_comment_changes(
-        provider=provider,
-        manuscript_text=manuscript_text,
-        parsed_comments=[c.model_dump() for c in payload.parsed_comments],
-        journal_name=payload.journal_name,
-    )
+    manuscript_summary = proj.get("base_manuscript_summary") or ""
+    section_index = _parse_section_index(proj.get("base_section_index"))
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision_suggestions"):
+        suggestions = await suggest_comment_changes(
+            provider=provider,
+            manuscript_text=manuscript_text,
+            parsed_comments=[c.model_dump() for c in payload.parsed_comments],
+            journal_name=payload.journal_name,
+            manuscript_summary=manuscript_summary,
+            section_index=section_index,
+        )
+    # Persist suggestions to comment_work table immediately
+    sug_dicts = [s if isinstance(s, dict) else s.model_dump() if hasattr(s, 'model_dump') else dict(s)
+                 for s in suggestions]
+    await upsert_comment_suggestions_batch(project_id, payload.round_number, sug_dicts)
     return suggestions
 
 
@@ -1059,17 +1803,31 @@ async def discuss_comment_endpoint(
         raise HTTPException(status_code=400, detail="No AI provider configured.")
 
     manuscript_text = payload.manuscript_text or proj.get("base_manuscript") or ""
+    manuscript_summary = proj.get("base_manuscript_summary") or ""
+    section_index = _parse_section_index(proj.get("base_section_index"))
 
-    return await discuss_comment(
-        provider=provider,
-        original_comment=payload.original_comment,
-        user_message=payload.user_message,
-        history=payload.history,
-        current_plan=payload.current_plan,
-        doi_refs=payload.doi_references,
-        manuscript_text=manuscript_text,
-        finalized_context=payload.finalized_context,
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision_discussion"):
+        result = await discuss_comment(
+            provider=provider,
+            original_comment=payload.original_comment,
+            user_message=payload.user_message,
+            history=payload.history,
+            current_plan=payload.current_plan,
+            doi_refs=payload.doi_references,
+            manuscript_text=manuscript_text,
+            finalized_context=payload.finalized_context,
+            manuscript_summary=manuscript_summary,
+            section_index=section_index,
+        )
+    # Persist discussion messages + updated plan immediately
+    await append_discussion_message(
+        project_id, payload.round_number,
+        payload.reviewer_number, payload.comment_number,
+        [{"role": "user", "content": payload.user_message},
+         {"role": "ai", "content": result["ai_response"]}],
+        result["updated_plan"],
     )
+    return result
 
 
 @router.post("/projects/{project_id}/revision_rounds/finalize_comment")
@@ -1093,15 +1851,48 @@ async def finalize_comment_endpoint(
         raise HTTPException(status_code=400, detail="No AI provider configured.")
 
     manuscript_text = payload.manuscript_text or proj.get("base_manuscript") or ""
+    manuscript_summary = proj.get("base_manuscript_summary") or ""
+    section_index = _parse_section_index(proj.get("base_section_index"))
 
-    return await finalize_comment_response(
-        provider=provider,
-        original_comment=payload.original_comment,
-        finalized_plan=payload.finalized_plan,
-        manuscript_text=manuscript_text,
-        reviewer_number=payload.reviewer_number,
-        comment_number=payload.comment_number,
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision_finalize"):
+        result = await finalize_comment_response(
+            provider=provider,
+            original_comment=payload.original_comment,
+            finalized_plan=payload.finalized_plan,
+            manuscript_text=manuscript_text,
+            reviewer_number=payload.reviewer_number,
+            comment_number=payload.comment_number,
+            manuscript_summary=manuscript_summary,
+            section_index=section_index,
+        )
+    # Validate manuscript_changes operations against manuscript text
+    validation_warnings: list[str] = []
+    mc_str = result.get("manuscript_changes", "[]")
+    try:
+        ops = json.loads(mc_str)
+        if isinstance(ops, list):
+            for op in ops:
+                search_text = op.get("find") or op.get("anchor", "")
+                if search_text and manuscript_text and search_text not in manuscript_text:
+                    validation_warnings.append(f"Text not found in manuscript: '{search_text[:60]}...'")
+    except (json.JSONDecodeError, TypeError):
+        pass  # legacy format — skip validation
+
+    if validation_warnings:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Finalize R%d.C%d validation warnings: %s",
+            payload.reviewer_number, payload.comment_number, validation_warnings,
+        )
+
+    # Persist finalization immediately
+    await save_comment_finalization(
+        project_id, payload.round_number,
+        payload.reviewer_number, payload.comment_number,
+        result["author_response"], result["action_taken"], result["manuscript_changes"],
     )
+    result["validation_warnings"] = validation_warnings
+    return result
 
 
 @router.post("/projects/{project_id}/revision_rounds")
@@ -1128,13 +1919,14 @@ async def generate_revision_round_endpoint(
     if not provider:
         raise HTTPException(status_code=400, detail="No AI provider configured.")
 
-    round_data = await generate_revision_from_plans(
-        provider=provider,
-        manuscript_text=base_manuscript,
-        finalized_plans=payload.finalized_plans,
-        journal_name=payload.journal_name,
-        round_number=payload.round_number,
-    )
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision_round"):
+        round_data = await generate_revision_from_plans(
+            provider=provider,
+            manuscript_text=base_manuscript,
+            finalized_plans=payload.finalized_plans,
+            journal_name=payload.journal_name,
+            round_number=payload.round_number,
+        )
     await save_revision_round(project_id, round_data)
     await update_project_phase(project_id, f'realrevision_round_{payload.round_number}')
     return round_data
@@ -1189,30 +1981,116 @@ async def save_revision_wip_endpoint(
     return {"ok": True}
 
 
+# ── Comment work endpoints (per-comment persistent storage) ──────────────────
+
+@router.get("/projects/{project_id}/comment_work/{round_number}")
+async def get_comment_work_endpoint(
+    project_id: str,
+    round_number: int,
+    user=Depends(get_current_user),
+) -> list[dict]:
+    """Load all per-comment state for a revision round."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return await get_comment_work_rows(project_id, round_number)
+
+
+@router.patch("/projects/{project_id}/comment_work/{round_number}/{reviewer_number}/{comment_number}")
+async def update_comment_work_endpoint(
+    project_id: str,
+    round_number: int,
+    reviewer_number: int,
+    comment_number: int,
+    payload: UpdateCommentWorkRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Update one comment's fields (plan, DOIs, category, unfinalize, etc.)."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    await update_comment_work_fields(project_id, round_number, reviewer_number, comment_number, updates)
+    return {"ok": True}
+
+
+@router.put("/projects/{project_id}/comment_work/{round_number}")
+async def replace_comments_endpoint(
+    project_id: str,
+    round_number: int,
+    payload: ReplaceCommentsRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Replace all comments for a round (after delete/split/combine/reorder)."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await upsert_comment_work_batch(project_id, round_number, payload.comments)
+    return {"ok": True}
+
+
 @router.get("/projects/{project_id}/revision_rounds/{round_number}/point_by_point_docx")
 async def download_point_by_point_docx(
     project_id: str,
     round_number: int,
     user=Depends(get_current_user),
 ) -> Response:
-    """Download the point-by-point reply as a formatted .docx."""
-    from services.revision_docx_builder import build_point_by_point_docx
+    """Download the point-by-point reply as a formatted .docx (pre-generated)."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    pf = proj.get("project_folder", "")
+    if pf:
+        cached = os.path.join(pf, f"round_{round_number}", "point_by_point.docx")
+        if os.path.exists(cached):
+            with open(cached, "rb") as f:
+                docx_bytes = f.read()
+            filename = f"point_by_point_reply_round{round_number}.docx"
+            return Response(
+                content=docx_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail="Point-by-point document not found. Click 'Generate Documents' first.",
+    )
+
+
+@router.get("/projects/{project_id}/manuscript_reference_pdf")
+async def download_manuscript_reference_pdf(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> Response:
+    """Download the line-numbered reference PDF generated from the uploaded manuscript."""
+    from services.docx_pdf_converter import convert_docx_to_pdf
 
     proj = await load_project_minimal(project_id)
     if not proj or proj.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    rounds = await get_revision_rounds(project_id)
-    round_data = next((r for r in rounds if r.get("round_number") == round_number), None)
-    if not round_data:
-        raise HTTPException(status_code=404, detail=f"Revision round {round_number} not found.")
+    pf = proj.get("project_folder", "")
+    pdf_path = os.path.join(pf, "original_manuscript_reference.pdf")
+    docx_path = os.path.join(pf, "original_manuscript.docx")
 
-    manuscript_title = proj.get("manuscript_title") or proj.get("project_name") or ""
-    docx_bytes = build_point_by_point_docx(round_data, manuscript_title=manuscript_title)
-    filename = f"point_by_point_reply_round{round_number}.docx"
+    if not os.path.exists(pdf_path):
+        if not os.path.exists(docx_path):
+            raise HTTPException(status_code=404, detail="Reference manuscript PDF not found.")
+        try:
+            convert_docx_to_pdf(docx_path, pdf_path)
+        except Exception as exc:
+            logger.error("Manuscript reference PDF generation failed for %s: %s", project_id, exc)
+            raise HTTPException(status_code=500, detail=f"Reference manuscript PDF generation failed: {exc}")
+
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    filename = f"manuscript_reference_{project_id}.pdf"
     return Response(
-        content=docx_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        content=pdf_bytes,
+        media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -1223,25 +2101,96 @@ async def download_revised_manuscript_docx(
     round_number: int,
     user=Depends(get_current_user),
 ) -> Response:
-    """Download the clean revised manuscript as a .docx."""
-    from services.revision_docx_builder import build_clean_revised_docx
+    """Download the clean revised manuscript as a .docx.
+
+    Serves cached file generated by generate_all_docs.
+    Falls back to deriving from track_changes.docx if cached clean file missing.
+    """
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    pf = proj.get("project_folder", "")
+    docx_bytes = None
+
+    # Strategy 1: cached clean file on disk
+    if pf:
+        cached = os.path.join(pf, f"round_{round_number}", "revised_manuscript.docx")
+        if os.path.exists(cached):
+            with open(cached, "rb") as f:
+                docx_bytes = f.read()
+
+    # Strategy 2: derive from existing track_changes.docx on disk
+    if not docx_bytes and pf:
+        tc_path = os.path.join(pf, f"round_{round_number}", "track_changes.docx")
+        if os.path.exists(tc_path):
+            from services.revision_docx_builder import generate_clean_docx
+            with open(tc_path, "rb") as f:
+                docx_bytes = generate_clean_docx(f.read())
+            save_round_export(pf, round_number, "revised_manuscript.docx", docx_bytes)
+
+    if not docx_bytes:
+        raise HTTPException(
+            status_code=404,
+            detail="Revised manuscript not found. Click 'Generate Documents' first.",
+        )
+
+    filename = f"revised_manuscript_round{round_number}.docx"
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/projects/{project_id}/revision_rounds/{round_number}/revised_manuscript_pdf")
+async def download_revised_manuscript_pdf(
+    project_id: str,
+    round_number: int,
+    user=Depends(get_current_user),
+) -> Response:
+    """Download the revised manuscript as a line-numbered PDF."""
+    from services.docx_pdf_converter import convert_docx_to_pdf
+    from services.revision_docx_builder import generate_clean_docx
 
     proj = await load_project_minimal(project_id)
     if not proj or proj.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    rounds = await get_revision_rounds(project_id)
-    round_data = next((r for r in rounds if r.get("round_number") == round_number), None)
-    if not round_data:
-        raise HTTPException(status_code=404, detail=f"Revision round {round_number} not found.")
+    pf = proj.get("project_folder", "")
+    if not pf:
+        raise HTTPException(status_code=404, detail="Project folder not found.")
 
-    revised_article = round_data.get("revised_article", "")
-    manuscript_title = proj.get("manuscript_title") or ""
-    docx_bytes = build_clean_revised_docx(revised_article, manuscript_title=manuscript_title)
-    filename = f"revised_manuscript_round{round_number}.docx"
+    round_dir = os.path.join(pf, f"round_{round_number}")
+    pdf_path = os.path.join(round_dir, "revised_manuscript.pdf")
+    clean_path = os.path.join(round_dir, "revised_manuscript.docx")
+    tc_path = os.path.join(round_dir, "track_changes.docx")
+
+    if not os.path.exists(pdf_path):
+        if not os.path.exists(clean_path) and os.path.exists(tc_path):
+            with open(tc_path, "rb") as f:
+                clean_bytes = generate_clean_docx(f.read())
+            save_round_export(pf, round_number, "revised_manuscript.docx", clean_bytes)
+
+        if not os.path.exists(clean_path):
+            raise HTTPException(
+                status_code=404,
+                detail="Revised manuscript PDF not found. Click 'Generate Documents' first.",
+            )
+
+        try:
+            convert_docx_to_pdf(clean_path, pdf_path)
+        except Exception as exc:
+            logger.error("Revised manuscript PDF generation failed for %s round %s: %s", project_id, round_number, exc)
+            raise HTTPException(status_code=500, detail=f"Revised manuscript PDF generation failed: {exc}")
+
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    filename = f"revised_manuscript_round{round_number}.pdf"
     return Response(
-        content=docx_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        content=pdf_bytes,
+        media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -1252,27 +2201,167 @@ async def download_track_changes_docx(
     round_number: int,
     user=Depends(get_current_user),
 ) -> Response:
-    """Download the track-changes .docx with real OOXML w:ins/w:del markup."""
-    from services.revision_docx_builder import build_track_changes_docx
+    """Download track-changes .docx (pre-generated by generate_all_docs)."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    pf = proj.get("project_folder", "")
+    if pf:
+        cached = os.path.join(pf, f"round_{round_number}", "track_changes.docx")
+        if os.path.exists(cached):
+            with open(cached, "rb") as f:
+                docx_bytes = f.read()
+            filename = f"track_changes_round{round_number}.docx"
+            return Response(
+                content=docx_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail="Track changes document not found. Click 'Generate Documents' first.",
+    )
+
+
+# ── Generate all revision documents at once ────────────────────────────────────
+
+@router.post("/projects/{project_id}/revision_rounds/generate_all_docs")
+async def generate_all_docs(
+    project_id: str,
+    payload: GenerateAllDocsRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Generate the revision document package in one call:
+    1. Track changes .docx (direct editing via docx-revisions)
+    2. Clean revised .docx (accept all changes)
+    3. Line-numbered revised manuscript .pdf
+    4. Point-by-point reply .docx
+    """
+    from services.docx_pdf_converter import convert_docx_to_pdf
+    from services.revision_docx_builder import (
+        apply_direct_track_changes,
+        build_point_by_point_docx,
+        generate_clean_docx,
+    )
 
     proj = await load_project_minimal(project_id)
     if not proj or proj.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    rounds = await get_revision_rounds(project_id)
-    round_data = next((r for r in rounds if r.get("round_number") == round_number), None)
-    if not round_data:
-        raise HTTPException(status_code=404, detail=f"Revision round {round_number} not found.")
+    pf = proj.get("project_folder", "")
+    manuscript_text = proj.get("base_manuscript") or ""
 
-    original_manuscript = proj.get("base_manuscript") or ""
-    revised_article = round_data.get("revised_article", "")
-    author = user.get("name") or user.get("email") or "Author"
-    docx_bytes = build_track_changes_docx(original_manuscript, revised_article, author=author)
-    filename = f"track_changes_round{round_number}.docx"
+    # Load original .docx
+    saved_docx = get_original_docx_bytes(pf)
+    if not saved_docx:
+        raise HTTPException(status_code=400, detail="No original .docx found for this project.")
+
+    # Load finalized plans from comment_work table
+    plans = await get_comment_work_rows(project_id, payload.round_number)
+    finalized = [dict(p) for p in plans if p.get("is_finalized")]
+    if not finalized:
+        raise HTTPException(status_code=400, detail="No finalized comments found. Finalize at least one comment first.")
+
+    # 1. Track changes .docx (direct editing via docx-revisions)
+    try:
+        tc_bytes = apply_direct_track_changes(
+            saved_docx, finalized, author=payload.author, manuscript_text=manuscript_text,
+        )
+    except Exception as exc:
+        logger.error("Track changes generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Track changes generation failed: {exc}")
+
+    # 2. Clean .docx (accept all changes)
+    try:
+        clean_bytes = generate_clean_docx(tc_bytes)
+    except Exception as exc:
+        logger.error("Clean docx generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Clean docx generation failed: {exc}")
+
+    # 3. Point-by-point .docx
+    # Build round_data structure from finalized plans
+    responses = []
+    for p in finalized:
+        responses.append({
+            "reviewer_number": p.get("reviewer_number", 0),
+            "comment_number": p.get("comment_number", 0),
+            "original_comment": p.get("original_comment", ""),
+            "author_response": p.get("author_response", ""),
+            "action_taken": p.get("action_taken", ""),
+            "manuscript_changes": p.get("manuscript_changes", ""),
+        })
+    round_data = {"round_number": payload.round_number, "responses": responses}
+    manuscript_title = proj.get("manuscript_title") or proj.get("project_name") or ""
+
+    try:
+        pbp_bytes = build_point_by_point_docx(round_data, manuscript_title=manuscript_title)
+    except Exception as exc:
+        logger.error("Point-by-point generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Point-by-point generation failed: {exc}")
+
+    revised_pdf_ready = False
+    if pf:
+        clear_round_exports(pf, payload.round_number)
+        path = save_round_export(pf, payload.round_number, "track_changes.docx", tc_bytes)
+        clean_path = save_round_export(pf, payload.round_number, "revised_manuscript.docx", clean_bytes)
+        pbp_path = save_round_export(pf, payload.round_number, "point_by_point.docx", pbp_bytes)
+        revised_pdf_path = os.path.join(pf, f"round_{payload.round_number}", "revised_manuscript.pdf")
+        try:
+            convert_docx_to_pdf(clean_path, revised_pdf_path)
+            revised_pdf_ready = True
+        except Exception as exc:
+            logger.warning(
+                "Failed to generate revised manuscript PDF for %s round %s: %s",
+                project_id,
+                payload.round_number,
+                exc,
+            )
+        await save_manuscript_paths(project_id, {
+            f"round_{payload.round_number}_track_changes": path,
+            f"round_{payload.round_number}_revised": clean_path,
+            f"round_{payload.round_number}_point_by_point": pbp_path,
+            **(
+                {f"round_{payload.round_number}_revised_pdf": revised_pdf_path}
+                if revised_pdf_ready else {}
+            ),
+        })
+
+    return {
+        "status": "ok",
+        "round_number": payload.round_number,
+        "revised_pdf_ready": revised_pdf_ready,
+    }
+
+
+# ── Download entire project as zip ─────────────────────────────────────────────
+
+@router.get("/projects/{project_id}/download_zip")
+async def download_project_zip(project_id: str, user=Depends(get_current_user)) -> Response:
+    """Download the entire project folder as a zip file."""
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    project_folder = proj.get("project_folder", "")
+    if not project_folder or not os.path.isdir(project_folder):
+        raise HTTPException(status_code=404, detail="Project folder not found on disk.")
+
+    project_name = proj.get("project_name") or project_id
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(project_folder):
+            for fname in files:
+                abs_path = os.path.join(root, fname)
+                arc_name = os.path.join(project_name, os.path.relpath(abs_path, project_folder))
+                zf.write(abs_path, arc_name)
+    buf.seek(0)
+
     return Response(
-        content=docx_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{project_name}.zip"'},
     )
 
 

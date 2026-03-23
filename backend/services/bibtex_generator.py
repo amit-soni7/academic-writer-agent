@@ -102,6 +102,57 @@ def make_bibtex_entry(summary: PaperSummary, key: Optional[str] = None) -> str:
     return f"@article{{{cite_key},\n  {field_lines}\n}}"
 
 
+def project_bib_path(project_id: str, project_folder: str) -> str:
+    """Return the canonical per-project BibTeX filepath."""
+    project_name = os.path.basename(project_folder.rstrip("/")) or project_id
+    return os.path.join(project_folder, f"{project_name}.bib")
+
+
+def write_project_bib(project_id: str, project_folder: str, summaries: list[PaperSummary]) -> dict:
+    """
+    Rewrite a project's BibTeX file from summary metadata.
+
+    Returns a small report describing the output path, entry count, and whether
+    the on-disk file changed.
+    """
+    os.makedirs(project_folder, exist_ok=True)
+    bib_path = project_bib_path(project_id, project_folder)
+
+    entries_by_key: dict[str, str] = {}
+    for summary in summaries:
+        bib = summary.bibliography
+        if not (bib.title or bib.doi or bib.authors):
+            continue
+        key = make_bibtex_key(summary)
+        entries_by_key[key] = make_bibtex_entry(summary, key=key)
+
+    if entries_by_key:
+        rendered = "\n".join(entries_by_key[key] for key in sorted(entries_by_key)) + "\n"
+    else:
+        rendered = ""
+
+    previous = ""
+    if os.path.exists(bib_path):
+        try:
+            with open(bib_path, "r", encoding="utf-8") as handle:
+                previous = handle.read()
+        except Exception:
+            previous = ""
+
+    changed = previous != rendered
+    if rendered:
+        with open(bib_path, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+    elif os.path.exists(bib_path):
+        os.remove(bib_path)
+
+    return {
+        "path": bib_path,
+        "entry_count": len(entries_by_key),
+        "changed": changed,
+    }
+
+
 def append_to_project_bib(project_id: str, project_folder: str, summary: PaperSummary) -> None:
     """
     Append a BibTeX entry to {project_folder}/{project_name}.bib.
@@ -111,8 +162,7 @@ def append_to_project_bib(project_id: str, project_folder: str, summary: PaperSu
     """
     try:
         os.makedirs(project_folder, exist_ok=True)
-        project_name = os.path.basename(project_folder.rstrip("/")) or project_id
-        bib_path = os.path.join(project_folder, f"{project_name}.bib")
+        bib_path = project_bib_path(project_id, project_folder)
         key = make_bibtex_key(summary)
 
         # Read existing entries to avoid duplicates

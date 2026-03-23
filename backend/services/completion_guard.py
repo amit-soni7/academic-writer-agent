@@ -83,6 +83,7 @@ class GuardedResponse:
     was_truncated: bool = False
     continuation_count: int = 0
     total_tokens_used: int = 0
+    total_input_tokens: int = 0
     is_valid: bool = True
     validation_error: Optional[str] = None
 
@@ -212,9 +213,9 @@ class CompletionGuard:
             *,
             max_tokens: int,
             **kwargs,          # json_mode, temperature, etc.
-        ) -> tuple[str, str, int]:
+        ) -> tuple[str, str, int, int]:
             ...
-            # Returns: (text, normalized_stop_reason, tokens_used)
+            # Returns: (text, normalized_stop_reason, input_tokens, output_tokens)
             # normalized_stop_reason: "max_tokens" = truncated, anything else = complete.
 
     Usage:
@@ -243,6 +244,7 @@ class CompletionGuard:
         was_truncated = False
         continuation_count = 0
         total_tokens = 0
+        total_input = 0
 
         # Append a format-appropriate completion hint to the last user message
         hint = _COMPLETION_HINTS[config.output_format]
@@ -254,12 +256,18 @@ class CompletionGuard:
             ]
 
         while True:
-            text, stop_reason, tokens_used = await self.raw_call(
+            raw_result = await self.raw_call(
                 system=system,
                 messages=working_messages,
                 max_tokens=max_tokens,
                 **kwargs,
             )
+            # Support both 3-tuple (legacy) and 4-tuple (with input tokens)
+            if len(raw_result) == 4:
+                text, stop_reason, input_tokens, tokens_used = raw_result
+                total_input += input_tokens
+            else:
+                text, stop_reason, tokens_used = raw_result
             total_tokens += tokens_used
             accumulated_text += text
             truncated = stop_reason == "max_tokens"
@@ -326,6 +334,7 @@ class CompletionGuard:
             was_truncated=was_truncated,
             continuation_count=continuation_count,
             total_tokens_used=total_tokens,
+            total_input_tokens=total_input,
             is_valid=is_valid,
             validation_error=validation_error,
         )

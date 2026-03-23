@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { Paper, PaperSummary, SynthesisResult } from '../../types/paper';
 import { streamSearch } from '../../api/literature';
-import { createProject, loadScreenings, overrideScreening, streamScreenPapers, streamSummarizeAll, synthesizePapers } from '../../api/projects';
+import { backfillFiles, createProject, ensureProjectTentativeTitle, loadProject, resetSummaries, synthesizePapers, type LiteratureSearchState, type ProjectData } from '../../api/projects';
+import { useSummarizeProgress } from '../../hooks/useSummarizeProgress';
 import ExportButtons from './ExportButtons';
 import PapersTable from './PapersTable';
 import ProgressStream from './ProgressStream';
@@ -12,10 +13,12 @@ interface Props {
   initialQuery: string;
   articleType?: string;
   projectDescription?: string;
+  initialProject?: ProjectData | null;
   onBack: () => void;
   onOpenSettings: () => void;
   onGoToJournals: (sessionId: string) => void;
   onSessionCreated?: (sessionId: string) => void;
+  onViewPaperDetail: (paper: Paper, summary: PaperSummary | null, projectId: string) => void;
 }
 
 type SearchStatus    = 'idle' | 'streaming' | 'done' | 'error';
@@ -42,17 +45,63 @@ const SOURCE_LABELS: Record<string, string> = {
   arxiv:            'arXiv',
 };
 
-export default function LiteratureDashboard({ initialQuery, articleType, projectDescription, onBack, onOpenSettings, onGoToJournals, onSessionCreated }: Props) {
+function slugifyTitle(text: string): string {
+  return (text || '')
+    .replace(/[^a-zA-Z0-9 ]/g, '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .slice(0, 80) || 'project';
+}
+
+function humanizeProjectTitle(text: string): string {
+  return (text || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function looksLikeLegacyProjectTitle(title: string, queryText: string): boolean {
+  const name = humanizeProjectTitle(title);
+  const source = humanizeProjectTitle(queryText);
+  if (!name) return true;
+  if (name === source) return true;
+
+  const nameSlug = slugifyTitle(name);
+  const querySlug = slugifyTitle(source);
+  if (nameSlug === querySlug) return true;
+  if (querySlug.startsWith(nameSlug)) return true;
+
+  const nameWords: string[] = name.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const sourceWords: string[] = source.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  if (nameWords.length >= 4 && nameWords.every((word, index) => sourceWords[index] === word)) {
+    return true;
+  }
+
+  if (nameWords.length < 4) return true;
+  if (['and', 'or', 'of', 'in', 'on', 'for', 'with', 'to', 'from'].includes(nameWords[0] || '')) {
+    return true;
+  }
+  if (/[*`{}]/.test(title)) return true;
+  if (/^(title|working title|tentative title|core concept|focus|topic)\b/i.test(name)) return true;
+  if (nameWords.some((word, index) => index > 0 && /^(and|or|of|in|on|for|with|to)[a-z]{4,}$/.test(word))) return true;
+  if (nameWords.includes('including') || nameWords.includes('includes')) return true;
+
+  return /^(most research|most psychological research|this study|the present study|background|objective|research on)\b/i.test(name);
+}
+
+export default function LiteratureDashboard({ initialQuery, articleType, projectDescription, initialProject, onBack, onOpenSettings, onGoToJournals, onSessionCreated, onViewPaperDetail }: Props) {
   const [query, setQuery] = useState(initialQuery);
   const [limit, setLimit] = useState(50);
   const [papers, setPapers] = useState<Paper[]>([]);
 
   const [searchStatus, setSearchStatus] = useState<SearchStatus>('idle');
+  const [searchComplete, setSearchComplete] = useState(false);
   const [searchError, setSearchError]   = useState<string | null>(null);
   const [warnings, setWarnings]         = useState<string[]>([]);
 
   // SSE search progress
   const [sourceProgress, setSourceProgress] = useState<Record<string, number>>({});
+  const [, setSourcePapers]                 = useState<Record<string, Paper[]>>({});
   const [sourcesDone, setSourcesDone]       = useState<Set<string>>(new Set());
   const [sourcesError, setSourcesError]     = useState<Record<string, string>>({});
   const [isDeduplicating, setIsDeduplicating] = useState(false);
@@ -63,11 +112,15 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
   const [meshTerms, setMeshTerms]             = useState<string[]>([]);
   const [booleanQuery, setBooleanQuery]       = useState('');
   const [pico, setPico]                       = useState<Record<string, string>>({});
+  const [frameworkUsed, setFrameworkUsed]     = useState('');
+  const [frameworkJustification, setFrameworkJustification] = useState('');
+  const [frameworkElements, setFrameworkElements] = useState<Record<string, string | string[]>>({});
   const [studyTypeFilters, setStudyTypeFilters] = useState<string[]>([]);
   const [aiRationale, setAiRationale]         = useState('');
   const [facets, setFacets]                   = useState<Record<string, { mesh: string[]; freetext: string[] }>>({});
   const [strategyNotes, setStrategyNotes]     = useState<string[]>([]);
   const [tentativeTitle, setTentativeTitle]   = useState<string>('');
+  const [, setProjectSlug]                    = useState<string>('');
 
   // Summary view toggle
   const [showMatrix, setShowMatrix] = useState(false);
@@ -86,30 +139,146 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
   const [sumErrors, setSumErrors]           = useState(0);
   const [summaries, setSummaries]           = useState<Record<string, PaperSummary>>({});
 
-  // Screening state
-  const [screenings, setScreenings]         = useState<Record<string, { decision: string; reason: string }>>({});
-  const [screeningState, setScreeningState] = useState<'idle' | 'running' | 'done'>('idle');
-  const [screenProgress, setScreenProgress] = useState<{ current: number; total: number; title: string } | null>(null);
-  const [screenCounts, setScreenCounts]     = useState<{ include: number; exclude: number; uncertain: number } | null>(null);
+  // Background summarization hook — survives navigation
+  const bgSummarize = useSummarizeProgress(sessionId);
 
-  // Load existing screenings when a project is opened/resumed
   useEffect(() => {
-    if (!sessionId) return;
-    loadScreenings(sessionId).then((data) => {
-      if (Object.keys(data).length > 0) {
-        setScreenings(data);
-        setScreeningState('done');
-        const counts = { include: 0, exclude: 0, uncertain: 0 };
-        for (const { decision } of Object.values(data)) {
-          if (decision in counts) (counts as any)[decision]++;
-        }
-        setScreenCounts(counts);
+    if (!initialProject) return;
+
+    const savedSearch = initialProject.literature_search_state;
+    const persistedPapers = initialProject.papers ?? [];
+    const restoredSummaries = initialProject.summaries ?? {};
+    const restoredSummaryCount = Object.keys(restoredSummaries).length;
+    const savedCurrentPapers = savedSearch?.current_papers ?? [];
+    const restoredSearchDone = savedSearch?.status === 'done' || persistedPapers.length > 0 || restoredSummaryCount > 0;
+    const restoredPapers =
+      persistedPapers.length > 0
+        ? persistedPapers
+        : restoredSearchDone && savedCurrentPapers.length > 0
+          ? savedCurrentPapers
+          : savedCurrentPapers;
+    const fallbackSourceCounts = restoredPapers.reduce<Record<string, number>>((acc, paper) => {
+      acc[paper.source] = (acc[paper.source] ?? 0) + 1;
+      return acc;
+    }, {});
+    const restoredSourceCounts = savedSearch?.source_progress ?? fallbackSourceCounts;
+    const restoredSourcesDone = savedSearch?.sources_done ?? Object.keys(fallbackSourceCounts);
+    const restoredSourcesError = savedSearch?.sources_error ?? {};
+    const restoredRanking = savedSearch?.ranking_info ?? (restoredPapers.length > 0 ? {
+      candidates: restoredPapers.length,
+      selected: restoredPapers.length,
+      requested: restoredPapers.length,
+    } : null);
+    const restoredSourcePapers = savedSearch?.source_papers ?? {};
+
+    setQuery(savedSearch?.query || initialProject.query || initialQuery);
+    setPapers(restoredPapers);
+    setSummaries(restoredSummaries);
+    const restoredTitle = savedSearch?.tentative_title || humanizeProjectTitle(initialProject.project_name || '');
+    setSessionId(initialProject.project_id);
+    setTentativeTitle(restoredTitle);
+    setProjectSlug(slugifyTitle(restoredTitle || initialProject.query || ''));
+    setSearchStatus(savedSearch || restoredPapers.length > 0 ? 'done' : 'idle');
+    setSearchComplete(restoredSearchDone);
+    setSearchError(null);
+    setWarnings(savedSearch?.warnings ?? []);
+    setSourceProgress(restoredSourceCounts);
+    setSourcePapers(restoredSourcePapers);
+    setSourcesDone(new Set(restoredSourcesDone));
+    setSourcesError(restoredSourcesError);
+    setIsDeduplicating(savedSearch?.is_deduplicating ?? restoredPapers.length > 0);
+    setRankingInfo(restoredRanking);
+    setIsEnriching(savedSearch?.is_enriching ?? false);
+    setExpandedQueries(savedSearch?.expanded_queries ?? []);
+    setPubmedQueries(savedSearch?.pubmed_queries ?? []);
+    setMeshTerms(savedSearch?.mesh_terms ?? []);
+    setBooleanQuery(savedSearch?.boolean_query ?? '');
+    setPico(savedSearch?.pico ?? {});
+    setFrameworkUsed(savedSearch?.framework_used ?? '');
+    setFrameworkJustification(savedSearch?.framework_justification ?? '');
+    setFrameworkElements(savedSearch?.framework_elements ?? savedSearch?.pico ?? {});
+    setStudyTypeFilters(savedSearch?.study_type_filters ?? []);
+    setAiRationale(savedSearch?.ai_rationale ?? '');
+    setFacets(savedSearch?.facets ?? {});
+    setStrategyNotes(savedSearch?.strategy_notes ?? []);
+    setSummarizeStatus(restoredSummaryCount > 0 ? 'done' : 'idle');
+    setSumProgress({
+      current: restoredSummaryCount,
+      total: restoredPapers.length,
+      title: restoredSummaryCount < restoredPapers.length && restoredPapers.length > 0
+        ? 'Resume summarization from saved project state'
+        : '',
+    });
+    setCurrentStep('');
+    setSumErrors(0);
+  }, [initialProject, initialQuery]);
+
+  // Sync background task status → local UI state
+  const prevRunningRef = React.useRef(false);
+  useEffect(() => {
+    const s = bgSummarize.status;
+    if (!s) return;
+    if (s.running) {
+      prevRunningRef.current = true;
+      // Actively running — use live counters from the task
+      setSumProgress({ current: s.current, total: s.total || papers.length, title: s.current_title });
+      setSumErrors(s.errors);
+      setSummarizeStatus('running');
+    } else if (s.saved > 0) {
+      // Task finished (or was done before the new system) — use the DB-saved count
+      setSumProgress(prev => ({
+        current: Math.max(prev.current, s.saved),
+        total: prev.total || papers.length,
+        title: '',
+      }));
+      setSummarizeStatus('done');
+
+      // Reload summaries from backend when task transitions running → done
+      if (prevRunningRef.current && sessionId) {
+        prevRunningRef.current = false;
+        loadProject(sessionId)
+          .then(data => { if (data.summaries) setSummaries(data.summaries as Record<string, PaperSummary>); })
+          .catch(() => {});
       }
-    }).catch(() => {/* non-critical */});
-  }, [sessionId]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bgSummarize.status]);
+
+  useEffect(() => {
+    if (!initialProject?.project_id) return;
+
+    const existingTitle = (
+      initialProject.literature_search_state?.tentative_title
+      || humanizeProjectTitle(initialProject.project_name || '')
+      || ''
+    ).trim();
+    if (existingTitle && !looksLikeLegacyProjectTitle(existingTitle, initialProject.query.trim())) {
+      setTentativeTitle(existingTitle);
+      setProjectSlug(slugifyTitle(existingTitle));
+      return;
+    }
+
+    let cancelled = false;
+    ensureProjectTentativeTitle(initialProject.project_id)
+      .then((result) => {
+        if (cancelled) return;
+        setTentativeTitle(result.tentative_title);
+        setProjectSlug(result.project_slug);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        const fallbackTitle = humanizeProjectTitle(initialProject.project_name || initialProject.query || 'Project');
+        setTentativeTitle(fallbackTitle);
+        setProjectSlug(slugifyTitle(fallbackTitle));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialProject]);
 
   const isStreaming    = searchStatus === 'streaming';
-  const isSummarizing = summarizeStatus === 'running';
+  const isSummarizing = bgSummarize.isRunning || summarizeStatus === 'running';
   const showProgress   = isStreaming || searchStatus === 'done';
 
   // ── Search ──────────────────────────────────────────────────────────────────
@@ -118,15 +287,16 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
     if (!query.trim()) return;
 
     setSearchStatus('streaming');
+    setSearchComplete(false);
     setSearchError(null);
     setWarnings([]);
     setPapers([]);
     setSummaries({});
-    setSessionId(null);
     setSummarizeStatus('idle');
     setSumProgress({ current: 0, total: 0, title: '' });
     setSumErrors(0);
     setSourceProgress({});
+    setSourcePapers({});
     setSourcesDone(new Set());
     setSourcesError({});
     setIsDeduplicating(false);
@@ -137,58 +307,114 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
     setMeshTerms([]);
     setBooleanQuery('');
     setPico({});
+    setFrameworkUsed('');
+    setFrameworkJustification('');
+    setFrameworkElements({});
     setStudyTypeFilters([]);
     setAiRationale('');
     setFacets({});
     setStrategyNotes([]);
     setTentativeTitle('');
+    setProjectSlug('');
     setShowMatrix(false);
-    setScreenings({});
-    setScreeningState('idle');
-    setScreenProgress(null);
-    setScreenCounts(null);
-
     try {
-      for await (const event of streamSearch(query.trim(), limit, true, articleType)) {
+      const liveSourceProgress: Record<string, number> = {};
+      const liveSourcePapers: Record<string, Paper[]> = {};
+      const liveSourcesDone = new Set<string>();
+      const liveSourcesError: Record<string, string> = {};
+      let liveIsDeduplicating = false;
+      let liveRankingInfo: LiteratureSearchState['ranking_info'] = null;
+      let liveIsEnriching = false;
+      let liveExpandedQueries: string[] = [];
+      let livePubmedQueries: string[] = [];
+      let liveMeshTerms: string[] = [];
+      let liveBooleanQuery = '';
+      let livePico: Record<string, string> = {};
+      let liveFrameworkUsed = '';
+      let liveFrameworkJustification = '';
+      let liveFrameworkElements: Record<string, string | string[]> = {};
+      let liveStudyTypeFilters: string[] = [];
+      let liveAiRationale = '';
+      let liveFacets: Record<string, { mesh: string[]; freetext: string[] }> = {};
+      let liveStrategyNotes: string[] = [];
+      const liveWarnings: string[] = [];
+      let latestTentativeTitle = '';
+      for await (const event of streamSearch(query.trim(), limit, true, articleType, sessionId ?? undefined)) {
         switch (event.type) {
           case 'ai_queries':
             if (event.data) {
+              liveExpandedQueries = event.data.queries ?? [];
+              livePubmedQueries = event.data.pubmed_queries ?? [];
+              liveMeshTerms = event.data.mesh_terms ?? [];
+              liveBooleanQuery = event.data.boolean_query ?? '';
+              livePico = (event.data.pico ?? {}) as Record<string, string>;
+              liveFrameworkUsed = event.data.framework_used ?? '';
+              liveFrameworkJustification = event.data.framework_justification ?? '';
+              liveFrameworkElements = event.data.framework_elements ?? event.data.pico ?? {};
+              liveStudyTypeFilters = event.data.study_type_filters ?? [];
+              liveAiRationale = event.data.rationale ?? '';
+              liveFacets = event.data.facets ?? {};
+              liveStrategyNotes = event.data.strategy_notes ?? [];
               setExpandedQueries(event.data.queries ?? []);
               setPubmedQueries(event.data.pubmed_queries ?? []);
               setMeshTerms(event.data.mesh_terms ?? []);
               setBooleanQuery(event.data.boolean_query ?? '');
-              setPico(event.data.pico ?? {});
+              setPico((event.data.pico ?? {}) as Record<string, string>);
+              setFrameworkUsed(event.data.framework_used ?? '');
+              setFrameworkJustification(event.data.framework_justification ?? '');
+              setFrameworkElements(event.data.framework_elements ?? event.data.pico ?? {});
               setStudyTypeFilters(event.data.study_type_filters ?? []);
               setAiRationale(event.data.rationale ?? '');
               setFacets(event.data.facets ?? {});
               setStrategyNotes(event.data.strategy_notes ?? []);
-              if (event.data.tentative_title) setTentativeTitle(event.data.tentative_title);
+              if (event.data.tentative_title) {
+                latestTentativeTitle = event.data.tentative_title;
+                setTentativeTitle(event.data.tentative_title);
+                setProjectSlug(slugifyTitle(event.data.tentative_title));
+              }
             }
             break;
           case 'papers':
             if (event.papers) {
               setPapers((prev) => [...prev, ...event.papers!]);
               if (event.source) {
+                liveSourceProgress[event.source] = (liveSourceProgress[event.source] ?? 0) + (event.count ?? event.papers.length);
+                liveSourcePapers[event.source] = [...(liveSourcePapers[event.source] ?? []), ...event.papers];
                 setSourceProgress((prev) => ({
                   ...prev,
                   [event.source!]: (prev[event.source!] ?? 0) + (event.count ?? event.papers!.length),
+                }));
+                setSourcePapers((prev) => ({
+                  ...prev,
+                  [event.source!]: [...(prev[event.source!] ?? []), ...event.papers!],
                 }));
               }
             }
             break;
           case 'source_done':
-            if (event.source) setSourcesDone((prev) => new Set([...prev, event.source!]));
+            if (event.source) {
+              liveSourcesDone.add(event.source);
+              setSourcesDone((prev) => new Set([...prev, event.source!]));
+            }
             break;
           case 'source_error':
             if (event.source && event.message) {
+              liveSourcesError[event.source] = event.message;
+              liveSourcesDone.add(event.source);
               setSourcesError((prev) => ({ ...prev, [event.source!]: event.message! }));
               setSourcesDone((prev) => new Set([...prev, event.source!]));
             }
             break;
           case 'deduplicating':
+            liveIsDeduplicating = true;
             setIsDeduplicating(true);
             break;
           case 'ranking':
+            liveRankingInfo = {
+              candidates: event.candidates ?? 0,
+              selected: event.selected ?? 0,
+              requested: event.requested ?? 0,
+            };
             setRankingInfo({
               candidates: event.candidates ?? 0,
               selected:   event.selected ?? 0,
@@ -196,15 +422,56 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
             });
             break;
           case 'enriching':
+            liveIsEnriching = true;
             setIsEnriching(true);
             break;
           case 'complete':
             if (event.papers) setPapers(event.papers);
+            liveIsEnriching = false;
             setSearchStatus('done');
-            // Auto-create session
-            if (event.papers && event.papers.length > 0) {
+            setSearchComplete(true);
+            // Auto-create session only for brand-new searches.
+            if (!sessionId && event.papers && event.papers.length > 0) {
               try {
-                const meta = await createProject(query.trim(), event.papers, articleType, projectDescription, tentativeTitle || undefined);
+                const meta = await createProject(
+                  query.trim(),
+                  event.papers,
+                  articleType,
+                  projectDescription,
+                  latestTentativeTitle || undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  {
+                    status: 'done',
+                    query: query.trim(),
+                    total_limit: limit,
+                    warnings: liveWarnings,
+                    source_progress: liveSourceProgress,
+                    sources_done: Array.from(liveSourcesDone),
+                    sources_error: liveSourcesError,
+                    is_deduplicating: liveIsDeduplicating,
+                    ranking_info: liveRankingInfo,
+                    is_enriching: liveIsEnriching,
+                    expanded_queries: liveExpandedQueries,
+                    pubmed_queries: livePubmedQueries,
+                    mesh_terms: liveMeshTerms,
+                    boolean_query: liveBooleanQuery,
+                    pico: livePico,
+                    framework_elements: liveFrameworkElements,
+                    framework_used: liveFrameworkUsed,
+                    framework_justification: liveFrameworkJustification,
+                    study_type_filters: liveStudyTypeFilters,
+                    ai_rationale: liveAiRationale,
+                    facets: liveFacets,
+                    strategy_notes: liveStrategyNotes,
+                    tentative_title: latestTentativeTitle || undefined,
+                    source_papers: liveSourcePapers,
+                    current_papers: event.papers,
+                  },
+                );
                 setSessionId(meta.project_id);
                 onSessionCreated?.(meta.project_id);
               } catch {
@@ -213,7 +480,10 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
             }
             break;
           case 'warning':
-            if (event.message) setWarnings((w) => [...w, event.message!]);
+            if (event.message) {
+              liveWarnings.push(event.message);
+              setWarnings((w) => [...w, event.message!]);
+            }
             break;
           case 'error':
             throw new Error(event.message ?? 'Unknown error from server');
@@ -222,68 +492,17 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Search failed. Is the backend running on port 8010?');
       setSearchStatus('error');
+      setSearchComplete(false);
     }
   }
 
-  // ── Screening ───────────────────────────────────────────────────────────────
-
-  async function handleScreenPapers() {
-    if (papers.length === 0 || !sessionId) return;
-    setScreeningState('running');
-    setScreenProgress(null);
-    setScreenCounts(null);
-
-    try {
-      for await (const event of streamScreenPapers(sessionId, papers, query)) {
-        if (event.type === 'progress') {
-          setScreenProgress({ current: event.current, total: event.total, title: event.title });
-        } else if (event.type === 'screen_done') {
-          setScreenings((prev) => ({
-            ...prev,
-            [event.paper_key]: { decision: event.decision, reason: event.reason },
-          }));
-        } else if (event.type === 'complete') {
-          setScreenCounts({ include: event.include, exclude: event.exclude, uncertain: event.uncertain });
-          setScreeningState('done');
-        } else if (event.type === 'error') {
-          throw new Error(event.message);
-        }
-      }
-    } catch (err) {
-      setSearchError(err instanceof Error ? err.message : 'Screening failed.');
-      setScreeningState('idle');
-    }
-  }
-
-  async function handleOverrideScreening(paperKey: string, decision: string) {
-    if (!sessionId) return;
-    try {
-      await overrideScreening(sessionId, paperKey, decision);
-      setScreenings((prev) => ({
-        ...prev,
-        [paperKey]: { ...prev[paperKey], decision },
-      }));
-      // Update screen counts
-      if (screenCounts) {
-        const old = screenings[paperKey]?.decision as keyof typeof screenCounts | undefined;
-        const newCounts = { ...screenCounts };
-        if (old && old in newCounts) (newCounts as any)[old]--;
-        if (decision in newCounts) (newCounts as any)[decision]++;
-        setScreenCounts(newCounts);
-      }
-    } catch {
-      // silent — badge stays as-is
-    }
-  }
-
-  // ── Summarize All ──────────────────────────────────────────────────────────
+  // ── Summarize All — background task (survives navigation) ─────────────────
 
   async function handleSummarizeAll() {
     if (papers.length === 0) return;
-    setSummarizeStatus('running');
     setSumErrors(0);
     setCurrentStep('');
-    setSumProgress({ current: 0, total: papers.length, title: '' });
+    setSumProgress({ current: summaryCount, total: papers.length, title: '' });
 
     try {
       let targetSessionId = sessionId;
@@ -293,39 +512,37 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
         setSessionId(targetSessionId);
         onSessionCreated?.(targetSessionId);
       }
-
-      for await (const event of streamSummarizeAll(targetSessionId, papers, query)) {
-        switch (event.type) {
-          case 'progress':
-            setSumProgress({
-              current: event.current ?? 0,
-              total:   event.total ?? papers.length,
-              title:   event.title ?? '',
-            });
-            setCurrentStep('');  // reset step label on new paper
-            break;
-          case 'step_progress':
-            setCurrentStep(event.step ?? '');
-            break;
-          case 'summary_done':
-            if (event.paper_key && event.summary) {
-              setSummaries((prev) => ({ ...prev, [event.paper_key!]: event.summary! }));
-            }
-            break;
-          case 'paper_error':
-            setSumErrors((n) => n + 1);
-            break;
-          case 'complete':
-            setSummarizeStatus('done');
-            setCurrentStep('');
-            break;
-          case 'error':
-            throw new Error(event.message ?? 'Summarize failed');
-        }
-      }
+      // Kick off the backend background task — returns immediately
+      await bgSummarize.start(targetSessionId, papers, query);
+      setSummarizeStatus('running');
     } catch (err) {
       setSearchError(err instanceof Error ? err.message : 'Summarize all failed.');
       setSummarizeStatus('error');
+    }
+  }
+
+  async function handleResetSummaries() {
+    if (!sessionId) return;
+    if (!confirm('Reset all summaries? This will delete all analysed data and you will need to re-run summarisation.')) return;
+    try {
+      await resetSummaries(sessionId);
+      setSummaries({});
+      setSummarizeStatus('idle');
+      setSumProgress({ current: 0, total: papers.length, title: '' });
+      setSumErrors(0);
+      setCurrentStep('');
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Failed to reset summaries.');
+    }
+  }
+
+  async function handleBackfillFiles() {
+    if (!sessionId) return;
+    try {
+      const result = await backfillFiles(sessionId);
+      alert(`Files backfilled: ${result.saved} new, ${result.already_existed} already existed, ${result.failed} failed (of ${result.total_summarised} summarised papers).`);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Failed to backfill files.');
     }
   }
 
@@ -349,408 +566,622 @@ export default function LiteratureDashboard({ initialQuery, articleType, project
     return acc;
   }, {});
 
-  const summaryCount   = Object.keys(summaries).length;
+  // Only count summaries that match current papers (avoid stale orphan summaries)
+  const paperKeys = new Set(papers.map(p => (p.doi || p.title.slice(0, 60)).toLowerCase().trim()));
+  const summaryCount   = Object.keys(summaries).filter(k => paperKeys.has(k)).length;
   const hasSummaries   = summaryCount > 0;
   const allSummarized  = summaryCount >= papers.length && papers.length > 0;
+  const resolvedProjectTitle = tentativeTitle || humanizeProjectTitle(initialProject?.project_name || '') || humanizeProjectTitle(query) || 'Project';
+  // During active summarisation use the live counter from the polling task;
+  // otherwise fall back to the loaded summary count (works for idle projects).
+  const liveCurrent = isSummarizing ? Math.max(sumProgress.current, summaryCount) : summaryCount;
+  const liveTotal   = sumProgress.total || papers.length || 1;
+  const sumPercent  = papers.length > 0
+    ? Math.min(100, Math.round((liveCurrent / liveTotal) * 100))
+    : 0;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen flex flex-col" style={{ background: 'var(--bg-base)' }}>
 
-      {/* Header */}
-      <header className="border-b border-slate-200 bg-white sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button onClick={onBack}
-              className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 transition-colors">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-              Intake
-            </button>
-            <span className="text-slate-300">/</span>
-            <span className="font-semibold text-slate-800">Literature Search</span>
+      {/* Header — "No-Line Rule": background shift instead of border */}
+      <header className="w-full sticky top-0 z-10 flex justify-between items-center px-8 py-3"
+        style={{ background: 'var(--bg-elevated)', boxShadow: '0 1px 0 rgba(199,196,216,0.15)' }}>
+        <div className="flex items-center gap-4 flex-1">
+          <button onClick={onBack}
+            className="w-8 h-8 rounded-xl flex items-center justify-center hover:opacity-80 transition-all active:scale-95"
+            style={{ background: 'var(--bg-surface)', color: 'var(--text-muted)' }}>
+            <span className="material-symbols-outlined text-lg">arrow_back</span>
+          </button>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-sm" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright)' }}>Literature</span>
             {sessionId && (
-              <span className="text-xs text-slate-400 font-mono bg-slate-100 px-2 py-0.5 rounded-md">
-                session: {sessionId}
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full" style={{ background: 'var(--bg-surface)', color: 'var(--text-muted)' }}>
+                {sessionId}
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            {/* Phase indicator */}
-            <div className="flex items-center gap-1 text-xs font-medium text-slate-500">
-              <span className="px-2 py-0.5 rounded-full bg-brand-100 text-brand-700">2 · Search</span>
-              <span className="text-slate-300">→</span>
-              <span className={`px-2 py-0.5 rounded-full ${summarizeStatus === 'done' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
-                3 · Summarise
-              </span>
-              <span className="text-slate-300">→</span>
-              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-400">4 · Journals</span>
-              <span className="text-slate-300">→</span>
-              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-400">5 · Write</span>
-            </div>
-            <button onClick={onOpenSettings}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
-              title="AI Settings">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="flex-1 max-w-7xl mx-auto w-full px-6 py-8 space-y-6">
-
-        {/* Search card */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-          <h1 className="text-lg font-semibold text-slate-800 mb-4">Search Literature</h1>
-          <div className="flex gap-3 flex-wrap">
+          {/* Input pill — design system: surface-container-high background, no border, rounded-full */}
+          <div className="relative flex-1 max-w-xl ml-4">
+            <span className="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-lg" style={{ color: 'var(--text-muted)' }}>search</span>
             <input type="text" value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && !isStreaming && handleSearch()}
-              placeholder="Enter query or key idea…"
-              className="flex-1 min-w-[260px] rounded-xl border-2 border-slate-200 px-4 py-2.5 text-sm
-                text-slate-800 placeholder-slate-400 focus:outline-none focus:border-brand-500
-                focus:ring-2 focus:ring-brand-100 transition-all"
+              placeholder="Explore scientific databases..."
+              className="w-full border-none rounded-full py-2.5 pl-11 pr-4 text-sm outline-none transition-all
+                focus:ring-2 focus:ring-[var(--gold)]/20"
+              style={{ background: 'var(--bg-surface)', color: 'var(--text-body)', fontFamily: 'Manrope, sans-serif' }}
             />
-            <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} disabled={isStreaming}
-              className="rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm text-slate-700
-                focus:outline-none focus:border-brand-500 bg-white disabled:opacity-50">
-              {RESULT_LIMITS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label} results</option>
-              ))}
-            </select>
-            <button onClick={handleSearch} disabled={isStreaming || !query.trim()}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold
-                text-white bg-brand-600 hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-              {isStreaming ? (
-                <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                </svg>Searching…</>
-              ) : (
-                <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                </svg>Search</>
-              )}
-            </button>
           </div>
-          {warnings.map((w, i) => (
-            <p key={i} className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">⚠ {w}</p>
-          ))}
-          {searchStatus === 'error' && searchError && (
-            <p className="mt-3 text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">{searchError}</p>
-          )}
         </div>
+        <div className="flex items-center gap-3">
+          {/* Phase chips — full roundedness for chips */}
+          <div className="hidden md:flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest" style={{ fontFamily: 'Manrope, sans-serif' }}>
+            <span className="px-3 py-1.5 rounded-full" style={{ background: 'var(--gold-faint)', color: 'var(--gold)' }}>2 · Search</span>
+            <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>→</span>
+            <span className="px-3 py-1.5 rounded-full"
+              style={{ background: summarizeStatus === 'done' ? 'rgba(16,185,129,0.08)' : 'var(--bg-surface)', color: summarizeStatus === 'done' ? '#10b981' : 'var(--text-muted)' }}>
+              3 · Summarise
+            </span>
+            <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>→</span>
+            <span className="px-3 py-1.5 rounded-full" style={{ background: 'var(--bg-surface)', color: 'var(--text-muted)' }}>4 · Journals</span>
+            <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>→</span>
+            <span className="px-3 py-1.5 rounded-full" style={{ background: 'var(--bg-surface)', color: 'var(--text-muted)' }}>5 · Write</span>
+          </div>
+          <button onClick={onOpenSettings}
+            className="p-2 rounded-xl hover:opacity-80 transition-all active:scale-95"
+            style={{ color: 'var(--text-muted)' }}
+            title="AI Settings">
+            <span className="material-symbols-outlined">settings</span>
+          </button>
+        </div>
+      </header>
 
-        {/* Two-column layout */}
-        {showProgress && (
-          <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6 items-start">
+      {/* Scrollable Workspace — generous breathing space */}
+      <div className="flex-1 overflow-y-auto px-10 py-10">
+        <div className="mx-auto space-y-12">
 
-            {/* Left: progress + session panel */}
-            <div className="space-y-4 lg:sticky lg:top-24">
-              <ProgressStream
-                sourceProgress={sourceProgress}
-                sourcesDone={sourcesDone}
-                sourcesError={sourcesError}
-                isDeduplicating={isDeduplicating}
-                rankingInfo={rankingInfo}
-                isEnriching={isEnriching}
-                isComplete={searchStatus === 'done'}
-                expandedQueries={expandedQueries}
-                pubmedQueries={pubmedQueries}
-                meshTerms={meshTerms}
-                booleanQuery={booleanQuery}
-                pico={pico}
-                studyTypeFilters={studyTypeFilters}
-                aiRationale={aiRationale}
-                facets={facets}
-                strategyNotes={strategyNotes}
-              />
+          {/* Search Header & Status */}
+          <section className="space-y-8">
+            <div className="flex justify-between items-end flex-wrap gap-6">
+              <div className="space-y-2">
+                <h1 className="text-5xl font-bold tracking-tight" style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}>
+                  Literature Search
+                </h1>
+                <p className="text-sm leading-relaxed max-w-xl" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted)' }}>
+                  {resolvedProjectTitle}
+                </p>
+              </div>
+              <div className="flex gap-3 items-center">
+                <select value={limit} onChange={(e) => setLimit(Number(e.target.value))} disabled={isStreaming}
+                  className="rounded-full border-none px-4 py-2.5 text-sm font-semibold cursor-pointer disabled:opacity-50"
+                  style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', fontFamily: 'Manrope, sans-serif' }}>
+                  {RESULT_LIMITS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label} results</option>
+                  ))}
+                </select>
+                {/* Primary CTA — Signature Gradient */}
+                <button onClick={handleSearch} disabled={isStreaming || !query.trim()}
+                  className="px-6 py-2.5 text-sm font-bold text-white rounded-xl transition-all active:scale-95
+                    disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                  style={{ background: 'linear-gradient(135deg, var(--gold), var(--gold-light))', fontFamily: 'Manrope, sans-serif',
+                    boxShadow: isStreaming ? 'none' : '0 4px 24px rgba(54,50,183,0.15)' }}>
+                  {isStreaming ? (
+                    <><span className="material-symbols-outlined text-lg animate-spin">progress_activity</span>Searching…</>
+                  ) : (
+                    <><span className="material-symbols-outlined text-lg">search</span>Search</>
+                  )}
+                </button>
+              </div>
+            </div>
 
-              {/* Phase 3 panel */}
-              {searchStatus === 'done' && papers.length > 0 && (
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-semibold text-slate-800">Phase 3 · Screen & Summarise</h3>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Screen papers by abstract first, then run full AI extraction on included papers.
-                    </p>
+            {/* Warnings & errors — no hard borders, use background shifts */}
+            {warnings.map((w, i) => (
+              <p key={i} className="text-xs rounded-xl px-4 py-3"
+                style={{ color: '#92400e', background: 'rgba(251,191,36,0.06)' }}>
+                ⚠ {w}
+              </p>
+            ))}
+            {searchStatus === 'error' && searchError && (
+              <p className="text-sm rounded-xl px-5 py-4" style={{ color: '#dc2626', background: 'rgba(220,38,38,0.04)' }}>
+                {searchError}
+              </p>
+            )}
+
+            {/* AI Research Engine Status — Glassmorphic panel */}
+            {showProgress && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                {/* Main AI status — Glass & Gradient rule: 80% opacity + backdrop-blur(16px) + 2px left accent */}
+                <div className="md:col-span-2 rounded-2xl p-8 flex flex-col justify-between relative overflow-hidden"
+                  style={{
+                    background: 'rgba(248,249,250,0.8)',
+                    backdropFilter: 'blur(16px)',
+                    WebkitBackdropFilter: 'blur(16px)',
+                    boxShadow: '0 8px 32px rgba(25,28,29,0.04)',
+                  }}>
+                  {/* AI Insight accent — 2px left highlight */}
+                  <div className="absolute left-0 top-0 bottom-0 w-[3px] rounded-l-2xl" style={{ background: 'linear-gradient(to bottom, var(--gold), var(--gold-light))' }} />
+                  <div className="flex items-start justify-between mb-10">
+                    <div>
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="material-symbols-outlined text-sm" style={{ color: 'var(--gold)', fontVariationSettings: "'FILL' 1" }}>bolt</span>
+                        <span className="text-[10px] font-extrabold uppercase tracking-[0.2em]" style={{ color: 'var(--gold)', fontFamily: 'Manrope, sans-serif' }}>
+                          AI Research Engine {isStreaming ? 'Active' : isSummarizing ? 'Summarising' : searchComplete ? 'Complete' : 'Ready'}
+                        </span>
+                      </div>
+                      <h3 className="text-2xl font-semibold italic leading-snug" style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}>
+                        "{resolvedProjectTitle}"
+                      </h3>
+                    </div>
+                    {(isSummarizing || summarizeStatus === 'done') && (
+                      <div className="text-right ml-6">
+                        <span className="text-3xl font-bold" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--gold)' }}>{sumPercent}%</span>
+                        <p className="text-[10px] font-bold uppercase tracking-wider mt-1" style={{ color: 'var(--text-muted)', fontFamily: 'Manrope, sans-serif' }}>
+                          Synthesis Progress
+                        </p>
+                      </div>
+                    )}
                   </div>
 
-                  {/* ── Screening section ── */}
-                  {screeningState === 'idle' && !hasSummaries && (
-                    <button
-                      onClick={handleScreenPapers}
-                      disabled={!sessionId}
-                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
-                        rounded-xl text-sm font-semibold text-white bg-violet-600 hover:bg-violet-700
-                        disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z"/>
-                      </svg>
-                      Screen {papers.length} Papers (fast)
-                    </button>
-                  )}
-
-                  {screeningState === 'running' && (
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-xs text-slate-500">
-                        <span>Screening {screenProgress?.current ?? 0} / {screenProgress?.total ?? papers.length}</span>
-                        {screenCounts && (
-                          <span className="flex gap-2">
-                            <span className="text-emerald-600">✓ {screenCounts.include}</span>
-                            <span className="text-rose-600">✗ {screenCounts.exclude}</span>
-                            <span className="text-amber-600">? {screenCounts.uncertain}</span>
-                          </span>
-                        )}
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-1.5">
-                        <div
-                          className="bg-violet-500 h-1.5 rounded-full transition-all duration-300"
-                          style={{ width: `${(screenProgress?.total ?? 0) > 0 ? ((screenProgress?.current ?? 0) / (screenProgress?.total ?? 1)) * 100 : 0}%` }}
-                        />
-                      </div>
-                      {screenProgress?.title && (
-                        <p className="text-xs text-slate-400 truncate">{screenProgress.title}</p>
-                      )}
-                    </div>
-                  )}
-
-                  {screeningState === 'done' && screenCounts && (
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-3 text-xs flex-wrap">
-                        <span className="flex items-center gap-1 text-emerald-700 font-medium">
-                          <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"/>
-                          {screenCounts.include} include
-                        </span>
-                        <span className="flex items-center gap-1 text-rose-700 font-medium">
-                          <span className="w-2 h-2 rounded-full bg-rose-500 inline-block"/>
-                          {screenCounts.exclude} exclude
-                        </span>
-                        <span className="flex items-center gap-1 text-amber-700 font-medium">
-                          <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"/>
-                          {screenCounts.uncertain} uncertain
-                        </span>
-                      </div>
-                      <button
-                        onClick={handleScreenPapers}
-                        disabled={!sessionId}
-                        className="text-xs text-slate-400 hover:text-slate-600 underline"
-                      >
-                        ↻ Re-screen
-                      </button>
-                    </div>
-                  )}
-
-                  {/* ── Summarise progress bar ── */}
+                  {/* Progress bar */}
                   {(isSummarizing || summarizeStatus === 'done') && (
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-xs text-slate-500">
-                        <span>{sumProgress.current} / {sumProgress.total} papers</span>
-                        <span>{sumErrors > 0 && <span className="text-rose-500">{sumErrors} errors</span>}</span>
+                    <div className="space-y-5">
+                      <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated)' }}>
+                        <div className="h-full relative transition-all duration-700 ease-out" style={{
+                          width: `${sumPercent}%`,
+                          background: 'linear-gradient(90deg, var(--gold), var(--gold-light))',
+                        }}>
+                          <div className="absolute top-0 right-0 w-6 h-full" style={{ background: 'rgba(255,255,255,0.4)', filter: 'blur(6px)' }}></div>
+                        </div>
                       </div>
-                      <div className="w-full bg-slate-100 rounded-full h-2">
-                        <div
-                          className="bg-brand-500 h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${sumProgress.total ? (sumProgress.current / sumProgress.total) * 100 : 0}%` }}
-                        />
+                      <div className="flex justify-between text-xs font-medium" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted)' }}>
+                        <span className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full" style={{ background: searchComplete ? '#22c55e' : 'var(--gold)', boxShadow: searchComplete ? '0 0 8px rgba(34,197,94,0.5)' : 'none' }}></span>
+                          Database Fetching
+                        </span>
+                        <span className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full" style={{ background: searchComplete ? '#22c55e' : 'var(--text-muted)', boxShadow: searchComplete ? '0 0 8px rgba(34,197,94,0.5)' : 'none' }}></span>
+                          Metadata Extraction
+                        </span>
+                        <span className={`flex items-center gap-2 ${isSummarizing ? 'animate-pulse' : ''}`}
+                          style={{ color: isSummarizing ? 'var(--gold)' : summarizeStatus === 'done' ? '#22c55e' : 'var(--text-muted)' }}>
+                          <span className="w-2 h-2 rounded-full" style={{
+                            background: isSummarizing ? 'var(--gold)' : summarizeStatus === 'done' ? '#22c55e' : 'var(--text-muted)',
+                            boxShadow: summarizeStatus === 'done' ? '0 0 8px rgba(34,197,94,0.5)' : isSummarizing ? '0 0 8px rgba(54,50,183,0.5)' : 'none',
+                          }}></span>
+                          Abstract Summarization
+                        </span>
                       </div>
                       {isSummarizing && (
                         <div>
-                          <p className="text-xs text-slate-400 truncate" title={sumProgress.title}>
+                          <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }} title={sumProgress.title}>
                             {sumProgress.title}
                           </p>
                           {currentStep && (
-                            <p className="text-xs text-indigo-500 mt-0.5">{currentStep}</p>
+                            <p className="text-xs mt-1" style={{ color: 'var(--gold-light)' }}>{currentStep}</p>
                           )}
+                          {sumErrors > 0 && <span className="text-xs text-rose-500">{sumErrors} errors</span>}
                         </div>
                       )}
                       {summarizeStatus === 'done' && (
-                        <p className="text-xs text-emerald-600 font-medium">
+                        <p className="text-xs font-medium" style={{ color: '#10b981' }}>
                           ✓ {summaryCount} summaries saved
                         </p>
                       )}
                     </div>
                   )}
 
-                  {/* ── Summarise button — shown when screening done OR already have summaries ── */}
-                  {(screeningState === 'done' || hasSummaries) && (
-                    <button
-                      onClick={handleSummarizeAll}
-                      disabled={isSummarizing || papers.length === 0}
-                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
-                        rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700
-                        disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                    >
-                      {isSummarizing ? (
-                        <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                        </svg>Analysing {sumProgress.current}/{sumProgress.total}…</>
-                      ) : allSummarized ? (
-                        '↻ Re-run Summarise All'
-                      ) : screenCounts && screenCounts.exclude > 0 ? (
-                        <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                        </svg>Summarise {papers.length - screenCounts.exclude} Papers
-                        <span className="text-xs opacity-70">(skip {screenCounts.exclude} excluded)</span></>
-                      ) : (
-                        <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                        </svg>Summarise All {papers.length} Papers</>
-                      )}
-                    </button>
-                  )}
-
-                  {/* Cross-paper synthesis */}
-                  {hasSummaries && sessionId && (
-                    <button
-                      onClick={handleSynthesize}
-                      disabled={synthState === 'running'}
-                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
-                        rounded-xl text-sm font-semibold border border-indigo-200 text-indigo-700
-                        bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 transition-all"
-                    >
-                      {synthState === 'running' ? (
-                        <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                        </svg>Synthesising…</>
-                      ) : (
-                        <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>{synthesis ? '↻ Re-synthesise' : 'Cross-paper Synthesis'}</>
-                      )}
-                    </button>
-                  )}
-
-                  {/* Go to journals (Phase 4) — available as soon as any summary exists */}
-                  {hasSummaries && sessionId && (
-                    <button
-                      onClick={() => onGoToJournals(sessionId)}
-                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
-                        rounded-xl text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-all"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z"/>
-                      </svg>
-                      Phase 4 → Journals
-                      {!allSummarized && (
-                        <span className="text-xs opacity-80 ml-1">
-                          ({summaryCount}/{papers.length} analysed)
-                        </span>
-                      )}
-                    </button>
+                  {/* Compact progress when no summarize yet */}
+                  {!(isSummarizing || summarizeStatus === 'done') && (
+                    <div className="flex justify-between text-xs font-medium" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted)' }}>
+                      <span className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full" style={{
+                          background: searchComplete ? '#22c55e' : isStreaming ? 'var(--gold)' : 'var(--text-muted)',
+                          boxShadow: searchComplete ? '0 0 8px rgba(34,197,94,0.5)' : isStreaming ? '0 0 8px rgba(54,50,183,0.5)' : 'none',
+                        }}></span>
+                        {isStreaming ? 'Fetching from databases…' : searchComplete ? 'Search Complete' : 'Ready to search'}
+                      </span>
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
 
-            {/* Right: papers / summary matrix */}
-            <div className="space-y-4 min-w-0">
-              {papers.length > 0 && (
-                <div className="flex items-center justify-between flex-wrap gap-3">
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <span className="text-sm font-medium text-slate-700">
-                      {papers.length.toLocaleString()} paper{papers.length !== 1 ? 's' : ''}
-                      {isStreaming && <span className="text-slate-400"> · loading…</span>}
-                      {summaryCount > 0 && (
-                        <span className="ml-2 text-emerald-600">· {summaryCount} analysed</span>
-                      )}
-                    </span>
-                    {Object.entries(sourceCounts).map(([src, count]) => (
-                      <span key={src} className="text-xs text-slate-500 bg-white border border-slate-200 px-2 py-0.5 rounded-full">
-                        {SOURCE_LABELS[src] ?? src}: {count}
-                      </span>
+                {/* Right: Insights panel — surface-container-low for "recessed" look */}
+                <div className="rounded-2xl p-6 space-y-5" style={{ background: 'var(--bg-surface)', boxShadow: '0 4px 32px rgba(25,28,29,0.04)' }}>
+                  <h4 className="text-xs font-bold uppercase tracking-[0.2em]" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted)' }}>
+                    Insights Found
+                  </h4>
+                  {/* No dividers — use spacing-4 between items (design system: "Forbid Dividers") */}
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'var(--gold-faint)', color: 'var(--gold)' }}>
+                        <span className="material-symbols-outlined">article</span>
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold leading-none" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>{papers.length} Papers</p>
+                        <p className="text-[11px] mt-1.5" style={{ color: 'var(--text-muted)' }}>Found in databases</p>
+                      </div>
+                    </div>
+                    {summaryCount > 0 && (
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'rgba(16,185,129,0.08)', color: '#10b981' }}>
+                          <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>star</span>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold leading-none" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>{summaryCount} Analysed</p>
+                          <p className="text-[11px] mt-1.5" style={{ color: 'var(--text-muted)' }}>AI evidence extraction</p>
+                        </div>
+                      </div>
+                    )}
+                    {Object.entries(sourceCounts).slice(0, 4).map(([src, count]) => (
+                      <div key={src} className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>
+                          <span className="material-symbols-outlined text-lg">database</span>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold leading-none" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>{count}</p>
+                          <p className="text-[11px] mt-1.5" style={{ color: 'var(--text-muted)' }}>{SOURCE_LABELS[src] ?? src}</p>
+                        </div>
+                      </div>
                     ))}
                   </div>
-                  <div className="flex items-center gap-2">
-                    {/* View toggle */}
-                    {summaryCount > 0 && (
-                      <div className="flex rounded-lg border border-slate-200 overflow-hidden text-xs font-medium">
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Two-column layout: Papers (main) + Right sidebar */}
+          {showProgress && (
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-8 items-start">
+
+              {/* Left: Research Catalog (main content) */}
+              <section className="space-y-6 min-w-0">
+                {papers.length > 0 && (
+                  <div className="flex items-center justify-between flex-wrap gap-4 mb-2">
+                    <h2 className="text-2xl font-semibold" style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}>
+                      Research Catalog
+                    </h2>
+                    <div className="flex items-center gap-3">
+                      {/* View toggle — always visible once papers are loaded */}
+                      <div className="flex rounded-xl overflow-hidden text-xs font-bold" style={{ background: 'var(--bg-elevated)', fontFamily: 'Manrope, sans-serif' }}>
                         <button
                           onClick={() => setShowMatrix(false)}
-                          className={`px-3 py-1.5 transition-colors ${!showMatrix ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                          className="px-4 py-2 transition-all"
+                          style={!showMatrix ? { background: 'var(--gold-faint)', color: 'var(--gold)' } : { color: 'var(--text-muted)' }}
                         >
                           Papers
                         </button>
                         <button
                           onClick={() => setShowMatrix(true)}
-                          className={`px-3 py-1.5 transition-colors ${showMatrix ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 transition-all"
+                          style={showMatrix ? { background: 'var(--gold-faint)', color: 'var(--gold)' } : { color: 'var(--text-muted)' }}
                         >
                           Summary Table
+                          {summaryCount > 0 && (
+                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold"
+                              style={{ background: showMatrix ? 'rgba(54,50,183,0.15)' : 'var(--bg-surface)', color: showMatrix ? 'var(--gold)' : 'var(--text-muted)' }}>
+                              {summaryCount}
+                            </span>
+                          )}
                         </button>
                         {synthesis && (
                           <button
                             onClick={() => setShowSynthesis(v => !v)}
-                            className={`px-3 py-1.5 transition-colors ${showSynthesis ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                            className="px-4 py-2 transition-all"
+                            style={showSynthesis ? { background: 'var(--gold-faint)', color: 'var(--gold)' } : { color: 'var(--text-muted)' }}
                           >
                             Synthesis
                           </button>
                         )}
                       </div>
-                    )}
-                    {searchStatus === 'done' && <ExportButtons papers={papers} />}
-                  </div>
-                </div>
-              )}
-
-              {showMatrix && summaryCount > 0 ? (
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                  <h3 className="text-sm font-semibold text-slate-800 mb-4">
-                    Evidence Extraction Table
-                  </h3>
-                  <SummaryMatrix papers={papers} summaries={summaries} />
-                </div>
-              ) : (
-                <PapersTable
-                  papers={papers}
-                  query={query}
-                  preloadedSummaries={summaries}
-                  sessionId={sessionId ?? ''}
-                  screenings={screenings}
-                  onOverrideScreening={handleOverrideScreening}
-                />
-              )}
-
-              {/* Synthesis panel */}
-              {showSynthesis && (
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-semibold text-slate-800">Cross-paper Synthesis</h3>
-                    <button onClick={() => setShowSynthesis(false)}
-                      className="text-xs text-slate-400 hover:text-slate-600">✕ hide</button>
-                  </div>
-                  {synthError && (
-                    <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 mb-4">{synthError}</p>
-                  )}
-                  {synthState === 'running' && (
-                    <div className="py-10 text-center">
-                      <svg className="w-6 h-6 animate-spin text-brand-500 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                      </svg>
-                      <p className="text-sm text-slate-500">Synthesising evidence across {summaryCount} papers…</p>
                     </div>
-                  )}
-                  {synthesis && synthState !== 'running' && (
-                    <SynthesisPanel result={synthesis} />
-                  )}
+                  </div>
+                )}
+
+                {/* Filter chips row */}
+                {papers.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold"
+                      style={{ background: 'var(--gold-faint)', color: 'var(--gold)', fontFamily: 'Manrope, sans-serif' }}>
+                      <span className="material-symbols-outlined text-[14px]">database</span>
+                      All Databases ({Object.keys(sourceCounts).length})
+                    </span>
+                    {Object.entries(sourceCounts).map(([src, count]) => (
+                      <span key={src} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10px] font-semibold"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)', fontFamily: 'Manrope, sans-serif' }}>
+                        {SOURCE_LABELS[src] ?? src}: {count}
+                      </span>
+                    ))}
+                    {searchComplete && <ExportButtons papers={papers} />}
+                    {summaryCount > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10px] font-semibold"
+                        style={{ background: 'rgba(16,185,129,0.08)', color: '#10b981', fontFamily: 'Manrope, sans-serif' }}>
+                        <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                        {summaryCount} analysed
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {showMatrix ? (
+                  summaryCount > 0 ? (
+                    <div className="rounded-2xl p-6" style={{ background: 'var(--bg-surface)', boxShadow: '0 4px 32px rgba(25,28,29,0.04)' }}>
+                      <h3 className="text-sm font-semibold mb-4" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>
+                        Evidence Extraction Table
+                      </h3>
+                      <SummaryMatrix papers={papers} summaries={summaries} projectId={sessionId || undefined} />
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl p-12 text-center" style={{ background: 'var(--bg-surface)', boxShadow: '0 4px 32px rgba(25,28,29,0.04)' }}>
+                      <span className="material-symbols-outlined text-4xl block mx-auto mb-4" style={{ color: 'var(--text-muted)' }}>table_chart</span>
+                      <p className="text-base font-semibold mb-2" style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}>
+                        No summaries yet
+                      </p>
+                      <p className="text-sm mb-6" style={{ color: 'var(--text-muted)', fontFamily: 'Manrope, sans-serif' }}>
+                        Run "Summarise All" to extract AI evidence from your {papers.length} papers — then this table will populate.
+                      </p>
+                      <button
+                        onClick={() => { setShowMatrix(false); handleSummarizeAll(); }}
+                        disabled={bgSummarize.isRunning || papers.length === 0}
+                        className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-bold text-white transition-all active:scale-95 disabled:opacity-40"
+                        style={{ background: 'linear-gradient(135deg, var(--gold), var(--gold-light))', fontFamily: 'Manrope, sans-serif',
+                          boxShadow: '0 4px 16px rgba(54,50,183,0.15)' }}
+                      >
+                        <span className="material-symbols-outlined text-base">summarize</span>
+                        Summarise All {papers.length} Papers
+                      </button>
+                    </div>
+                  )
+                ) : (
+                  <PapersTable
+                    papers={papers}
+                    query={query}
+                    preloadedSummaries={summaries}
+                    sessionId={sessionId ?? ''}
+                    onViewDetail={(paper, summary) => onViewPaperDetail(paper, summary, sessionId ?? '')}
+                  />
+                )}
+
+                {/* Synthesis panel — Glassmorphic floating sheet */}
+                {showSynthesis && (
+                  <div className="rounded-2xl p-6 relative overflow-hidden" style={{
+                    background: 'rgba(248,249,250,0.85)',
+                    backdropFilter: 'blur(16px)',
+                    WebkitBackdropFilter: 'blur(16px)',
+                    boxShadow: '0 8px 32px rgba(25,28,29,0.06)',
+                  }}>
+                    <div className="absolute left-0 top-0 bottom-0 w-[3px] rounded-l-2xl" style={{ background: 'var(--gold)' }} />
+                    <div className="flex items-center justify-between mb-5">
+                      <h3 className="text-sm font-semibold" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>Cross-paper Synthesis</h3>
+                      <button onClick={() => setShowSynthesis(false)}
+                        className="text-xs hover:opacity-70 transition-opacity" style={{ color: 'var(--text-muted)' }}>✕ hide</button>
+                    </div>
+                    {synthError && (
+                      <p className="text-sm rounded-xl px-5 py-4 mb-4" style={{ color: '#dc2626', background: 'rgba(220,38,38,0.04)' }}>
+                        {synthError}
+                      </p>
+                    )}
+                    {synthState === 'running' && (
+                      <div className="py-12 text-center">
+                        <span className="material-symbols-outlined text-2xl animate-spin block mx-auto mb-3" style={{ color: 'var(--gold)' }}>progress_activity</span>
+                        <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Synthesising evidence across {summaryCount} papers…</p>
+                      </div>
+                    )}
+                    {synthesis && synthState !== 'running' && (
+                      <SynthesisPanel result={synthesis} />
+                    )}
+                  </div>
+                )}
+              </section>
+
+              {/* Right sidebar: Database Health + Deep Insights + Actions + Synthesis Progress */}
+              <div className="space-y-5 lg:sticky lg:top-20">
+
+                {/* Database Health */}
+                <div className="rounded-2xl p-5 space-y-4" style={{ background: 'var(--bg-surface)', boxShadow: '0 4px 32px rgba(25,28,29,0.04)' }}>
+                  <h4 className="text-[10px] font-extrabold uppercase tracking-[0.2em]" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted)' }}>
+                    Database Health
+                  </h4>
+                  <div className="space-y-3">
+                    {Object.entries(sourceCounts).map(([src, count]) => {
+                      const hasError = src in sourcesError;
+                      const isDone = sourcesDone.has(src) || searchComplete;
+                      return (
+                        <div key={src} className="flex items-center gap-3">
+                          <div className="w-2 h-2 rounded-full flex-shrink-0" style={{
+                            background: hasError ? '#ef4444' : isDone ? '#22c55e' : isStreaming ? 'var(--gold)' : 'var(--text-muted)',
+                            boxShadow: isDone ? '0 0 6px rgba(34,197,94,0.4)' : hasError ? '0 0 6px rgba(239,68,68,0.4)' : 'none',
+                          }} />
+                          <span className="text-xs flex-1" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-body)' }}>
+                            {SOURCE_LABELS[src] ?? src}
+                          </span>
+                          <span className="text-xs font-bold tabular-nums" style={{ color: 'var(--text-muted)' }}>{count}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              )}
+
+                {/* Deep Insights — AI panel with glass effect */}
+                <div className="rounded-2xl p-5 relative overflow-hidden" style={{
+                  background: 'rgba(248,249,250,0.85)',
+                  backdropFilter: 'blur(16px)',
+                  WebkitBackdropFilter: 'blur(16px)',
+                  boxShadow: '0 4px 32px rgba(25,28,29,0.04)',
+                }}>
+                  <div className="absolute left-0 top-0 bottom-0 w-[2px]" style={{ background: 'linear-gradient(to bottom, var(--gold), var(--gold-light))' }} />
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="material-symbols-outlined text-sm" style={{ color: 'var(--gold)', fontVariationSettings: "'FILL' 1" }}>auto_awesome</span>
+                    <h4 className="text-[10px] font-extrabold uppercase tracking-[0.2em]" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--gold)' }}>
+                      Deep Insights
+                    </h4>
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'var(--gold-faint)', color: 'var(--gold)' }}>
+                        <span className="material-symbols-outlined text-lg">article</span>
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>{papers.length}</p>
+                        <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Papers found</p>
+                      </div>
+                    </div>
+                    {summaryCount > 0 && (
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'rgba(16,185,129,0.08)', color: '#10b981' }}>
+                          <span className="material-symbols-outlined text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>star</span>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>{summaryCount}</p>
+                          <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>AI analysed</p>
+                        </div>
+                      </div>
+                    )}
+                    {rankingInfo && (
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'rgba(139,92,246,0.08)', color: '#8b5cf6' }}>
+                          <span className="material-symbols-outlined text-lg">filter_list</span>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold" style={{ color: 'var(--text-bright)', fontFamily: 'Manrope, sans-serif' }}>{rankingInfo.selected}/{rankingInfo.candidates}</p>
+                          <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Selected after ranking</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Synthesis Progress — circular gauge */}
+                {(isSummarizing || summarizeStatus === 'done') && (
+                  <div className="rounded-2xl p-5 text-center" style={{ background: 'var(--bg-surface)', boxShadow: '0 4px 32px rgba(25,28,29,0.04)' }}>
+                    <h4 className="text-[10px] font-extrabold uppercase tracking-[0.2em] mb-4" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted)' }}>
+                      Synthesis Progress
+                    </h4>
+                    {/* Large circular gauge */}
+                    <div className="relative inline-flex items-center justify-center mx-auto" style={{ width: 100, height: 100 }}>
+                      <svg width={100} height={100} className="-rotate-90">
+                        <circle cx={50} cy={50} r={42} fill="none" stroke="var(--border-faint)" strokeWidth={6} />
+                        <circle cx={50} cy={50} r={42} fill="none"
+                          stroke={summarizeStatus === 'done' ? '#10b981' : 'var(--gold)'}
+                          strokeWidth={6}
+                          strokeDasharray={2 * Math.PI * 42}
+                          strokeDashoffset={2 * Math.PI * 42 - (sumPercent / 100) * 2 * Math.PI * 42}
+                          strokeLinecap="round" className="transition-all duration-700" />
+                      </svg>
+                      <span className="absolute text-xl font-bold tabular-nums"
+                        style={{ color: summarizeStatus === 'done' ? '#10b981' : 'var(--gold)', fontFamily: 'Manrope, sans-serif' }}>
+                        {sumPercent}%
+                      </span>
+                    </div>
+                    <p className="text-xs mt-3" style={{ color: 'var(--text-muted)' }}>
+                      {sumProgress.current}/{sumProgress.total} papers
+                    </p>
+                    {isSummarizing && currentStep && (
+                      <p className="text-[10px] mt-1 truncate" style={{ color: 'var(--gold-light)' }}>{currentStep}</p>
+                    )}
+                    {sumErrors > 0 && <p className="text-[10px] mt-1 text-rose-500">{sumErrors} errors</p>}
+                  </div>
+                )}
+
+                {/* Action buttons */}
+                {(searchComplete || papers.length > 0 || summaryCount > 0) && papers.length > 0 && (
+                  <div className="rounded-2xl p-5 space-y-3" style={{ background: 'var(--bg-surface)', boxShadow: '0 4px 32px rgba(25,28,29,0.04)' }}>
+                    <button
+                      onClick={handleSummarizeAll}
+                      disabled={isSummarizing || papers.length === 0}
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
+                        rounded-xl text-sm font-bold text-white transition-all active:scale-95
+                        disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{
+                        background: 'linear-gradient(135deg, var(--gold), var(--gold-light))',
+                        fontFamily: 'Manrope, sans-serif',
+                        boxShadow: isSummarizing ? 'none' : '0 4px 16px rgba(54,50,183,0.15)',
+                      }}
+                    >
+                      {isSummarizing ? (
+                        <><span className="material-symbols-outlined text-base animate-spin">progress_activity</span>Analysing {sumProgress.current}/{sumProgress.total}</>
+                      ) : allSummarized ? (
+                        <><span className="material-symbols-outlined text-base">refresh</span>Re-run All</>
+                      ) : hasSummaries ? (
+                        <>Resume ({summaryCount}/{papers.length})</>
+                      ) : (
+                        <><span className="material-symbols-outlined text-base">summarize</span>Summarise All</>
+                      )}
+                    </button>
+
+                    {hasSummaries && !isSummarizing && sessionId && (
+                      <button onClick={handleResetSummaries}
+                        className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2
+                          rounded-xl text-[11px] font-medium transition-all hover:opacity-70"
+                        style={{ color: 'var(--text-muted)', fontFamily: 'Manrope, sans-serif' }}>
+                        <span className="material-symbols-outlined text-sm">restart_alt</span>
+                        Reset Summaries
+                      </button>
+                    )}
+
+                    {hasSummaries && !isSummarizing && sessionId && (
+                      <button onClick={handleBackfillFiles}
+                        className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2
+                          rounded-xl text-[11px] font-medium transition-all hover:opacity-70"
+                        style={{ color: 'var(--text-muted)', fontFamily: 'Manrope, sans-serif' }}
+                        title="Save a PDF or text file for each summarised paper that has no file yet">
+                        <span className="material-symbols-outlined text-sm">folder_sync</span>
+                        Backfill Files
+                      </button>
+                    )}
+
+                    {hasSummaries && sessionId && (
+                      <button onClick={handleSynthesize} disabled={synthState === 'running'}
+                        className="w-full inline-flex items-center justify-center gap-2 px-4 py-2
+                          rounded-xl text-xs font-bold transition-all active:scale-95 disabled:opacity-40"
+                        style={{ background: 'var(--gold-faint)', color: 'var(--gold)', fontFamily: 'Manrope, sans-serif' }}>
+                        {synthState === 'running' ? (
+                          <><span className="material-symbols-outlined text-sm animate-spin">progress_activity</span>Synthesising…</>
+                        ) : (
+                          <><span className="material-symbols-outlined text-sm">auto_awesome</span>{synthesis ? 'Re-synthesise' : 'Synthesis'}</>
+                        )}
+                      </button>
+                    )}
+
+                    {hasSummaries && sessionId && (
+                      <button onClick={() => onGoToJournals(sessionId)}
+                        className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5
+                          rounded-xl text-sm font-bold text-white transition-all active:scale-95"
+                        style={{ background: 'linear-gradient(135deg, #059669, #10b981)', fontFamily: 'Manrope, sans-serif',
+                          boxShadow: '0 4px 16px rgba(16,185,129,0.2)' }}>
+                        <span className="material-symbols-outlined text-base">arrow_forward</span>
+                        Phase 4 → Journals
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Collapsible search strategy */}
+                <ProgressStream
+                  sourceProgress={sourceProgress}
+                  sourcesDone={sourcesDone}
+                  sourcesError={sourcesError}
+                  isDeduplicating={isDeduplicating}
+                  rankingInfo={rankingInfo}
+                  isEnriching={isEnriching}
+                  isStreaming={isStreaming}
+                  isComplete={searchComplete || (!isStreaming && (papers.length > 0 || summaryCount > 0))}
+                  expandedQueries={expandedQueries}
+                  pubmedQueries={pubmedQueries}
+                  meshTerms={meshTerms}
+                  booleanQuery={booleanQuery}
+                  frameworkUsed={frameworkUsed}
+                  frameworkJustification={frameworkJustification}
+                  frameworkElements={frameworkElements}
+                  pico={pico}
+                  studyTypeFilters={studyTypeFilters}
+                  aiRationale={aiRationale}
+                  facets={facets}
+                  strategyNotes={strategyNotes}
+                />
+              </div>
             </div>
-          </div>
-        )}
-      </main>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -14,6 +14,7 @@ export type WritingType =
   | 'letter'
   | 'editorial'
   | 'opinion'
+  | 'study_protocol'
   | 'review';        // generic / legacy
 
 export interface IntentRequest {

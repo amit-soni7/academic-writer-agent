@@ -20,13 +20,12 @@
  */
 import { useState, useEffect, type ReactNode } from 'react';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
-import type { JournalStyle, PeerReviewReport, RevisionResult, SynthesisResult } from '../../types/paper';
+import type { DeepSynthesisResult, DeepSynthesisSSEEvent, JournalStyle, PeerReviewReport, RevisionResult, SynthesisResult } from '../../types/paper';
 import {
-  synthesizePapers,
   getSynthesisResult,
-  generatePeerReview,
+  streamDeepSynthesis,
+  getDeepSynthesisResult,
   getPeerReviewResult,
-  reviseAfterReview,
   writeArticle,
   generateTitle,
   approveTitle,
@@ -34,7 +33,7 @@ import {
   getJournalStyle,
 } from '../../api/projects';
 import type { TitleSuggestions } from '../../api/projects';
-import SynthesisPanel from '../LiteratureDashboard/SynthesisPanel';
+import DeepSynthesisPanel from './DeepSynthesisPanel';
 import LoadingLottie from '../LoadingLottie';
 
 interface Props {
@@ -537,7 +536,6 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         setArticleType(data.article_type);
       }
     }).catch(() => { /* silently ignore */ });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   // Restore saved synthesis and peer review results on resume
@@ -545,7 +543,6 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
     getSynthesisResult(sessionId).then(result => {
       if (result) {
         setSynthesis(result);
-        setSynthState('done');
       }
     }).catch(() => {});
 
@@ -553,6 +550,13 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       if (result) {
         setReview(result);
         setReviewState('done');
+      }
+    }).catch(() => {});
+
+    getDeepSynthesisResult(sessionId).then(result => {
+      if (result) {
+        setDeepSynthesis(result);
+        setDeepSynthState('done');
       }
     }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -577,7 +581,6 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         if (jLimit) setWordLimit(jLimit);
       }
     }).catch(() => { /* silently ignore */ });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJournal]);
 
   // When article type changes, auto-update word limit from journal style
@@ -585,7 +588,6 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
     if (!journalStyle) return;
     const jLimit = journalStyle.word_limits?.[articleType];
     if (jLimit) setWordLimit(jLimit);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [articleType, journalStyle]);
 
   // Draft state
@@ -597,18 +599,19 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
 
   // Synthesis state
   const [synthesis, setSynthesis]   = useState<SynthesisResult | null>(null);
-  const [synthState, setSynthState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [synthError, setSynthError] = useState<string | null>(null);
 
   // Peer review state
   const [review, setReview]         = useState<PeerReviewReport | null>(null);
   const [reviewState, setReviewState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [reviewError, setReviewError] = useState<string | null>(null);
 
   // Revision state
   const [revision, setRevision] = useState<RevisionResult | null>(null);
-  const [revisionState, setRevisionState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [revisionError, setRevisionError] = useState<string | null>(null);
+
+  // Deep synthesis state
+  const [deepSynthesis, setDeepSynthesis] = useState<DeepSynthesisResult | null>(null);
+  const [deepSynthEvents, setDeepSynthEvents] = useState<DeepSynthesisSSEEvent[]>([]);
+  const [deepSynthState, setDeepSynthState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [deepSynthError, setDeepSynthError] = useState<string | null>(null);
 
   async function handleGenerateTitle() {
     setTitleState('generating');
@@ -651,8 +654,6 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       setRefCount(result.ref_count ?? 0);
       setRefLimit(result.ref_limit ?? null);
       setRevision(null);
-      setRevisionState('idle');
-      setRevisionError(null);
       setWritingState('done');
       changeTab('draft');
     } catch (err) {
@@ -663,8 +664,8 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   }
 
   async function handleWriteArticle() {
-    if (!synthesis) {
-      setWriteError('Run Cross-paper Evidence Synthesis first.');
+    if (!synthesis && !deepSynthesis) {
+      setWriteError('Run Synthesis first (cross-paper or deep synthesis).');
       changeTab('synthesis');
       return;
     }
@@ -677,63 +678,27 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
     await _draftArticle();
   }
 
-  async function handleSynthesize() {
-    setSynthState('running');
-    setSynthError(null);
+  function handleDeepSynthesize() {
+    setDeepSynthState('running');
+    setDeepSynthError(null);
+    setDeepSynthEvents([]);
+    setDeepSynthesis(null);
     changeTab('synthesis');
-    try {
-      const result = await synthesizePapers(sessionId);
-      setSynthesis(result);
-      setSynthState('done');
-    } catch (err) {
-      setSynthError(err instanceof Error ? err.message : 'Synthesis failed.');
-      setSynthState('error');
-    }
-  }
 
-  async function handlePeerReview() {
-    if (!articleText) {
-      setReviewError('Draft the manuscript first.');
-      changeTab('draft');
-      return;
-    }
-    setReviewState('running');
-    setReviewError(null);
-    changeTab('peerreview');
-    try {
-      const report = await generatePeerReview(sessionId);
-      setReview(report);
-      setRevision(null);
-      setRevisionState('idle');
-      setRevisionError(null);
-      setReviewState('done');
-    } catch (err) {
-      setReviewError(err instanceof Error ? err.message : 'Peer review generation failed.');
-      setReviewState('error');
-    }
-  }
+    const controller = streamDeepSynthesis(
+      sessionId,
+      (event) => {
+        setDeepSynthEvents(prev => [...prev, event]);
+        if (event.type === 'complete' && event.result) {
+          setDeepSynthesis(event.result as DeepSynthesisResult);
+          setDeepSynthState('done');
+        }
+      },
+      true, // autoFetchEnabled
+    );
 
-  async function handleReviseAfterReview() {
-    if (!articleText || !review) {
-      setRevisionError('Draft and peer review are required before revision.');
-      changeTab(!articleText ? 'draft' : 'peerreview');
-      return;
-    }
-    setRevisionState('running');
-    setRevisionError(null);
-    changeTab('revision');
-    try {
-      const result = await reviseAfterReview(sessionId, articleText, review, selectedJournal);
-      setRevision(result);
-      if (result.revised_article) {
-        setArticleText(result.revised_article);
-        setWordCount(result.revised_article.split(/\s+/).filter(Boolean).length);
-      }
-      setRevisionState('done');
-    } catch (err) {
-      setRevisionError(err instanceof Error ? err.message : 'Revision failed.');
-      setRevisionState('error');
-    }
+    // Cleanup on unmount
+    return () => controller.abort();
   }
 
   function downloadArticle(mode: 'markdown' | 'plain') {
@@ -776,377 +741,291 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   }
 
   const decisionConf = review ? (DECISION_CONFIG[review.decision] ?? DECISION_CONFIG.major_revision) : null;
-  const canDraft = Boolean(synthesis);
-  const canPeerReview = Boolean(articleText);
-  const canRevise = Boolean(articleText && review);
+  const canDraft = Boolean(synthesis) || Boolean(deepSynthesis);
   const titleApproved = Boolean(approvedTitle);
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen flex flex-col" style={{ background: 'var(--bg-base, #f8f9fa)' }}>
 
-      {/* Header */}
-      <header className="border-b border-slate-200 bg-white sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button onClick={onBack}
-              className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 transition-colors">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-              Journals
-            </button>
-            <span className="text-slate-300">/</span>
-            <span className="font-semibold text-slate-800">Write Article</span>
-            <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
-              {selectedJournal}
+      {/* Top bar */}
+      <header className="sticky top-0 z-10 flex justify-between items-center w-full px-8 py-3"
+        style={{ background: 'var(--bg-base, #f8f9fa)' }}>
+        <div className="flex items-center gap-6">
+          <button onClick={onBack}
+            className="p-2 rounded-lg transition-colors hover:bg-slate-200/50"
+            style={{ color: 'var(--text-secondary, #64748b)' }}>
+            <span className="material-symbols-outlined text-xl">arrow_back</span>
+          </button>
+          <div className="relative">
+            <span className="absolute inset-y-0 left-0 flex items-center pl-3"
+              style={{ color: 'var(--text-muted, #94a3b8)' }}>
+              <span className="material-symbols-outlined text-sm">search</span>
             </span>
+            <input
+              className="border-none rounded-full py-2 pl-10 pr-4 text-sm w-64 focus:ring-2 transition-all"
+              style={{
+                background: 'var(--bg-hover, #e7e8e9)',
+                fontFamily: 'Manrope, sans-serif',
+                color: 'var(--text-body, #1e293b)',
+              }}
+              placeholder="Search manuscript..."
+              type="text"
+            />
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 text-xs font-medium text-slate-500">
-              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-400">3 · Summarise</span>
-              <span className="text-slate-300">→</span>
-              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-400">4 · Journals</span>
-              <span className="text-slate-300">→</span>
-              <span className="px-2 py-0.5 rounded-full bg-brand-100 text-brand-700">5 · Write</span>
-            </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 mr-4 pr-4"
+            style={{ borderRight: '1px solid var(--border-faint, #e5e7eb)' }}>
+            <button className="p-2 transition-colors rounded-lg hover:bg-slate-200/50"
+              style={{ color: 'var(--text-muted, #94a3b8)' }}>
+              <span className="material-symbols-outlined">history</span>
+            </button>
+            <button className="p-2 transition-colors rounded-lg hover:bg-slate-200/50"
+              style={{ color: 'var(--text-muted, #94a3b8)' }}>
+              <span className="material-symbols-outlined">auto_awesome</span>
+            </button>
             <button onClick={onOpenSettings}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
+              className="p-2 transition-colors rounded-lg hover:bg-slate-200/50"
+              style={{ color: 'var(--text-muted, #94a3b8)' }}>
+              <span className="material-symbols-outlined">settings</span>
             </button>
           </div>
-        </div>
-      </header>
-
-      <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-6">
-
-        {/* Controls card */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-
-          {/* ── Title Quality Policy section ── */}
-          <div className={`rounded-xl border mb-5 p-4 ${
-            titleApproved
-              ? 'bg-emerald-50 border-emerald-200'
-              : 'bg-amber-50 border-amber-200'
-          }`}>
-            <div className="flex items-start justify-between gap-3 flex-wrap">
-              <div className="flex-1 min-w-0">
-                <p className={`text-[11px] font-semibold uppercase tracking-wide mb-1 ${
-                  titleApproved ? 'text-emerald-600' : 'text-amber-600'
-                }`}>
-                  {titleApproved ? 'Approved Manuscript Title' : 'Manuscript Title Required'}
-                </p>
-                {titleApproved ? (
-                  <p className="text-sm font-medium text-emerald-900 leading-snug">{approvedTitle}</p>
-                ) : (
-                  <p className="text-xs text-amber-700 leading-relaxed">
-                    A high-quality title must be approved before drafting. Click "Generate Title" to get
-                    AI suggestions, or enter one manually.
-                  </p>
-                )}
-                {titleError && (
-                  <p className="text-xs text-rose-600 mt-1">{titleError}</p>
-                )}
-              </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                {titleApproved && (
-                  <button
-                    onClick={handleGenerateTitle}
-                    disabled={titleState === 'generating'}
-                    className="px-3 py-1.5 rounded-lg border border-emerald-300 text-xs font-medium
-                      text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 transition-colors"
-                  >
-                    {titleState === 'generating' ? 'Generating…' : '↻ Change Title'}
-                  </button>
-                )}
-                {!titleApproved && (
-                  <button
-                    onClick={handleGenerateTitle}
-                    disabled={titleState === 'generating'}
-                    className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-semibold
-                      hover:bg-amber-700 disabled:opacity-40 transition-colors"
-                  >
-                    {titleState === 'generating' ? (
-                      <span className="flex items-center gap-1.5">
-                        <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                        </svg>Generating…
-                      </span>
-                    ) : 'Generate Title'}
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Title approval panel (shown when suggestions are ready) */}
-          {showTitlePanel && titleSuggestions && (
-            <div className="rounded-xl border border-brand-200 bg-brand-50 p-4 mb-5">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-brand-800">Title Suggestions</h3>
-                <button
-                  onClick={() => setShowTitlePanel(false)}
-                  className="text-xs text-slate-400 hover:text-slate-600"
-                >
-                  ✕ Close
-                </button>
-              </div>
-              <TitleApprovalPanel
-                suggestions={titleSuggestions}
-                onApprove={handleApproveTitle}
-                loading={titleState === 'approving'}
-              />
-            </div>
-          )}
-
-          {/* Citation style + journal constraints */}
-          {journalStyle && (
-            <div className="flex items-start gap-3 mb-4 flex-wrap">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-500 font-medium">Citation:</span>
-                <CitationStyleBadge style={journalStyle} />
-              </div>
-              {journalStyle.abstract_structure && (
-                <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border font-medium
-                  ${journalStyle.abstract_structure === 'structured'
-                    ? 'bg-violet-50 text-violet-700 border-violet-200'
-                    : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
-                  Abstract: {journalStyle.abstract_structure}
-                  {journalStyle.abstract_word_limit ? ` ≤${journalStyle.abstract_word_limit}w` : ''}
-                </span>
-              )}
-              {journalStyle.max_references && (
-                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border font-medium bg-rose-50 text-rose-600 border-rose-200">
-                  Max {journalStyle.max_references} refs
-                </span>
-              )}
-            </div>
-          )}
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
-            <div>
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-                Article Type
-              </label>
-              <select value={articleType} onChange={e => setArticleType(e.target.value)}
-                className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-brand-500 bg-white">
-                {ARTICLE_TYPES
-                  .filter(t =>
-                    !journalStyle?.accepted_article_types?.length ||
-                    journalStyle.accepted_article_types.includes(t.value)
-                  )
-                  .map(t => <option key={t.value} value={t.value}>{t.label}</option>)
-                }
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-                Word Limit
-                {journalStyle?.word_limits?.[articleType] && (
-                  <span className="ml-1.5 font-normal text-violet-600 normal-case tracking-normal">
-                    (journal: ~{journalStyle.word_limits[articleType]?.toLocaleString()}w)
-                  </span>
-                )}
-              </label>
-              <input
-                type="number"
-                min={500} max={15000} step={100}
-                value={wordLimit}
-                onChange={e => {
-                  const v = Math.max(500, Math.min(15000, Number(e.target.value) || 4000));
-                  setWordLimit(v);
-                }}
-                className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm
-                  focus:outline-none focus:border-brand-500 bg-white"
-                placeholder="e.g. 4000"
-              />
-              <p className="text-[10px] text-slate-400 mt-1">500 – 15,000 words</p>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-                Max References
-                {journalStyle?.max_references && (
-                  <span className="ml-1.5 font-normal text-rose-600 normal-case tracking-normal">
-                    (journal: ≤{journalStyle.max_references})
-                  </span>
-                )}
-              </label>
-              <input
-                type="number"
-                min={5} max={300} step={5}
-                value={maxRefs}
-                onChange={e => setMaxRefs(e.target.value)}
-                className="w-full rounded-xl border-2 border-slate-200 px-3 py-2 text-sm
-                  focus:outline-none focus:border-brand-500 bg-white"
-                placeholder="Unlimited"
-              />
-              <p className="text-[10px] text-slate-400 mt-1">Leave blank = unlimited</p>
-            </div>
-            <div className="flex flex-col justify-end">
-              <button
-                onClick={handleWriteArticle}
-                disabled={writingState === 'running' || !canDraft}
-                className="w-full inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl
-                  text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700
-                  disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                title={!canDraft ? 'Run Cross-paper Evidence Synthesis first' : undefined}
-              >
-                {writingState === 'running' ? (
-                  <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                  </svg>Drafting…</>
-                ) : titleState === 'generating' ? (
-                  <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                  </svg>Generating title…</>
-                ) : articleText ? (
-                  '↻ Re-draft Article'
-                ) : (
-                  <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                  </svg>Draft Manuscript</>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Word count + ref count badges (shown after drafting) */}
-          {writingState === 'done' && articleText && (
-            <div className="flex flex-wrap gap-2 mt-2 mb-3 pt-3 border-t border-slate-100">
-              {(() => {
-                const pct = Math.round((wordCount / wordLimit) * 100);
-                const ok  = pct >= 85 && pct <= 115;
-                return (
-                  <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border
-                    ${ok
-                      ? 'bg-green-50 text-green-700 border-green-200'
-                      : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                    {wordCount.toLocaleString()} words
-                    <span className="opacity-60">/ target {wordLimit.toLocaleString()}</span>
-                    {!ok && <span className="font-semibold">({pct}% — outside ±15%)</span>}
-                  </span>
-                );
-              })()}
-              {refCount > 0 && (
-                <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border
-                  ${refLimit && refCount > refLimit
-                    ? 'bg-rose-50 text-rose-600 border-rose-200'
-                    : 'bg-slate-50 text-slate-600 border-slate-200'}`}>
-                  {refCount} references
-                  {refLimit && <span className="opacity-60">/ limit {refLimit}</span>}
-                  {refLimit && refCount > refLimit && (
-                    <span className="font-semibold"> ⚠ {refCount - refLimit} over</span>
-                  )}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* Tag legend */}
-          <div className="flex flex-wrap gap-3 text-xs text-slate-500 pt-3 border-t border-slate-100">
-            <span className="font-medium text-slate-600">Tag legend:</span>
-            <span className="flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200 font-semibold text-[10px]">CK</span>
-              Common knowledge
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 border border-blue-300 font-semibold font-mono text-[10px]">↗ key</span>
-              Cited from paper
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 border border-amber-200 font-semibold text-[10px]">INF</span>
-              Inference / synthesis
-            </span>
-          </div>
-        </div>
-
-        {/* Action buttons */}
-        <div className="flex gap-2 flex-wrap">
-          <button
-            onClick={handleSynthesize}
-            disabled={synthState === 'running'}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200
-              text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition-colors"
-          >
-            {synthState === 'running' ? (
-              <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-              </svg>Synthesising…</>
-            ) : (
-              <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>{synthesis ? '↻ Re-synthesise' : 'Cross-paper Synthesis'}</>
-            )}
+          <button className="px-4 py-2 text-sm font-medium transition-colors hover:opacity-80"
+            style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-secondary, #64748b)' }}>
+            Share
           </button>
           <button
             onClick={handleWriteArticle}
             disabled={writingState === 'running' || !canDraft}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200
-              text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition-colors"
+            className="px-5 py-2 rounded-lg font-semibold text-sm text-white transition-all active:scale-95
+              disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{
+              fontFamily: 'Manrope, sans-serif',
+              background: 'var(--gold, #4f46e5)',
+              boxShadow: '0 2px 8px rgba(79,70,229,0.15)',
+            }}
             title={!canDraft ? 'Run synthesis first' : undefined}
           >
             {writingState === 'running' ? (
-              <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-              </svg>Drafting…</>
-            ) : (
-              <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-              </svg>{articleText ? '↻ Re-draft Manuscript' : 'Draft Manuscript'}</>
-            )}
-          </button>
-          <button
-            onClick={handlePeerReview}
-            disabled={reviewState === 'running' || !canPeerReview}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200
-              text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition-colors"
-            title={!canPeerReview ? 'Draft the manuscript first' : undefined}
-          >
-            {reviewState === 'running' ? (
-              <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-              </svg>Reviewing…</>
-            ) : (
-              <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-              </svg>{review ? '↻ Re-review' : 'Generate Peer Review'}</>
-            )}
-          </button>
-          <button
-            onClick={handleReviseAfterReview}
-            disabled={revisionState === 'running' || !canRevise}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200
-              text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition-colors"
-            title={!canRevise ? 'Generate peer review first' : undefined}
-          >
-            {revisionState === 'running' ? (
-              <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-              </svg>Revising…</>
-            ) : (
-              <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h16M4 12h10M4 17h16" />
-              </svg>{revision ? '↻ Re-run Revision' : 'Revise + Response Letter'}</>
-            )}
+              <span className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-sm animate-spin">progress_activity</span>
+                Drafting…
+              </span>
+            ) : articleText ? 'Re-draft' : 'Draft Manuscript'}
           </button>
         </div>
+      </header>
+
+      {/* Workspace canvas */}
+      <div className="flex-grow flex flex-col items-center p-8 lg:p-12 overflow-y-auto">
+        <div className="w-full max-w-4xl space-y-10">
+
+          {/* ── Manuscript Header ── */}
+          <section className="space-y-6">
+            <div className="flex justify-between items-end">
+              <div className="flex-grow pr-12">
+                {/* Large serif title */}
+                {titleApproved ? (
+                  <h1 className="p-0 m-0 leading-tight"
+                    style={{
+                      fontFamily: 'Newsreader, Georgia, serif',
+                      fontSize: '3rem',
+                      fontWeight: 600,
+                      color: 'var(--text-bright, #1e293b)',
+                    }}>
+                    {approvedTitle}
+                  </h1>
+                ) : (
+                  <input
+                    className="bg-transparent border-none p-0 focus:ring-0 w-full"
+                    style={{
+                      fontFamily: 'Newsreader, Georgia, serif',
+                      fontSize: '3rem',
+                      fontWeight: 600,
+                      color: 'var(--text-bright, #1e293b)',
+                    }}
+                    placeholder="Enter manuscript title..."
+                    readOnly
+                    value=""
+                  />
+                )}
+                <p className="text-sm mt-3 flex items-center gap-2"
+                  style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-secondary, #64748b)' }}>
+                  <span className="material-symbols-outlined text-sm">calendar_today</span>
+                  {selectedJournal}
+                  {wordCount > 0 && <> · {wordCount.toLocaleString()} words</>}
+                </p>
+                {titleError && (
+                  <p className="text-xs text-rose-600 mt-2">{titleError}</p>
+                )}
+              </div>
+              <button
+                onClick={handleGenerateTitle}
+                disabled={titleState === 'generating'}
+                className="flex items-center gap-2 font-semibold text-sm whitespace-nowrap mb-1
+                  hover:opacity-80 transition-opacity disabled:opacity-40"
+                style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--gold, #4f46e5)' }}
+              >
+                <span className="material-symbols-outlined text-lg">magic_button</span>
+                {titleState === 'generating' ? 'Generating…' : titleApproved ? 'Change Title' : 'Generate Title'}
+              </button>
+            </div>
+
+            {/* Title approval panel */}
+            {showTitlePanel && titleSuggestions && (
+              <div className="rounded-xl p-4" style={{ background: 'var(--gold-faint, #ede9fe)', border: '1px solid var(--border-faint, #e5e7eb)' }}>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright, #1e293b)' }}>
+                    Title Suggestions
+                  </h3>
+                  <button onClick={() => setShowTitlePanel(false)}
+                    className="text-xs hover:opacity-80" style={{ color: 'var(--text-muted, #94a3b8)' }}>
+                    <span className="material-symbols-outlined text-sm">close</span>
+                  </button>
+                </div>
+                <TitleApprovalPanel
+                  suggestions={titleSuggestions}
+                  onApprove={handleApproveTitle}
+                  loading={titleState === 'approving'}
+                />
+              </div>
+            )}
+
+            {/* Settings Bento Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4">
+              {/* Article Type card */}
+              <div className="rounded-xl p-5 flex flex-col gap-1"
+                style={{ background: 'var(--bg-hover, #f3f4f5)' }}>
+                <label className="text-[10px] uppercase tracking-widest font-bold opacity-60"
+                  style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-secondary, #64748b)' }}>
+                  Article Type
+                </label>
+                <div className="flex items-center justify-between mt-1">
+                  <select value={articleType} onChange={e => setArticleType(e.target.value)}
+                    className="appearance-none bg-transparent border-none p-0 font-semibold text-sm focus:ring-0 cursor-pointer flex-1"
+                    style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright, #1e293b)' }}>
+                    {ARTICLE_TYPES
+                      .filter(t =>
+                        !journalStyle?.accepted_article_types?.length ||
+                        journalStyle.accepted_article_types.includes(t.value)
+                      )
+                      .map(t => <option key={t.value} value={t.value}>{t.label}</option>)
+                    }
+                  </select>
+                  <span className="material-symbols-outlined text-lg"
+                    style={{ color: 'var(--text-secondary, #64748b)' }}>expand_more</span>
+                </div>
+              </div>
+
+              {/* Word Limit card */}
+              <div className="rounded-xl p-5 flex flex-col gap-1"
+                style={{ background: 'var(--bg-hover, #f3f4f5)' }}>
+                <label className="text-[10px] uppercase tracking-widest font-bold opacity-60"
+                  style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-secondary, #64748b)' }}>
+                  Word Limit
+                </label>
+                <div className="flex items-center justify-between mt-1">
+                  <input
+                    type="number" min={500} max={15000} step={100}
+                    value={wordLimit}
+                    onChange={e => {
+                      const v = Math.max(500, Math.min(15000, Number(e.target.value) || 4000));
+                      setWordLimit(v);
+                    }}
+                    className="appearance-none bg-transparent border-none p-0 font-semibold text-sm focus:ring-0 w-20"
+                    style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright, #1e293b)' }}
+                  />
+                  <span className="font-semibold text-sm" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright, #1e293b)' }}>Words</span>
+                  <span className="material-symbols-outlined text-lg ml-2"
+                    style={{ color: 'var(--text-secondary, #64748b)' }}>edit</span>
+                </div>
+              </div>
+
+              {/* Max References card */}
+              <div className="rounded-xl p-5 flex flex-col gap-1"
+                style={{ background: 'var(--bg-hover, #f3f4f5)' }}>
+                <label className="text-[10px] uppercase tracking-widest font-bold opacity-60"
+                  style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-secondary, #64748b)' }}>
+                  Max References
+                </label>
+                <div className="flex items-center justify-between mt-1">
+                  <input
+                    type="number" min={5} max={300} step={5}
+                    value={maxRefs}
+                    onChange={e => setMaxRefs(e.target.value)}
+                    className="appearance-none bg-transparent border-none p-0 font-semibold text-sm focus:ring-0 w-16"
+                    style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright, #1e293b)' }}
+                    placeholder="60"
+                  />
+                  <span className="font-semibold text-sm" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-bright, #1e293b)' }}>Citations</span>
+                  <span className="material-symbols-outlined text-lg ml-2"
+                    style={{ color: 'var(--text-secondary, #64748b)' }}>format_list_numbered</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Citation style badges (compact row) */}
+            {journalStyle && (
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium" style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-muted, #94a3b8)' }}>Citation:</span>
+                  <CitationStyleBadge style={journalStyle} />
+                </div>
+                {journalStyle.abstract_structure && (
+                  <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border font-medium
+                    ${journalStyle.abstract_structure === 'structured'
+                      ? 'bg-violet-50 text-violet-700 border-violet-200'
+                      : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
+                    Abstract: {journalStyle.abstract_structure}
+                    {journalStyle.abstract_word_limit ? ` ≤${journalStyle.abstract_word_limit}w` : ''}
+                  </span>
+                )}
+                {journalStyle.max_references && (
+                  <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border font-medium bg-rose-50 text-rose-600 border-rose-200">
+                    Max {journalStyle.max_references} refs
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Word count + ref count badges (shown after drafting) */}
+            {writingState === 'done' && articleText && (
+              <div className="flex flex-wrap gap-2">
+                {(() => {
+                  const pct = Math.round((wordCount / wordLimit) * 100);
+                  const ok  = pct >= 85 && pct <= 115;
+                  return (
+                    <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border
+                      ${ok
+                        ? 'bg-green-50 text-green-700 border-green-200'
+                        : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                      {wordCount.toLocaleString()} words
+                      <span className="opacity-60">/ target {wordLimit.toLocaleString()}</span>
+                      {!ok && <span className="font-semibold">({pct}% — outside ±15%)</span>}
+                    </span>
+                  );
+                })()}
+                {refCount > 0 && (
+                  <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border
+                    ${refLimit && refCount > refLimit
+                      ? 'bg-rose-50 text-rose-600 border-rose-200'
+                      : 'bg-slate-50 text-slate-600 border-slate-200'}`}>
+                    {refCount} references
+                    {refLimit && <span className="opacity-60">/ limit {refLimit}</span>}
+                    {refLimit && refCount > refLimit && (
+                      <span className="font-semibold"> ⚠ {refCount - refLimit} over</span>
+                    )}
+                  </span>
+                )}
+              </div>
+            )}
+          </section>
+
+          {/* ── Tabbed Interface ── */}
+          <section className="space-y-6">
 
         {/* Tab bar */}
-        <div className="flex gap-1 border-b border-slate-200">
+        <div className="flex items-center gap-8 border-b" style={{ borderColor: 'var(--border-faint, #e5e7eb)' }}>
           {([
             { id: 'synthesis',  label: 'Synthesis',           badge: synthesis ? `${synthesis.evidence_matrix.length} claims` : undefined },
             { id: 'draft',      label: 'Draft Manuscript',    badge: wordCount > 0 ? `${wordCount.toLocaleString()}w` : undefined },
@@ -1156,19 +1035,23 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
             <button
               key={t.id}
               onClick={() => changeTab(t.id)}
-              className={`px-4 py-2.5 text-sm font-medium rounded-t-lg -mb-px border-b-2 transition-colors ${
+              className={`relative pb-4 text-sm font-semibold transition-colors ${
                 tab === t.id
-                  ? 'border-brand-500 text-brand-700 bg-white'
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
+                  ? 'text-indigo-600'
+                  : 'text-slate-400 hover:text-slate-700'
               }`}
+              style={{ fontFamily: 'Manrope, sans-serif' }}
             >
               {t.label}
               {t.badge && (
                 <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
-                  tab === t.id ? 'bg-brand-100 text-brand-700' : 'bg-slate-100 text-slate-500'
+                  tab === t.id ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'
                 }`}>
                   {t.badge}
                 </span>
+              )}
+              {tab === t.id && (
+                <span className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-full" />
               )}
             </button>
           ))}
@@ -1177,6 +1060,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         {/* ── Draft tab ─────────────────────────────────────────────────────── */}
         {tab === 'draft' && (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
+
             {writeError && (
               <div className="px-6 py-4 bg-rose-50 border-b border-rose-200 text-sm text-rose-700 rounded-t-2xl">
                 {writeError}
@@ -1191,11 +1075,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
 
             {writingState === 'running' && (
               <div className="py-16 text-center space-y-3">
-                <svg className="w-8 h-8 animate-spin text-brand-500 mx-auto" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                </svg>
-                <p className="text-sm text-slate-500">Drafting your manuscript…</p>
+                <LoadingLottie className="w-16 h-16 mx-auto" label="Drafting your manuscript…" />
                 <p className="text-xs text-slate-400">This may take 1–3 minutes depending on your AI provider.</p>
               </div>
             )}
@@ -1248,32 +1128,79 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
 
         {/* ── Synthesis tab ─────────────────────────────────────────────────── */}
         {tab === 'synthesis' && (
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-slate-800">Cross-paper Evidence Synthesis</h2>
-              {synthState === 'idle' && !synthesis && (
-                <p className="text-xs text-slate-400">Click "Cross-paper Synthesis" above to generate.</p>
-              )}
-            </div>
-
-            {synthError && (
-              <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 mb-4">
-                {synthError}
+          <div className="space-y-6">
+            {deepSynthError && (
+              <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
+                {deepSynthError}
               </p>
             )}
 
-            {synthState === 'running' && (
-              <div className="py-12 text-center space-y-3">
-                <svg className="w-8 h-8 animate-spin text-brand-500 mx-auto" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                </svg>
-                <p className="text-sm text-slate-500">Synthesising evidence across papers…</p>
+            {/* Empty state — Deep Synthesis CTA */}
+            {deepSynthState === 'idle' && !deepSynthesis && (
+              <div className="rounded-2xl p-12 min-h-[400px] flex flex-col items-center justify-center text-center"
+                style={{
+                  background: 'var(--bg-surface, #fff)',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+                  border: '1px solid var(--border-faint, #f1f1f4)',
+                }}>
+                <div className="w-20 h-20 rounded-3xl flex items-center justify-center mb-6"
+                  style={{ background: 'var(--gold-faint, #ede9fe)' }}>
+                  <span className="material-symbols-outlined text-4xl"
+                    style={{ color: 'var(--gold, #4f46e5)', fontVariationSettings: "'FILL' 1" }}>psychology</span>
+                </div>
+                <h2 className="text-2xl font-semibold mb-3"
+                  style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright, #1e293b)' }}>
+                  Deep Evidence Synthesis
+                </h2>
+                <p className="max-w-lg mx-auto mb-8 text-sm leading-relaxed"
+                  style={{ fontFamily: 'Manrope, sans-serif', color: 'var(--text-secondary, #64748b)' }}>
+                  Multi-stage pipeline that normalizes claims, clusters evidence, detects contradictions,
+                  auto-fetches missing papers, maps theoretical frameworks, and builds manuscript-ready evidence packs.
+                </p>
+
+                {/* Pipeline stages preview */}
+                <div className="flex items-center gap-1 mb-8">
+                  {[
+                    { icon: 'data_object', label: 'Extract' },
+                    { icon: 'transform', label: 'Normalize' },
+                    { icon: 'travel_explore', label: 'Auto-Fetch' },
+                    { icon: 'hub', label: 'Cluster' },
+                    { icon: 'psychology', label: 'Synthesize' },
+                    { icon: 'school', label: 'Theories' },
+                    { icon: 'inventory_2', label: 'Pack' },
+                  ].map((stage, i) => (
+                    <div key={i} className="flex flex-col items-center gap-1">
+                      <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-slate-50 text-slate-400">
+                        <span className="material-symbols-outlined text-base">{stage.icon}</span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-medium">{stage.label}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={handleDeepSynthesize}
+                  className="inline-flex items-center gap-3 px-8 py-4 rounded-xl font-bold text-white
+                    transition-all hover:shadow-lg active:scale-95"
+                  style={{
+                    fontFamily: 'Manrope, sans-serif',
+                    background: 'linear-gradient(135deg, var(--gold, #4f46e5), var(--gold-light, #6366f1))',
+                    boxShadow: '0 4px 16px rgba(79,70,229,0.2)',
+                  }}
+                >
+                  <span className="material-symbols-outlined text-xl">play_arrow</span>
+                  Start Deep Synthesis
+                </button>
               </div>
             )}
 
-            {synthesis && synthState !== 'running' && (
-              <SynthesisPanel result={synthesis} />
+            {/* Deep synthesis running/results */}
+            {(deepSynthState === 'running' || deepSynthesis) && (
+              <DeepSynthesisPanel
+                result={deepSynthesis}
+                events={deepSynthEvents}
+                isRunning={deepSynthState === 'running'}
+              />
             )}
           </div>
         )}
@@ -1281,12 +1208,6 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         {/* ── Peer Review tab ───────────────────────────────────────────────── */}
         {tab === 'peerreview' && (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
-
-            {reviewError && (
-              <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
-                {reviewError}
-              </p>
-            )}
 
             {!review && reviewState !== 'running' && (
               <div className="py-12 text-center text-slate-400 text-sm">
@@ -1297,12 +1218,8 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
             )}
 
             {reviewState === 'running' && (
-              <div className="py-12 text-center space-y-3">
-                <svg className="w-8 h-8 animate-spin text-brand-500 mx-auto" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                </svg>
-                <p className="text-sm text-slate-500">Generating peer review report…</p>
+              <div className="py-12 text-center">
+                <LoadingLottie className="w-16 h-16 mx-auto" label="Generating peer review report…" />
               </div>
             )}
 
@@ -1384,27 +1301,11 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         {/* ── Revision tab ─────────────────────────────────────────────────── */}
         {tab === 'revision' && (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
-            {revisionError && (
-              <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
-                {revisionError}
-              </p>
-            )}
-
-            {!revision && revisionState !== 'running' && (
+            {!revision && (
               <div className="py-12 text-center text-slate-400 text-sm">
                 {!review
                   ? 'Generate peer review first, then run revision.'
                   : 'Click "Revise + Response Letter" to rewrite the manuscript and create a point-by-point response.'}
-              </div>
-            )}
-
-            {revisionState === 'running' && (
-              <div className="py-12 text-center space-y-3">
-                <svg className="w-8 h-8 animate-spin text-brand-500 mx-auto" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-                </svg>
-                <p className="text-sm text-slate-500">Revising manuscript and drafting response letter…</p>
               </div>
             )}
 
@@ -1469,7 +1370,10 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
             )}
           </div>
         )}
-      </main>
+
+          </section>{/* end Tabbed Interface */}
+        </div>{/* end max-w-4xl */}
+      </div>{/* end workspace canvas */}
     </div>
   );
 }

@@ -14,6 +14,12 @@ const SR_TYPES: WritingType[] = ['systematic_review', 'meta_analysis', 'scoping_
 
 const TYPE_GROUPS: { group: string; types: { value: WritingType; label: string; hint: string }[] }[] = [
   {
+    group: 'Study Protocols',
+    types: [
+      { value: 'study_protocol', label: 'Study Protocol', hint: 'SPIRIT 2013 • RCT / observational' },
+    ],
+  },
+  {
     group: 'Primary Research',
     types: [
       { value: 'original_research', label: 'Original Research',    hint: 'IMRAD structure • novel data' },
@@ -310,7 +316,7 @@ function ArticleTypeStep({
     <div>
       <h2
         className="text-2xl font-light mb-1 leading-snug"
-        style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', color: 'var(--text-bright)' }}
+        style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}
       >
         What type of article?
       </h2>
@@ -400,7 +406,7 @@ function ContentStep({
     <div className="space-y-5">
       <h2
         className="text-2xl font-light mb-1 leading-snug"
-        style={{ fontFamily: '"Cormorant Garamond", Georgia, serif', color: 'var(--text-bright)' }}
+        style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright)' }}
       >
         {mainLabel}
       </h2>

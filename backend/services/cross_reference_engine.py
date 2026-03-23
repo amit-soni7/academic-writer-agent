@@ -51,6 +51,7 @@ async def stream_cross_references(
     query: str,
     fetch_settings: FetchSettings,
     engine=None,
+    purpose_filter: list[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Async generator that yields SSE-ready event dicts.
@@ -145,10 +146,24 @@ async def stream_cross_references(
         priority_hits_intro = 0
         priority_hits_disc = 0
 
+        # Build set of ref_ids relevant to the purpose_filter (if any)
+        _active_purposes: set[str] = set(purpose_filter) if purpose_filter else set()
+
         for ps in source_summaries:
             intro_ids: set[str] = set()
             disc_ids: set[str] = set()
             claim_text_by_ref_id: dict[str, list[str]] = defaultdict(list)
+
+            # Collect ref_ids that match the purpose_filter via sentence_bank
+            purpose_ref_ids: set[str] = set()
+            if _active_purposes:
+                for sent in ps.sentence_bank:
+                    purposes = {sent.primary_purpose} | set(sent.secondary_purposes)
+                    if purposes & _active_purposes:
+                        for rid in sent.cited_ref_ids:
+                            nk = _norm_ref_id(rid)
+                            if nk:
+                                purpose_ref_ids.add(nk)
 
             for claim in ps.introduction_claims:
                 text = (claim.claim or claim.verbatim_quote or "").strip()
@@ -174,6 +189,11 @@ async def stream_cross_references(
 
             for ref in ps.cited_references:
                 ref_id_norm = _norm_ref_id(ref.ref_id)
+
+                # Skip refs not matching purpose_filter when a filter is active
+                if _active_purposes and ref_id_norm and ref_id_norm not in purpose_ref_ids:
+                    continue
+
                 weight = 0
                 if ref_id_norm and ref_id_norm in intro_ids:
                     weight += 3

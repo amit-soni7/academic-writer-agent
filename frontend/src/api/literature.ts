@@ -23,13 +23,16 @@ export interface SSEEvent {
     pubmed_queries: string[];
     mesh_terms: string[];
     boolean_query: string;
-    pico: { population: string; intervention: string; comparator: string; outcome: string };
+    pico?: Record<string, string> | null;
+    framework_elements?: Record<string, string | string[]>;
     study_type_filters: string[];
     rationale: string;
     facets: Record<string, { mesh: string[]; freetext: string[] }>;
     strategy_notes: string[];
     framework_used?: string;
     framework_justification?: string;
+    question_type?: string;
+    secondary_frameworks_considered?: string[];
     tentative_title?: string;
   };
   before?: number;
@@ -51,6 +54,7 @@ export async function* streamSearch(
   totalLimit: number,
   useAiExpansion = true,
   articleType?: string,
+  projectId?: string,
 ): AsyncGenerator<SSEEvent> {
   const response = await fetch('http://localhost:8010/api/search_stream', {
     method: 'POST',
@@ -61,6 +65,7 @@ export async function* streamSearch(
       total_limit: totalLimit,
       use_ai_expansion: useAiExpansion,
       ...(articleType ? { article_type: articleType } : {}),
+      ...(projectId ? { project_id: projectId } : {}),
     }),
   });
 
@@ -128,6 +133,7 @@ export async function summarizePaper(
     paper,
     query,
     session_id: sessionId,
+    project_id: sessionId,
   });
   return data;
 }

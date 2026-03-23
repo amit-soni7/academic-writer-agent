@@ -7,7 +7,7 @@ interface Props {
   setThemePref: (t: ThemePreference) => void;
 }
 
-const serif = { fontFamily: '"Cormorant Garamond", Georgia, serif' };
+const serif = { fontFamily: 'Newsreader, Georgia, serif' };
 const mono  = { fontFamily: '"JetBrains Mono", Menlo, monospace' };
 
 // ── Shared nav ───────────────────────────────────────────────────────────────
@@ -44,7 +44,19 @@ const FREE_LIMITATIONS = [
 ];
 
 const PRO_FEATURES = [
-  'Unlimited research projects',
+  '3 research projects per month',
+  'Literature search (unlimited papers)',
+  'AI cross-paper evidence synthesis',
+  'Journal-aware drafting — 50+ journals',
+  '12 article types (PRISMA, CARE, CONSORT…)',
+  'AI peer review simulation',
+  'Revision pipeline with .docx export',
+  'Point-by-point response letter',
+  'BibTeX auto-saved to project folder',
+];
+
+const MAX_FEATURES = [
+  'Up to 10 full research projects per month',
   'Literature search (unlimited papers)',
   'AI cross-paper evidence synthesis',
   'Journal-aware drafting — 50+ journals',
@@ -77,7 +89,7 @@ const FAQS = [
   },
   {
     q: 'Do I need a credit card to start the free plan?',
-    a: 'No. Sign up with Google and start immediately. A card is only required when you upgrade to Pro.',
+    a: 'No. Sign up with Google and start immediately. A card is only required when you upgrade to a paid plan.',
   },
 ];
 
@@ -141,11 +153,11 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
 
       {/* PRICING CARDS */}
       <section className="pb-24 px-6">
-        <div className="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+        <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
 
           {/* Free plan */}
           <div
-            className="rounded-2xl border p-8"
+            className="rounded-2xl border p-8 h-full flex flex-col"
             style={{ background: 'var(--bg-surface)', borderColor: 'var(--border-faint)' }}
           >
             <div className="mb-6">
@@ -174,34 +186,36 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
               Start for free
             </button>
 
-            <div className="space-y-3 mb-6">
-              {FREE_FEATURES.map(f => (
-                <div key={f} className="flex items-center gap-2.5 text-sm" style={{ color: 'var(--text-secondary)' }}>
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                    style={{ color: 'var(--gold)' }}>
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                  </svg>
-                  {f}
-                </div>
-              ))}
-            </div>
+            <div className="flex-1 flex flex-col">
+              <div className="space-y-3 mb-6">
+                {FREE_FEATURES.map(f => (
+                  <div key={f} className="flex items-center gap-2.5 text-sm" style={{ color: 'var(--text-secondary)' }}>
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                      style={{ color: 'var(--gold)' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                    {f}
+                  </div>
+                ))}
+              </div>
 
-            <div className="pt-6 border-t space-y-3" style={{ borderColor: 'var(--border-faint)' }}>
-              {FREE_LIMITATIONS.map(f => (
-                <div key={f} className="flex items-center gap-2.5 text-sm" style={{ color: 'var(--text-faint)' }}>
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                    style={{ color: 'var(--text-faint)' }}>
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  {f}
-                </div>
-              ))}
+              <div className="pt-6 border-t space-y-3 mt-auto" style={{ borderColor: 'var(--border-faint)' }}>
+                {FREE_LIMITATIONS.map(f => (
+                  <div key={f} className="flex items-center gap-2.5 text-sm" style={{ color: 'var(--text-faint)' }}>
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                      style={{ color: 'var(--text-faint)' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    {f}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 
           {/* Pro plan */}
           <div
-            className="rounded-2xl p-8 relative overflow-hidden"
+            className="rounded-2xl p-8 relative overflow-hidden h-full flex flex-col"
             style={{ background: 'var(--gold)', color: '#fff' }}
           >
             {/* Background decoration */}
@@ -210,7 +224,7 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
             <div className="absolute -bottom-8 -left-8 w-32 h-32 rounded-full opacity-5"
               style={{ background: '#fff' }} />
 
-            <div className="relative">
+            <div className="relative flex h-full flex-col">
               <div className="flex items-center justify-between mb-6">
                 <div>
                   <div className="flex items-center gap-2 mb-2">
@@ -223,11 +237,11 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
                     </span>
                   </div>
                   <div className="flex items-end gap-1">
-                    <span className="text-5xl font-light" style={serif}>$20</span>
+                    <span className="text-5xl font-light" style={serif}>$100</span>
                     <span className="text-sm mb-2 opacity-80">/month</span>
                   </div>
                   <p className="text-sm mt-2 opacity-80">
-                    Full pipeline. Unlimited projects. Every feature.
+                    Full pipeline for teams running up to 3 projects per month.
                   </p>
                 </div>
               </div>
@@ -242,10 +256,62 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
                 Get started with Pro
               </button>
 
-              <div className="space-y-3">
+              <div className="space-y-3 flex-1">
                 {PRO_FEATURES.map(f => (
                   <div key={f} className="flex items-center gap-2.5 text-sm" style={{ color: 'rgba(255,255,255,0.92)' }}>
                     <svg className="w-4 h-4 shrink-0 opacity-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                    {f}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Max plan */}
+          <div
+            className="rounded-2xl border p-8 relative overflow-hidden h-full flex flex-col"
+            style={{ background: 'var(--bg-surface)', borderColor: 'var(--gold)', boxShadow: '0 18px 48px rgba(0,0,0,0.06)' }}
+          >
+            <div className="absolute -top-10 -right-10 w-32 h-32 rounded-full opacity-40"
+              style={{ background: 'color-mix(in srgb, var(--gold) 18%, transparent)' }} />
+
+            <div className="relative flex h-full flex-col">
+              <div className="mb-6">
+                <div className="flex items-center gap-2 mb-2">
+                  <p className="text-xs font-medium uppercase tracking-widest" style={{ color: 'var(--gold)', ...mono }}>Max</p>
+                  <span
+                    className="text-[9px] px-2 py-0.5 rounded-full font-medium border"
+                    style={{ borderColor: 'var(--border-faint)', background: 'var(--bg-elevated)', color: 'var(--text-secondary)', ...mono }}
+                  >
+                    Unlimited
+                  </span>
+                </div>
+                <div className="flex items-end gap-1">
+                  <span className="text-5xl font-light" style={{ ...serif, color: 'var(--text-bright)' }}>$299</span>
+                  <span className="text-sm mb-2" style={{ color: 'var(--text-muted)' }}>/month</span>
+                </div>
+                <p className="text-sm mt-2" style={{ color: 'var(--text-secondary)' }}>
+                  Up to 10 full research projects per month with the full advanced writing and revision stack.
+                </p>
+              </div>
+
+              <button
+                onClick={() => navigate('/intake')}
+                className="w-full py-2.5 rounded-lg text-sm font-semibold mb-8 transition-colors"
+                style={{ background: 'var(--text-bright)', color: 'var(--bg-base)' }}
+                onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.opacity = '0.92'}
+                onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.opacity = '1'}
+              >
+                Get started with Max
+              </button>
+
+              <div className="space-y-3 flex-1">
+                {MAX_FEATURES.map(f => (
+                  <div key={f} className="flex items-center gap-2.5 text-sm" style={{ color: 'var(--text-secondary)' }}>
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                      style={{ color: 'var(--gold)' }}>
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
                     </svg>
                     {f}
@@ -271,30 +337,31 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
 
           <div className="rounded-xl overflow-hidden border" style={{ borderColor: 'var(--border-faint)' }}>
             {/* Header */}
-            <div className="grid grid-cols-3 text-xs font-medium uppercase tracking-widest"
+            <div className="grid grid-cols-4 text-xs font-medium uppercase tracking-widest"
               style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border-faint)', ...mono }}>
               <div className="px-6 py-4" style={{ color: 'var(--text-muted)' }}>Feature</div>
               <div className="px-6 py-4 text-center" style={{ color: 'var(--text-muted)' }}>Free</div>
-              <div className="px-6 py-4 text-center" style={{ color: 'var(--gold)' }}>Pro · $20/mo</div>
+              <div className="px-6 py-4 text-center" style={{ color: 'var(--gold)' }}>Pro · $100/mo</div>
+              <div className="px-6 py-4 text-center" style={{ color: 'var(--text-bright)' }}>Max · $299/mo</div>
             </div>
 
             {[
-              { label: 'Research projects',        free: '1',         pro: 'Unlimited' },
-              { label: 'Literature search',        free: '10 papers', pro: 'Unlimited' },
-              { label: 'Per-paper AI summaries',   free: true,        pro: true },
-              { label: 'Evidence synthesis',       free: false,       pro: true },
-              { label: 'Journal-aware drafting',   free: false,       pro: '50+ journals' },
-              { label: 'Article types',            free: '1 (basic)', pro: '12 types' },
-              { label: 'AI peer review',           free: false,       pro: true },
-              { label: 'Revision pipeline',        free: false,       pro: true },
-              { label: 'Track-changes .docx',      free: false,       pro: true },
-              { label: 'Response letter export',   free: false,       pro: true },
-              { label: 'BibTeX export',            free: true,        pro: true },
-              { label: 'Priority AI processing',   free: false,       pro: true },
+              { label: 'Research projects',        free: '1',         pro: '3 / month',     max: '10 / month' },
+              { label: 'Literature search',        free: '10 papers', pro: 'Unlimited',     max: 'Unlimited' },
+              { label: 'Per-paper AI summaries',   free: true,        pro: true,            max: true },
+              { label: 'Evidence synthesis',       free: false,       pro: true,            max: true },
+              { label: 'Journal-aware drafting',   free: false,       pro: '50+ journals',  max: '50+ journals' },
+              { label: 'Article types',            free: '1 (basic)', pro: '12 types',      max: '12 types' },
+              { label: 'AI peer review',           free: false,       pro: true,            max: true },
+              { label: 'Revision pipeline',        free: false,       pro: true,            max: true },
+              { label: 'Track-changes .docx',      free: false,       pro: false,           max: true },
+              { label: 'Response letter export',   free: false,       pro: true,            max: true },
+              { label: 'BibTeX export',            free: true,        pro: true,            max: true },
+              { label: 'Priority AI processing',   free: false,       pro: false,           max: true },
             ].map((row, i) => (
               <div
                 key={row.label}
-                className="grid grid-cols-3 text-sm border-t"
+                className="grid grid-cols-4 text-sm border-t"
                 style={{ borderColor: 'var(--border-faint)', background: i % 2 === 0 ? 'var(--bg-surface)' : 'var(--bg-base)' }}
               >
                 <div className="px-6 py-3.5" style={{ color: 'var(--text-body)' }}>{row.label}</div>
@@ -314,6 +381,15 @@ export default function PricingPage({ themePref, setThemePref }: Props) {
                       : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--text-faint)' }}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                   ) : (
                     <span className="font-medium" style={{ color: 'var(--gold)', ...mono, fontSize: 11 }}>{row.pro}</span>
+                  )}
+                </div>
+                <div className="px-6 py-3.5 flex items-center justify-center">
+                  {typeof row.max === 'boolean' ? (
+                    row.max
+                      ? <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--gold)' }}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                      : <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: 'var(--text-faint)' }}><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  ) : (
+                    <span className="font-medium" style={{ color: 'var(--text-bright)', ...mono, fontSize: 11 }}>{row.max}</span>
                   )}
                 </div>
               </div>

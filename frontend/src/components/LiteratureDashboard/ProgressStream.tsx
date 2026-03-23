@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { FRAMEWORK_DISPLAY_NAMES, getElementLabel } from '../../utils/frameworkLabels';
 
 const SOURCE_LABELS: Record<string, string> = {
   pubmed:           'PubMed',
@@ -20,13 +21,17 @@ interface Props {
   isDeduplicating: boolean;
   rankingInfo: { candidates: number; selected: number; requested: number } | null;
   isEnriching: boolean;
+  isStreaming: boolean;
   isComplete: boolean;
   // AI query expansion data
   expandedQueries?: string[];
   pubmedQueries?: string[];
   meshTerms?: string[];
   booleanQuery?: string;
-  pico?: Record<string, string>;
+  frameworkUsed?: string;
+  frameworkJustification?: string;
+  frameworkElements?: Record<string, string | string[]>;
+  pico?: Record<string, string> | null;
   studyTypeFilters?: string[];
   aiRationale?: string;
   facets?: Record<string, { mesh: string[]; freetext: string[] }>;
@@ -59,49 +64,59 @@ function StatusIcon({ state }: { state: 'pending' | 'active' | 'done' | 'error' 
   return <div className="w-5 h-5 rounded-full bg-slate-100 flex-shrink-0" />;
 }
 
-const PICO_LABELS: Record<string, string> = {
-  population:   'Population',
-  intervention: 'Intervention',
-  comparator:   'Comparator',
-  outcome:      'Outcome',
-};
-
-const FACET_LABELS: Record<string, string> = {
-  population:   'Population',
-  intervention: 'Intervention',
-  comparator:   'Comparator',
-  outcome:      'Outcome',
-};
-
 export default function ProgressStream({
   sourceProgress, sourcesDone, sourcesError,
-  isDeduplicating, rankingInfo, isEnriching, isComplete,
+  isDeduplicating, rankingInfo, isEnriching, isStreaming, isComplete,
   expandedQueries, pubmedQueries, meshTerms, booleanQuery,
+  frameworkUsed, frameworkJustification, frameworkElements,
   pico, studyTypeFilters, aiRationale, facets, strategyNotes,
 }: Props) {
   const [showDetails, setShowDetails] = useState(false);
   const hasExpansion = expandedQueries && expandedQueries.length > 0;
-  const hasPico = pico && Object.values(pico).some(v => v && v !== 'Not specified');
+
+  // Use framework_elements as primary, fall back to pico for backward compat
+  const effectiveElements = frameworkElements ?? pico ?? {};
+  const hasElements = Object.values(effectiveElements).some(v => {
+    if (Array.isArray(v)) return v.length > 0;
+    return v && v !== 'Not specified' && v !== 'Not applicable';
+  });
   const hasFacets = facets && Object.keys(facets).length > 0;
   const hasNotes = strategyNotes && strategyNotes.length > 0;
+  const fw = frameworkUsed || '';
+  const fwDisplayName = FRAMEWORK_DISPLAY_NAMES[fw] || fw;
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+    <div className="rounded-2xl p-5 space-y-4"
+      style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-faint)' }}>
 
       {/* ── AI Search Strategy ─────────────────────────────────────────────── */}
       {hasExpansion && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-brand-600">
-              AI Search Strategy
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-brand-600">
+                AI Search Strategy
+              </p>
+              {fw && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 font-semibold">
+                  {fwDisplayName}
+                </span>
+              )}
+            </div>
             <button
               onClick={() => setShowDetails(v => !v)}
               className="text-xs text-slate-400 hover:text-slate-600 transition-colors"
             >
-              {showDetails ? 'less ▲' : 'more ▼'}
+              {showDetails ? 'less \u25B2' : 'more \u25BC'}
             </button>
           </div>
+
+          {/* Framework justification */}
+          {frameworkJustification && (
+            <p className="text-xs text-slate-500 italic mb-2">
+              {frameworkJustification}
+            </p>
+          )}
 
           {/* General queries */}
           <div className="space-y-1 mb-3">
@@ -133,7 +148,7 @@ export default function ProgressStream({
                   <div className="space-y-1">
                     {strategyNotes!.map((note, i) => (
                       <div key={i} className="flex items-start gap-1.5 text-xs text-amber-800 bg-amber-50 rounded px-2.5 py-1.5 leading-snug">
-                        <span className="flex-shrink-0 mt-0.5">⚠</span>
+                        <span className="flex-shrink-0 mt-0.5">{'\u26A0'}</span>
                         <span>{note}</span>
                       </div>
                     ))}
@@ -141,18 +156,18 @@ export default function ProgressStream({
                 </div>
               )}
 
-              {/* Facets (PICO concept blocks) */}
+              {/* Facets (framework-specific concept blocks) */}
               {hasFacets && (
                 <div>
                   <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                    Search Facets (PICO Concept Blocks)
+                    Search Facets{fw ? ` (${fwDisplayName} Concept Blocks)` : ''}
                   </p>
                   <div className="space-y-2">
-                    {Object.entries(FACET_LABELS).map(([key, label]) => {
-                      const facet = facets![key];
+                    {Object.entries(facets!).map(([key, facet]) => {
                       if (!facet) return null;
                       const hasContent = (facet.mesh?.length ?? 0) + (facet.freetext?.length ?? 0) > 0;
                       if (!hasContent) return null;
+                      const label = getElementLabel(fw, key);
                       return (
                         <div key={key} className="rounded-lg border border-slate-100 overflow-hidden">
                           <div className="bg-slate-50 px-3 py-1.5">
@@ -185,20 +200,22 @@ export default function ProgressStream({
                 </div>
               )}
 
-              {/* PICO */}
-              {hasPico && (
+              {/* Framework Elements (dynamic — replaces hardcoded PICO display) */}
+              {hasElements && (
                 <div>
                   <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                    PICO Framework
+                    {fwDisplayName || 'Framework'} Elements
                   </p>
                   <div className="rounded-lg border border-slate-100 overflow-hidden divide-y divide-slate-100">
-                    {Object.entries(PICO_LABELS).map(([key, label]) => {
-                      const val = pico![key];
-                      if (!val || val === 'Not specified') return null;
+                    {Object.entries(effectiveElements).map(([key, val]) => {
+                      if (!val || val === 'Not specified' || val === 'Not applicable') return null;
+                      if (Array.isArray(val) && val.length === 0) return null;
+                      const label = getElementLabel(fw, key);
+                      const displayVal = Array.isArray(val) ? val.join(', ') : String(val);
                       return (
-                        <div key={key} className="grid grid-cols-[90px_1fr] gap-2 px-3 py-1.5">
+                        <div key={key} className="grid grid-cols-[120px_1fr] gap-2 px-3 py-1.5">
                           <span className="text-xs font-semibold text-slate-400">{label}</span>
-                          <span className="text-xs text-slate-700">{val}</span>
+                          <span className="text-xs text-slate-700">{displayVal}</span>
                         </div>
                       );
                     })}
@@ -272,14 +289,15 @@ export default function ProgressStream({
 
       {/* ── Per-source progress ────────────────────────────────────────────── */}
       <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">
+        <p className="text-xs font-bold uppercase tracking-widest mb-3"
+          style={{ color: 'var(--text-muted)', fontFamily: 'Manrope, sans-serif' }}>
           Database Search Progress
         </p>
         <div className="space-y-2">
           {SOURCES.map((src) => {
-            const done   = sourcesDone.has(src);
             const error  = src in sourcesError;
-            const active = !done && !error;
+            const done   = !error && (isComplete || sourcesDone.has(src));
+            const active = isStreaming && !done && !error;
             const count  = sourceProgress[src] ?? 0;
             const state  = error ? 'error' : done ? 'done' : active ? 'active' : 'pending';
             const isNcbi = src === 'pubmed' || src === 'pmc';
@@ -287,14 +305,15 @@ export default function ProgressStream({
             return (
               <div key={src} className="flex items-center gap-3">
                 <StatusIcon state={state} />
-                <span className={`text-sm flex-1 ${done ? 'text-slate-700' : 'text-slate-400'}`}>
+                <span className="text-sm flex-1"
+                  style={{ color: done || error ? 'var(--text-body)' : 'var(--text-muted)' }}>
                   {SOURCE_LABELS[src]}
                   {isNcbi && pubmedQueries && pubmedQueries.length > 0 && done && (
                     <span className="ml-1 text-xs text-teal-600">MeSH</span>
                   )}
                 </span>
                 {count > 0 && (
-                  <span className="text-xs font-medium text-slate-500 tabular-nums">
+                  <span className="text-xs font-medium tabular-nums" style={{ color: 'var(--text-muted)' }}>
                     {count.toLocaleString()} candidates
                   </span>
                 )}
@@ -308,43 +327,47 @@ export default function ProgressStream({
       </div>
 
       {/* ── Post-processing steps ──────────────────────────────────────────── */}
-      <div className="pt-3 border-t border-slate-100 space-y-2">
+      <div className="pt-3 space-y-2" style={{ borderTop: '1px solid var(--border-faint)' }}>
 
         <div className="flex items-center gap-3">
           <StatusIcon state={
             isComplete || rankingInfo ? 'done'
-            : isDeduplicating ? 'active' : 'pending'
+            : isStreaming && isDeduplicating ? 'active' : 'pending'
           } />
-          <span className={`text-sm flex-1 ${isDeduplicating || rankingInfo || isComplete ? 'text-slate-700' : 'text-slate-400'}`}>
+          <span className="text-sm flex-1"
+            style={{ color: rankingInfo || isComplete || (isStreaming && isDeduplicating) ? 'var(--text-body)' : 'var(--text-muted)' }}>
             Deduplicating results
           </span>
         </div>
 
         <div className="flex items-center gap-3">
           <StatusIcon state={
-            isComplete || isEnriching ? 'done'
-            : rankingInfo ? 'active' : 'pending'
+            isComplete || isEnriching || (!isStreaming && !!rankingInfo) ? 'done'
+            : isStreaming && !!rankingInfo ? 'active' : 'pending'
           } />
-          <span className={`text-sm flex-1 ${rankingInfo || isEnriching || isComplete ? 'text-slate-700' : 'text-slate-400'}`}>
+          <span className="text-sm flex-1"
+            style={{ color: rankingInfo || isEnriching || isComplete ? 'var(--text-body)' : 'var(--text-muted)' }}>
             Ranking — best by citations &amp; recency
           </span>
           {rankingInfo && (
-            <span className="text-xs font-medium text-indigo-600 tabular-nums whitespace-nowrap">
+            <span className="text-xs font-medium tabular-nums whitespace-nowrap" style={{ color: 'var(--gold)' }}>
               {rankingInfo.selected} / {rankingInfo.candidates} selected
             </span>
           )}
         </div>
 
         <div className="flex items-center gap-3">
-          <StatusIcon state={isComplete ? 'done' : isEnriching ? 'active' : 'pending'} />
-          <span className={`text-sm flex-1 ${isEnriching || isComplete ? 'text-slate-700' : 'text-slate-400'}`}>
+          <StatusIcon state={isComplete ? 'done' : isStreaming && isEnriching ? 'active' : 'pending'} />
+          <span className="text-sm flex-1"
+            style={{ color: isComplete || (isStreaming && isEnriching) ? 'var(--text-body)' : 'var(--text-muted)' }}>
             Enriching with Unpaywall OA
           </span>
         </div>
 
         <div className="flex items-center gap-3">
           <StatusIcon state={isComplete ? 'done' : 'pending'} />
-          <span className={`text-sm font-medium ${isComplete ? 'text-slate-700' : 'text-slate-400'}`}>
+          <span className="text-sm font-medium"
+            style={{ color: isComplete ? 'var(--text-body)' : 'var(--text-muted)' }}>
             Complete
           </span>
         </div>

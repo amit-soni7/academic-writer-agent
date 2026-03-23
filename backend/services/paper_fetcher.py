@@ -26,18 +26,30 @@ from models import Paper
 from services.pdf_extractor import extract_text_from_url
 
 
+_DEFAULT_SCIHUB_MIRRORS = ["https://sci-hub.su", "https://www.sci-hub.ren"]
+
+
 @dataclass
 class FetchSettings:
     """User preferences for full-text fetching and PDF persistence."""
     pdf_save_enabled: bool = False
-    pdf_save_path: Optional[str] = None   # legacy; use project_folder when set
-    project_folder: Optional[str] = None  # preferred: saves into project dir
+    pdf_save_path: Optional[str] = None   # legacy fallback when no project folder is available
+    project_folder: Optional[str] = None  # canonical project artifact root
     sci_hub_enabled: bool = False
     http_proxy: Optional[str] = None
+    scihub_mirrors: list = field(default_factory=lambda: list(_DEFAULT_SCIHUB_MIRRORS))
 
 def _effective_save_path(fs: "FetchSettings") -> Optional[str]:
-    """Return the effective PDF save path: project_folder takes priority over pdf_save_path."""
-    return fs.project_folder or fs.pdf_save_path
+    """Return the effective PDF save path.
+
+    Project-bound work always saves to project_folder/full_papers.
+    pdf_save_path is retained only as a legacy fallback when no project folder exists.
+    """
+    if fs.project_folder:
+        return os.path.join(fs.project_folder, "full_papers")
+    if fs.pdf_save_path:
+        return fs.pdf_save_path
+    return None
 
 
 logger = logging.getLogger(__name__)
@@ -45,9 +57,13 @@ logger = logging.getLogger(__name__)
 NCBI_BASE    = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 PMC_HTML_BASE = "https://pmc.ncbi.nlm.nih.gov/articles"
 NCBI_IDCONV  = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
+UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
+UNPAYWALL_EMAIL = "academic-writer@localhost.dev"   # polite pool email
 TIMEOUT      = httpx.Timeout(45.0, connect=10.0)
 HEADERS      = {"User-Agent": "AcademicWriterAgent/0.2 (academic-writer-agent@localhost.dev)"}
 MAX_CHARS    = 32_000   # ~8 000 words — enough for summarisation, fits any LLM context
+_ELLIPSIS_MARKER = "\n\n[… section-balanced truncation for summarisation …]"
+_OMIT_MARKER = "\n\n[… intermediate sections omitted …]\n\n"
 
 
 async def fetch_full_text(
@@ -77,7 +93,10 @@ async def fetch_full_text(
         text = await _fetch_pmc_xml_text(paper.pmcid)
         if text:
             if fs.pdf_save_enabled and _save_path:
-                await _maybe_save_pmc_pdf(paper.pmcid, _save_path, paper)
+                saved = await _maybe_save_pmc_pdf(paper.pmcid, _save_path, paper)
+                if not saved:
+                    # PMC PDF unavailable — save the extracted text instead
+                    _save_text_to_disk(text, _save_path, paper)
             logger.debug("Full text via PMC XML: %s", paper.pmcid)
             return _truncate(text), "pmc_xml"
 
@@ -93,13 +112,17 @@ async def fetch_full_text(
             text = await _fetch_pmc_xml_text(resolved_pmcid)
             if text:
                 if fs.pdf_save_enabled and _save_path:
-                    await _maybe_save_pmc_pdf(resolved_pmcid, _save_path, paper)
+                    saved = await _maybe_save_pmc_pdf(resolved_pmcid, _save_path, paper)
+                    if not saved:
+                        _save_text_to_disk(text, _save_path, paper)
                 return _truncate(text), "pmc_xml"
             # No XML body — try HTML for this resolved PMCID
             text = await _fetch_pmc_html_text(resolved_pmcid)
             if text:
                 if fs.pdf_save_enabled and _save_path:
-                    await _maybe_save_pmc_pdf(resolved_pmcid, _save_path, paper)
+                    saved = await _maybe_save_pmc_pdf(resolved_pmcid, _save_path, paper)
+                    if not saved:
+                        _save_text_to_disk(text, _save_path, paper)
                 return _truncate(text), "full_html"
 
     # 2. OA URL (PDF or HTML) — from Unpaywall / OpenAlex / Semantic Scholar
@@ -108,18 +131,37 @@ async def fetch_full_text(
         pdf_bytes, text = await _fetch_url_with_bytes(paper.oa_pdf_url)
         if text:
             logger.debug("Full text via OA URL (%d chars): %s", len(text), paper.oa_pdf_url)
-            if pdf_bytes and fs.pdf_save_enabled and _save_path:
-                _save_pdf_to_disk(pdf_bytes, _save_path, paper)
+            if fs.pdf_save_enabled and _save_path:
+                if pdf_bytes:
+                    _save_pdf_to_disk(pdf_bytes, _save_path, paper)
+                else:
+                    # HTML content — save as text file
+                    _save_text_to_disk(text, _save_path, paper)
             return _truncate(text), "full_pdf"
         else:
             logger.debug("OA URL returned no usable text: %s", paper.oa_pdf_url)
+
+    # 2b. Unpaywall live query — catches papers where oa_pdf_url was missing/stale.
+    #     Queries Unpaywall's API and tries every url_for_pdf across all OA locations.
+    if paper.doi:
+        pdf_bytes, text = await _fetch_unpaywall_pdf(paper.doi)
+        if text:
+            logger.debug("Full text via Unpaywall (%d chars): DOI %s", len(text), paper.doi)
+            if fs.pdf_save_enabled and _save_path:
+                if pdf_bytes:
+                    _save_pdf_to_disk(pdf_bytes, _save_path, paper)
+                else:
+                    _save_text_to_disk(text, _save_path, paper)
+            return _truncate(text), "full_pdf"
 
     # 3. PMC HTML page — fallback when the JATS XML has no <body>.
     if paper.pmcid:
         text = await _fetch_pmc_html_text(paper.pmcid)
         if text:
             if fs.pdf_save_enabled and _save_path:
-                await _maybe_save_pmc_pdf(paper.pmcid, _save_path, paper)
+                saved = await _maybe_save_pmc_pdf(paper.pmcid, _save_path, paper)
+                if not saved:
+                    _save_text_to_disk(text, _save_path, paper)
             logger.debug("Full text via PMC HTML page: %s", paper.pmcid)
             return _truncate(text), "full_html"
 
@@ -137,7 +179,7 @@ async def fetch_full_text(
         try:
             from services.scihub_fetcher import fetch_pdf_via_scihub
             from services.pdf_extractor import _bytes_to_text as _b2t
-            pdf_bytes = await fetch_pdf_via_scihub(paper.doi, proxy=fs.http_proxy)
+            pdf_bytes = await fetch_pdf_via_scihub(paper.doi, proxy=fs.http_proxy, mirrors=fs.scihub_mirrors or None)
             if pdf_bytes:
                 text = _b2t(pdf_bytes, max_pages=30)
                 if text:
@@ -151,6 +193,8 @@ async def fetch_full_text(
     # 6. Abstract fallback
     if paper.abstract:
         logger.debug("Falling back to abstract for: %s", paper.title[:60])
+        if fs.pdf_save_enabled and _save_path:
+            _save_text_to_disk(paper.abstract.strip(), _save_path, paper)
         return paper.abstract.strip(), "abstract_only"
 
     return "", "none"
@@ -165,6 +209,24 @@ def _sanitize(s: str, max_len: int = 30) -> str:
     return s[:max_len]
 
 
+def _pdf_filename(paper: Paper) -> str:
+    """Return the deterministic filename used for saved full-text PDFs."""
+    first_author = _sanitize(paper.authors[0].split(",")[0] if paper.authors else "Unknown", 20)
+    year = str(paper.year or "XXXX")
+    journal = _sanitize(paper.journal or "Unknown", 20)
+    title_words = _sanitize(" ".join(paper.title.split()[:6]), 40)
+    return f"{first_author}_{year}_{journal}_{title_words}.pdf"
+
+
+def saved_pdf_path_for_paper(paper: Paper, fetch_settings: Optional[FetchSettings] = None) -> Optional[str]:
+    """Return the expected saved PDF path for this paper, if a save directory exists."""
+    fs = fetch_settings or FetchSettings()
+    save_path = _effective_save_path(fs)
+    if not save_path:
+        return None
+    return os.path.join(save_path, _pdf_filename(paper))
+
+
 def _save_pdf_to_disk(pdf_bytes: bytes, save_path: str, paper: Paper) -> Optional[str]:
     """
     Save *pdf_bytes* to *save_path* with a descriptive filename.
@@ -174,11 +236,7 @@ def _save_pdf_to_disk(pdf_bytes: bytes, save_path: str, paper: Paper) -> Optiona
     """
     try:
         os.makedirs(save_path, exist_ok=True)
-        first_author = _sanitize(paper.authors[0].split(",")[0] if paper.authors else "Unknown", 20)
-        year = str(paper.year or "XXXX")
-        journal = _sanitize(paper.journal or "Unknown", 20)
-        title_words = _sanitize(" ".join(paper.title.split()[:6]), 40)
-        filename = f"{first_author}_{year}_{journal}_{title_words}.pdf"
+        filename = _pdf_filename(paper)
         filepath = os.path.join(save_path, filename)
         with open(filepath, "wb") as f:
             f.write(pdf_bytes)
@@ -186,6 +244,39 @@ def _save_pdf_to_disk(pdf_bytes: bytes, save_path: str, paper: Paper) -> Optiona
         return filepath
     except Exception as exc:
         logger.warning("Failed to save PDF for %r: %s", paper.title[:40], exc)
+        return None
+
+
+def _txt_filename(paper: Paper) -> str:
+    """Return the deterministic filename used for saved text/abstract files."""
+    first_author = _sanitize(paper.authors[0].split(",")[0] if paper.authors else "Unknown", 20)
+    year = str(paper.year or "XXXX")
+    journal = _sanitize(paper.journal or "Unknown", 20)
+    title_words = _sanitize(" ".join(paper.title.split()[:6]), 40)
+    return f"{first_author}_{year}_{journal}_{title_words}.txt"
+
+
+def _save_text_to_disk(text: str, save_path: str, paper: Paper) -> Optional[str]:
+    """
+    Save *text* as a UTF-8 .txt file when no PDF is available.
+
+    Used as a fallback for abstract-only papers and PMC articles where the PDF
+    is restricted, so that file count in full_papers/ matches summary count.
+    Skips silently if the file already exists.
+    Returns the saved file path or None on error.
+    """
+    try:
+        os.makedirs(save_path, exist_ok=True)
+        filename = _txt_filename(paper)
+        filepath = os.path.join(save_path, filename)
+        if os.path.exists(filepath):
+            return filepath
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.debug("Text saved: %s", filepath)
+        return filepath
+    except Exception as exc:
+        logger.warning("Failed to save text for %r: %s", paper.title[:40], exc)
         return None
 
 
@@ -197,6 +288,80 @@ async def _maybe_save_pmc_pdf(pmcid: str, save_path: str, paper: Paper) -> Optio
             return _save_pdf_to_disk(pdf_bytes, save_path, paper)
     except Exception as exc:
         logger.debug("PMC PDF save skipped for %s: %s", pmcid, exc)
+    return None
+
+
+async def ensure_saved_pdf(
+    paper: Paper,
+    fetch_settings: Optional[FetchSettings] = None,
+) -> Optional[str]:
+    """
+    Return a readable PDF path for *paper*, downloading/saving it when possible.
+
+    If a saved file already exists it is reused. Otherwise the fetcher tries the same
+    PDF-capable channels used during summarisation and saves the bytes to disk.
+    """
+    fs = fetch_settings or FetchSettings()
+    save_path = _effective_save_path(fs)
+    if not save_path:
+        return None
+
+    expected_path = saved_pdf_path_for_paper(paper, fs)
+    if expected_path and os.path.exists(expected_path):
+        return expected_path
+
+    if paper.pmcid:
+        saved = await _maybe_save_pmc_pdf(paper.pmcid, save_path, paper)
+        if saved and os.path.exists(saved):
+            return saved
+
+    if paper.doi:
+        resolved_pmcid = await _lookup_pmcid_from_doi(paper.doi)
+        if resolved_pmcid and resolved_pmcid != paper.pmcid:
+            saved = await _maybe_save_pmc_pdf(resolved_pmcid, save_path, paper)
+            if saved and os.path.exists(saved):
+                return saved
+
+    if paper.oa_pdf_url:
+        pdf_bytes, _text = await _fetch_url_with_bytes(paper.oa_pdf_url)
+        if pdf_bytes:
+            saved = _save_pdf_to_disk(pdf_bytes, save_path, paper)
+            if saved and os.path.exists(saved):
+                return saved
+
+    # Unpaywall live query — tries all OA pdf locations
+    if paper.doi:
+        pdf_bytes, text = await _fetch_unpaywall_pdf(paper.doi)
+        if pdf_bytes:
+            saved = _save_pdf_to_disk(pdf_bytes, save_path, paper)
+            if saved and os.path.exists(saved):
+                return saved
+        elif text:
+            saved = _save_text_to_disk(text, save_path, paper)
+            if saved and os.path.exists(saved):
+                return saved
+
+    if paper.doi:
+        pdf_bytes, _text = await _fetch_via_doi_with_bytes(paper.doi)
+        if pdf_bytes:
+            saved = _save_pdf_to_disk(pdf_bytes, save_path, paper)
+            if saved and os.path.exists(saved):
+                return saved
+
+    if fs.sci_hub_enabled and paper.doi:
+        try:
+            from services.scihub_fetcher import fetch_pdf_via_scihub
+
+            pdf_bytes = await fetch_pdf_via_scihub(paper.doi, proxy=fs.http_proxy, mirrors=fs.scihub_mirrors or None)
+            if pdf_bytes:
+                saved = _save_pdf_to_disk(pdf_bytes, save_path, paper)
+                if saved and os.path.exists(saved):
+                    return saved
+        except Exception as exc:
+            logger.debug("Sci-Hub PDF save failed for %s: %s", paper.doi, exc)
+
+    if expected_path and os.path.exists(expected_path):
+        return expected_path
     return None
 
 
@@ -267,6 +432,51 @@ async def _lookup_pmcid_from_doi(doi: str) -> Optional[str]:
     except Exception as exc:
         logger.debug("PMCID lookup failed for DOI %s: %s", doi, exc)
     return None
+
+
+# ── Unpaywall ─────────────────────────────────────────────────────────────────
+
+async def _fetch_unpaywall_pdf(doi: str) -> tuple[Optional[bytes], Optional[str]]:
+    """
+    Query Unpaywall for all open-access PDF locations and try each in order.
+
+    Returns (pdf_bytes_or_None, text_or_None).  Tries every url_for_pdf across
+    all oa_locations (not just best_oa_location) to maximise hit rate.
+    """
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=httpx.Timeout(12.0, connect=6.0)) as client:
+            r = await client.get(f"{UNPAYWALL_BASE}/{doi}", params={"email": UNPAYWALL_EMAIL})
+            if r.status_code != 200:
+                return None, None
+            data = r.json()
+            if not data.get("is_oa"):
+                return None, None
+
+            # Collect all url_for_pdf values across all OA locations, deduped
+            pdf_urls: list[str] = []
+            seen: set[str] = set()
+            for loc in data.get("oa_locations", []):
+                url = loc.get("url_for_pdf")
+                if url and url not in seen:
+                    pdf_urls.append(url)
+                    seen.add(url)
+
+            if not pdf_urls:
+                return None, None
+
+            # Try each URL until we get a real PDF
+            for pdf_url in pdf_urls:
+                try:
+                    bytes_, text = await _fetch_url_with_bytes(pdf_url)
+                    if text:
+                        logger.debug("Unpaywall PDF fetched from %s", pdf_url)
+                        return bytes_, text
+                except Exception:
+                    continue
+
+    except Exception as exc:
+        logger.debug("Unpaywall query failed for DOI %s: %s", doi, exc)
+    return None, None
 
 
 # ── PMC XML ───────────────────────────────────────────────────────────────────
@@ -504,4 +714,58 @@ async def _fetch_via_doi(doi: str) -> Optional[str]:
 def _truncate(text: str) -> str:
     if len(text) <= MAX_CHARS:
         return text
-    return text[:MAX_CHARS] + "\n\n[… text truncated for summarisation …]"
+
+    budget = MAX_CHARS - len(_ELLIPSIS_MARKER) - (2 * len(_OMIT_MARKER))
+    if budget <= 0:
+        return text[: MAX_CHARS - len(_ELLIPSIS_MARKER)] + _ELLIPSIS_MARKER
+
+    lower = text.lower()
+
+    def _find_anchor(candidates: list[str]) -> int:
+        for candidate in candidates:
+            patterns = (
+                f"\n{candidate}\n",
+                f"\n{candidate}\r\n",
+                f"\n{candidate} ",
+                f"{candidate}\n",
+                candidate,
+            )
+            for pattern in patterns:
+                idx = lower.find(pattern)
+                if idx != -1:
+                    return idx
+        return -1
+
+    def _window_around(anchor: int, size: int) -> tuple[int, int]:
+        anchor = max(0, min(anchor, len(text) - 1))
+        start = max(0, anchor - size // 5)
+        end = start + size
+        if end > len(text):
+            end = len(text)
+            start = max(0, end - size)
+        return start, end
+
+    head_budget = int(budget * 0.34)
+    middle_budget = int(budget * 0.28)
+    tail_budget = budget - head_budget - middle_budget
+
+    results_anchor = _find_anchor(["results", "findings"])
+    tail_anchor = _find_anchor(["discussion", "conclusion", "limitations"])
+
+    windows = [
+        (0, head_budget),
+        _window_around(results_anchor if results_anchor != -1 else len(text) // 2, middle_budget),
+        _window_around(tail_anchor if tail_anchor != -1 else max(0, len(text) - tail_budget), tail_budget),
+    ]
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(windows):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
+    parts = [text[start:end].strip() for start, end in merged if text[start:end].strip()]
+    if len(parts) == 1:
+        return parts[0][: MAX_CHARS - len(_ELLIPSIS_MARKER)] + _ELLIPSIS_MARKER
+    return _OMIT_MARKER.join(parts)[: MAX_CHARS - len(_ELLIPSIS_MARKER)] + _ELLIPSIS_MARKER

@@ -2,7 +2,7 @@
 gemini_oauth.py
 
 Full Gemini OAuth 2.0 lifecycle management:
-- Building the Google authorization URL (with generative-language scope)
+- Building the Google authorization URL (with Gemini OAuth scope)
 - Exchanging authorization codes for access + refresh tokens
 - Refreshing expired access tokens automatically
 - Storing / loading encrypted token JSON per user in DB
@@ -41,7 +41,9 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 REDIRECT_URI     = os.getenv("GEMINI_OAUTH_REDIRECT_URI",  "http://localhost:8010/api/auth/gemini/callback")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL",          "http://localhost:5173")
 
-GEMINI_SCOPES    = ["https://www.googleapis.com/auth/generative-language"]
+# Google’s current Gemini OAuth quickstart uses the retriever scope for
+# end-user OAuth flows managed directly in the app.
+GEMINI_SCOPES    = ["https://www.googleapis.com/auth/generative-language.retriever"]
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 
@@ -52,7 +54,7 @@ _EXPIRY_BUFFER_SECS = 300
 # ── Authorization URL ─────────────────────────────────────────────────────────
 
 def build_gemini_auth_url(state: str) -> str:
-    """Return the Google OAuth consent-screen URL with Gemini scope."""
+    """Return the Google OAuth consent-screen URL with Gemini OAuth scopes."""
     params = {
         "client_id":     GOOGLE_CLIENT_ID,
         "redirect_uri":  REDIRECT_URI,
@@ -208,7 +210,6 @@ async def revoke_gemini_oauth(user_id: str) -> None:
     gemini_profile = profiles.get("gemini")
     if isinstance(gemini_profile, dict):
         gemini_profile["oauth_connected"] = False
-        gemini_profile["auth_method"] = "api_key"
     else:
         gemini_profile = {"oauth_connected": False, "auth_method": "api_key"}
     profiles["gemini"] = gemini_profile

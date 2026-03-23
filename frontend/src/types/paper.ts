@@ -89,6 +89,9 @@ export interface ImportManuscriptResult {
   sections_found: string[];
   references_found: number;
   manuscript_summary: string;
+  prepared_docx?: boolean;
+  reference_pdf_ready?: boolean;
+  reference_pdf_warning?: string;
 }
 
 // Backward-compat alias
@@ -255,13 +258,20 @@ export interface ExtractionCriticalAppraisal {
   external_validity: string;
   methodological_strengths: string[];
   reproducibility_signals: string[];
-  evidence_grade: 'High' | 'Moderate' | 'Low' | 'Very Low';
+  evidence_grade: 'High' | 'Moderate' | 'Low' | 'Very Low' | 'NR';
   evidence_grade_justification: string;
 }
 
 export interface ConfidenceScore {
   overall: number;
   notes: string;
+}
+
+export interface WritingEvidenceMeta {
+  selected_count: number;
+  max_count: number;
+  dominant_sections: string[];
+  limiting_factors: string[];
 }
 
 // ── Cross-Reference Extraction Types ──────────────────────────────────────────
@@ -288,6 +298,44 @@ export interface DiscussionInsight {
   text: string;
   verbatim_quote: string;
   cited_ref_ids: string[];
+}
+
+export type CitationPurpose =
+  | 'background'
+  | 'theory'
+  | 'identify_gap'
+  | 'justify_study'
+  | 'methodology'
+  | 'original_source'
+  | 'compare_findings'
+  | 'empirical_support'
+  | 'prevalence_epidemiology'
+  | 'support_claim'
+  | 'limitation_acknowledged'
+  | 'definition_terminology'
+  | 'clinical_guideline'
+  | 'population_context'
+  | 'measurement_validation'
+  | 'future_direction';
+
+export interface SentenceCitation {
+  section: 'background' | 'methods' | 'results' | 'discussion' | 'conclusion';
+  text: string;
+  verbatim_quote: string;
+  claim_type: 'reported_fact' | 'author_interpretation' | 'inference';
+  stats: string;
+  importance: 'high' | 'medium';
+  use_in: 'introduction' | 'methods' | 'results' | 'discussion';
+  source_kind: 'paper_text' | 'cited_reference_claim';
+  cited_ref_ids: string[];
+  // Citation purpose fields
+  primary_purpose?: CitationPurpose | '';
+  secondary_purposes?: CitationPurpose[];
+  compare_sentiment?: 'consistent' | 'contradicts' | null;
+  evidence_type?: string | null;
+  is_seminal?: boolean;
+  recency_score?: number | null;
+  relevance_score?: number | null;
 }
 
 // ── Cross-paper Synthesis Types ────────────────────────────────────────────────
@@ -332,6 +380,113 @@ export interface SynthesisResult {
   contradictions: Contradiction[];
   gaps: string[];
   fact_bank: FactBankEntry[];
+  manuscript_packs?: ManuscriptPack | null;
+}
+
+// ── Manuscript Packs ──────────────────────────────────────────────────────────
+
+export interface ThemeCluster {
+  theme_label: string;
+  paper_keys: string[];
+  sentences: Record<string, unknown>[];
+  evidence_claims: Record<string, unknown>[];
+  contradictions: Record<string, unknown>[];
+  gaps: string[];
+}
+
+export interface SectionPack {
+  section_name: string;
+  theme_clusters: ThemeCluster[];
+  narrative_arc: string;
+  key_citations: string[];
+}
+
+export interface ManuscriptPack {
+  section_packs: Record<string, SectionPack>;
+  central_argument: string;
+  evidence_strength_summary: string;
+}
+
+// ── Deep Synthesis Types ──────────────────────────────────────────────────────
+
+export interface NormalizedClaim {
+  claim_id: string;
+  canonical_text: string;
+  source_paper_keys: string[];
+  population: string;
+  outcome: string;
+  effect_direction: 'positive' | 'negative' | 'null' | 'mixed';
+  effect_magnitude: string;
+  evidence_grade: string;
+  verbatim_quotes: string[];
+}
+
+export interface ContradictionDetail {
+  dimension: 'population' | 'method' | 'measurement' | 'timeframe' | 'context';
+  description: string;
+  papers_a: string[];
+  papers_b: string[];
+  resolution_hypothesis: string;
+}
+
+export interface ClaimCluster {
+  cluster_id: string;
+  cluster_label: string;
+  claims: NormalizedClaim[];
+  synthesis_statement: string;
+  overall_direction: 'consistent' | 'mixed' | 'contradictory';
+  strength: number;
+  contradiction_details: ContradictionDetail[];
+}
+
+export interface TheoryReference {
+  theory_name: string;
+  seminal_paper_keys: string[];
+  applying_paper_keys: string[];
+  support_level: 'strong' | 'moderate' | 'weak' | 'mixed';
+  description: string;
+}
+
+export interface AutoFetchResult {
+  thin_claims_detected: number;
+  queries_generated: string[];
+  papers_found: number;
+  papers_summarized: number;
+  new_paper_keys: string[];
+  skipped_duplicate: number;
+}
+
+export interface DeepSynthesisResult {
+  normalized_claims: NormalizedClaim[];
+  claim_clusters: ClaimCluster[];
+  theory_map: TheoryReference[];
+  manuscript_packs: ManuscriptPack;
+  auto_fetch_result?: AutoFetchResult | null;
+  pipeline_version: string;
+  stages_completed: string[];
+  warnings?: { stage: string; error_type: string; message: string }[];
+}
+
+export interface LLMErrorResponse {
+  error_type: 'rate_limit' | 'quota_exhausted' | 'auth' | 'billing' | 'server' | 'connection' | 'bad_request' | 'unknown';
+  message: string;
+  provider: string;
+  model: string;
+  status_code?: number | null;
+  is_transient: boolean;
+  retry_after?: number | null;
+}
+
+export interface DeepSynthesisSSEEvent {
+  type: 'stage_start' | 'stage_complete' | 'complete' | 'progress' | 'warning' | 'error' | 'auto_fetch_start' | 'auto_fetch_searching' | 'auto_fetch_complete';
+  stage?: number;
+  stage_name?: string;
+  message?: string;
+  detail?: Record<string, unknown>;
+  error?: LLMErrorResponse;
+  result?: DeepSynthesisResult;
+  summary?: Record<string, unknown>;
+  stages_completed?: string[];
 }
 
 // ── Peer Review Types ──────────────────────────────────────────────────────────
@@ -361,7 +516,7 @@ export interface RevisionResult {
 export interface PaperSummary {
   paper_key: string;
   full_text_used: boolean;
-  text_source: 'pmc_xml' | 'full_pdf' | 'abstract_only' | 'none';
+  text_source: 'pmc_xml' | 'full_pdf' | 'full_html' | 'abstract_only' | 'none';
 
   // 3-pass extraction
   triage: Triage;
@@ -382,8 +537,19 @@ export interface PaperSummary {
   depth?: number;
   cited_by_keys?: string[];
 
+  // Citation purpose profile
+  purpose_profile?: Record<string, number>;
+  recommended_sections?: string[];
+  is_seminal?: boolean;
+  evidence_type?: string | null;
+  study_design?: string | null;
+  evidence_weight?: 'strong' | 'moderate' | 'weak' | 'unknown' | null;
+  recency_score?: number | null;
+
   // Intro/Discussion extraction (populated when full_text_used=true)
   introduction_claims?: IntroductionClaim[];
   discussion_insights?: DiscussionInsight[];
   cited_references?: CitedReference[];
+  sentence_bank?: SentenceCitation[];
+  writing_evidence_meta?: WritingEvidenceMeta;
 }

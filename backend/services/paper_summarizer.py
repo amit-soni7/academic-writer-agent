@@ -16,6 +16,8 @@ Non-negotiable rules enforced via system prompt:
 
 import json
 import logging
+import re
+from collections import Counter
 from typing import Awaitable, Callable, Optional
 
 from models import (
@@ -32,6 +34,7 @@ from models import (
     ResultItem,
     SentenceCitation,
     Triage,
+    WritingEvidenceMeta,
 )
 from services.ai_provider import AIProvider
 from services.doi_metadata_fetcher import fetch_doi_metadata
@@ -46,6 +49,47 @@ SOURCE_LABEL = {
     "abstract_only": "abstract only",
     "none":          "no text available",
 }
+
+WRITING_EVIDENCE_MAX = 20
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STAT_RE = re.compile(
+    r"\b("
+    r"p\s*[<=>]"
+    r"|ci\b"
+    r"|i²"
+    r"|or\s*="
+    r"|rr\s*="
+    r"|hr\s*="
+    r"|aor\s*="
+    r"|beta\s*="
+    r"|β\s*="
+    r"|r\s*="
+    r"|d\s*="
+    r"|f\s*\("
+    r"|t\s*\("
+    r"|χ2"
+    r"|chi[- ]square"
+    r")",
+    re.IGNORECASE,
+)
+_GENERIC_SENTENCE_PATTERNS = (
+    "future research is needed",
+    "more research is needed",
+    "ethics approval",
+    "institutional review board",
+    "informed consent",
+    "funding statement",
+    "conflicts of interest",
+    "we conducted",
+    "this study aimed",
+)
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "between", "by", "for", "from",
+    "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "their",
+    "this", "to", "was", "were", "with", "we", "our", "can", "may", "than",
+    "among", "using", "use", "used", "within", "across", "after", "before",
+}
+_REVIEW_LIKE_CATEGORIES = {"sr/ma", "editorial_opinion"}
 
 _SYSTEM = """\
 You are an evidence extraction and synthesis engine for academic research.
@@ -116,10 +160,12 @@ the identical format as ref_id in cited_references so the pipeline can link them
 
 - When text_source is "abstract_only" or "none": output empty arrays [] for all three fields.
 
-SENTENCE BANK — research-question-driven selective extraction:
-- sentence_bank: Extract 5–12 HIGH-VALUE sentences that would directly be cited when writing
-  an academic article about the research question above.
-  Quality over quantity — a paper with 10 relevant sentences is better than 25 generic ones.
+SENTENCE BANK — precision-first, research-question-driven selective extraction:
+- sentence_bank: Extract ONLY the strongest citable statements that would directly improve
+  a manuscript about the research question above.
+  Treat this as a QUALITY-SELECTION task, not a quota-filling task:
+  fewer precise, traceable statements are better than many weak ones.
+  Hard cap: 20 items. It is acceptable to return far fewer when the paper does not support more.
 
   For each sentence include:
     • section: where in the SOURCE PAPER it came from:
@@ -132,6 +178,11 @@ SENTENCE BANK — research-question-driven selective extraction:
                   "medium" if useful but secondary
     • use_in: which section of the TARGET MANUSCRIPT this sentence belongs in:
               "introduction" | "methods" | "results" | "discussion"
+    • source_kind: "paper_text" if this is a statement made by the source paper itself,
+                   "cited_reference_claim" if this is an important background/mechanism/prevalence
+                   claim that the source paper attributes to references it cites
+    • cited_ref_ids: [] for paper_text items; otherwise the citation keys from the paper's
+                     inline references that support the claim (must match ref_id in cited_references)
 
   SELECTION CRITERIA — only include a sentence if it passes ALL of these:
   1. RELEVANT to the research question — skip sentences about unrelated topics
@@ -139,6 +190,8 @@ SENTENCE BANK — research-question-driven selective extraction:
   3. NOT BOILERPLATE — skip: ethics approvals, funding statements, consent forms,
      generic study registration, "future research is needed", "we conducted a study"
   4. NOT REDUNDANT — do not include near-duplicate statements
+  5. TRACEABLE — the claim must be anchored to the source text; cited_reference_claim items
+     must include both a verbatim quote and citation keys from the paper's inline references
 
   PRIORITY RULES (what to include and mark "high"):
   - Primary outcomes with effect sizes, CIs, p-values → always include, mark "high"
@@ -150,12 +203,70 @@ SENTENCE BANK — research-question-driven selective extraction:
   - Secondary outcomes, subgroup analyses → "medium" only if relevant to research question
   - Limitations that affect interpretation → "medium" (1–2 max)
 
-  LIMITS:
-  - Maximum 3 background sentences per paper
-  - Maximum 1 methods sentence per paper (design + N in one sentence)
-  - Maximum 5 results sentences per paper (primary outcome first, then secondary)
-  - Maximum 3 discussion/conclusion sentences per paper
-  - When text_source is "abstract_only": 2–5 sentences (results + conclusion only)
+  PRIORITISE THESE:
+  - the paper's own primary findings and quantitative results
+  - concrete methodological details needed for writing/comparison
+  - high-value background or mechanism claims the paper cites and relies on
+  - comparisons, implications, and limitations that affect interpretation
+
+  ADAPTIVE GUIDANCE (soft, not hard quotas):
+  - background / cited-reference claims: usually 2-4+, but may dominate if they are the most
+    precise, traceable, manuscript-useful material
+  - methods claims: usually 1-2
+  - results claims: usually 4-8 when the paper reports strong quantitative findings
+  - discussion / implication claims: usually 2-4+, but may dominate in review, theoretical,
+    editorial, or interpretation-heavy papers
+  - limitations / interpretation claims: usually 0-2
+
+  EXPLICIT DECISION RULES:
+  - If introduction/background or discussion contain more precise, traceable, manuscript-useful
+    claims than methods/results, prefer them.
+  - For review, theoretical, or opinion papers, sentence_bank may skew heavily toward
+    background/discussion.
+  - For empirical papers with strong quantitative findings, direct results outrank weaker
+    narrative claims.
+  - cited_reference_claim items must stay quote-linked and citation-linked; never include a loose
+    paraphrase that cannot be traced back to both the quote and the cited_ref_ids.
+  - When text_source is "abstract_only", prefer a small bank of defensible results/conclusion
+    claims rather than trying to fill the cap.
+
+CITATION PURPOSE TAXONOMY — assign for every sentence_bank entry:
+  primary_purpose: choose the ONE dominant reason this sentence would be cited in the manuscript.
+  secondary_purposes: list any additional reasons (may be empty []).
+
+  Purpose definitions:
+  - "background"              : Establishes prior context, general knowledge, burden of condition
+  - "theory"                  : Explains a theoretical or conceptual framework / model
+  - "identify_gap"            : Shows what is MISSING, unknown, or unresolved in existing literature
+  - "justify_study"           : Explains why THIS study's approach is the right solution to the gap
+  - "methodology"             : Justifies tools, scales, instruments, or statistical methods
+  - "original_source"         : Seminal — must be credited as originator of a theory, scale, construct, or method
+  - "compare_findings"        : Agrees with or contradicts results (requires compare_sentiment)
+  - "empirical_support"       : Direct empirical evidence backing a factual claim
+  - "prevalence_epidemiology" : Population figures, incidence rates, burden statistics
+  - "limitation_acknowledged" : Cites a known limitation, caveat, or boundary condition of existing work
+  - "definition_terminology"  : Establishes key definitions, constructs, or terminology used in the field
+  - "clinical_guideline"      : Cites clinical/policy guidelines, consensus recommendations, or standards of practice
+  - "population_context"      : Describes demographics, generalizability, or population applicability of findings
+  - "measurement_validation"  : Psychometric properties, construct validity, reliability evidence for instruments
+  - "future_direction"        : Suggests future research directions, open questions, or next steps
+  - "support_claim"           : FALLBACK ONLY — use when none of the above clearly apply
+
+  CRITICAL NEGATIVE CONSTRAINTS:
+  - identify_gap ≠ justify_study: gap = what is ABSENT; justify = why YOUR approach IS the answer
+  - original_source is NOT limited to Introduction — it may appear in Methods or Discussion
+  - support_claim is a fallback: never choose it when a more specific purpose fits
+  - compare_sentiment is REQUIRED when primary_purpose is "compare_findings":
+      "consistent"   = this paper's finding agrees with / supports the research question conclusion
+      "contradicts"  = this paper's finding disagrees or conflicts
+
+  evidence_type: classify the SOURCE PAPER's study design as one of:
+    systematic_review | meta_analysis | rct | cohort | cross_sectional | qualitative |
+    mixed_methods | psychometric_validation | theoretical | guideline | consensus_statement |
+    review_narrative | primary_empirical
+
+  is_seminal: set true if this paper appears to be the original source of a widely-cited
+    theory, construct, measurement scale, or methodological approach.
 """
 
 _USER_TMPL = """\
@@ -280,7 +391,14 @@ Use "NR" for any field where information is not present in the text.
       "claim_type": "reported_fact | author_interpretation | inference",
       "stats": "OR=1.8 [1.2, 2.7] p=0.003 — or empty string if no stats",
       "importance": "high | medium",
-      "use_in": "introduction | methods | results | discussion"
+      "use_in": "introduction | methods | results | discussion",
+      "source_kind": "paper_text | cited_reference_claim",
+      "cited_ref_ids": ["1", "5"],
+      "primary_purpose": "background | theory | identify_gap | justify_study | methodology | original_source | compare_findings | empirical_support | prevalence_epidemiology | support_claim",
+      "secondary_purposes": [],
+      "compare_sentiment": "consistent | contradicts | null",
+      "evidence_type": "systematic_review | meta_analysis | rct | cohort | cross_sectional | qualitative | mixed_methods | psychometric_validation | theoretical | guideline | consensus_statement | review_narrative | primary_empirical",
+      "is_seminal": false
     }}
   ],
 
@@ -558,11 +676,27 @@ def _parse_confidence(raw: dict) -> ConfidenceScore:
     )
 
 
+_VALID_PURPOSES = {
+    "background", "theory", "identify_gap", "justify_study", "methodology",
+    "original_source", "compare_findings", "empirical_support",
+    "prevalence_epidemiology", "support_claim",
+    "limitation_acknowledged", "definition_terminology", "clinical_guideline",
+    "population_context", "measurement_validation", "future_direction",
+}
+
+_VALID_EVIDENCE_TYPES = {
+    "systematic_review", "meta_analysis", "rct", "cohort", "cross_sectional",
+    "qualitative", "mixed_methods", "psychometric_validation", "theoretical",
+    "guideline", "consensus_statement", "review_narrative", "primary_empirical",
+}
+
+
 def _parse_sentence_bank(raw: list) -> list[SentenceCitation]:
     valid_sections    = {"background", "methods", "results", "discussion", "conclusion"}
     valid_claim_types = {"reported_fact", "author_interpretation", "inference"}
     valid_importance  = {"high", "medium"}
     valid_use_in      = {"introduction", "methods", "results", "discussion"}
+    valid_source_kind = {"paper_text", "cited_reference_claim"}
     out = []
     for item in (raw if isinstance(raw, list) else []):
         if not isinstance(item, dict):
@@ -586,9 +720,37 @@ def _parse_sentence_bank(raw: list) -> list[SentenceCitation]:
                 "discussion": "discussion",
                 "conclusion": "discussion",
             }.get(section, "discussion")
+        source_kind = _str_field(item, "source_kind", "paper_text").lower()
+        if source_kind not in valid_source_kind:
+            source_kind = "paper_text"
+        cited_ref_ids = item.get("cited_ref_ids")
+        if isinstance(cited_ref_ids, list):
+            cited_ref_ids = [str(ref).strip() for ref in cited_ref_ids if str(ref).strip()]
+        else:
+            cited_ref_ids = []
         text = _str_field(item, "text", "")
         if not text:
             continue
+
+        # ── Citation purpose fields ──────────────────────────────────────────
+        primary_purpose = _str_field(item, "primary_purpose", "").lower()
+        if primary_purpose not in _VALID_PURPOSES:
+            primary_purpose = ""
+        raw_secondary = item.get("secondary_purposes") or []
+        secondary_purposes = [
+            p.lower() for p in (raw_secondary if isinstance(raw_secondary, list) else [])
+            if isinstance(p, str) and p.lower() in _VALID_PURPOSES and p.lower() != primary_purpose
+        ]
+        compare_sentiment_raw = _str_field(item, "compare_sentiment", "").lower()
+        compare_sentiment: Optional[str] = None
+        if primary_purpose == "compare_findings" and compare_sentiment_raw in ("consistent", "contradicts"):
+            compare_sentiment = compare_sentiment_raw
+
+        evidence_type_raw = _str_field(item, "evidence_type", "").lower()
+        evidence_type: Optional[str] = evidence_type_raw if evidence_type_raw in _VALID_EVIDENCE_TYPES else None
+
+        is_seminal = bool(item.get("is_seminal", False))
+
         out.append(SentenceCitation(
             section=section,
             text=text,
@@ -597,10 +759,405 @@ def _parse_sentence_bank(raw: list) -> list[SentenceCitation]:
             stats=_str_field(item, "stats", ""),
             importance=importance,
             use_in=use_in,
+            source_kind=source_kind,
+            cited_ref_ids=cited_ref_ids,
+            primary_purpose=primary_purpose,
+            secondary_purposes=secondary_purposes,
+            compare_sentiment=compare_sentiment,
+            evidence_type=evidence_type,
+            is_seminal=is_seminal,
         ))
-    # Ensure high-importance sentences come first
-    out.sort(key=lambda s: (0 if s.importance == "high" else 1))
     return out
+
+
+def _normalise_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _tokenise(text: str) -> set[str]:
+    return {
+        tok for tok in _TOKEN_RE.findall(_normalise_text(text))
+        if len(tok) > 2 and tok not in _STOPWORDS
+    }
+
+
+def _has_stat_signal(*parts: str) -> bool:
+    joined = " ".join(part for part in parts if part)
+    if _STAT_RE.search(joined):
+        return True
+    return bool(re.search(r"\b\d+(?:\.\d+)?\b", joined))
+
+
+def _looks_boilerplate(*parts: str) -> bool:
+    text = _normalise_text(" ".join(part for part in parts if part))
+    return any(pattern in text for pattern in _GENERIC_SENTENCE_PATTERNS)
+
+
+def _query_overlap(query_tokens: set[str], *parts: str) -> float:
+    if not query_tokens:
+        return 0.0
+    text_tokens = _tokenise(" ".join(part for part in parts if part))
+    if not text_tokens:
+        return 0.0
+    return len(query_tokens & text_tokens) / max(1, len(query_tokens))
+
+
+def _is_traceable_sentence(sentence: SentenceCitation) -> bool:
+    has_quote = bool(sentence.verbatim_quote and sentence.verbatim_quote != "NR")
+    has_stats = bool(sentence.stats and sentence.stats != "NR")
+    if sentence.source_kind == "cited_reference_claim":
+        return has_quote and bool(sentence.cited_ref_ids)
+    return has_quote or has_stats
+
+
+def _review_like_paper(triage: Triage, methods: ExtractionMethods) -> bool:
+    category = (triage.category or "").strip().lower()
+    design = (methods.study_design or "").strip().lower()
+    if category in _REVIEW_LIKE_CATEGORIES:
+        return True
+    return any(term in design for term in ("review", "meta-analysis", "meta analysis", "scoping"))
+
+
+def _result_has_quant_signal(result: ResultItem) -> bool:
+    return _has_stat_signal(result.effect_size, result.ci_95, result.p_value, result.finding)
+
+
+def _sentence_similarity(a: SentenceCitation, b: SentenceCitation) -> float:
+    a_norm = _normalise_text(a.text)
+    b_norm = _normalise_text(b.text)
+    if not a_norm or not b_norm:
+        return 0.0
+    if a_norm == b_norm or a_norm in b_norm or b_norm in a_norm:
+        return 1.0
+    a_tokens = _tokenise(a_norm)
+    b_tokens = _tokenise(b_norm)
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / max(1, len(a_tokens | b_tokens))
+
+
+def _section_weight(
+    sentence: SentenceCitation,
+    *,
+    review_like: bool,
+    results_rich: bool,
+) -> float:
+    if sentence.section == "results":
+        return 3.4 if results_rich else 2.6
+    if sentence.section == "methods":
+        return 1.0
+    if sentence.section == "background":
+        return 3.0 if review_like or not results_rich else 2.1
+    if sentence.section in {"discussion", "conclusion"}:
+        return 2.9 if review_like or not results_rich else 2.2
+    return 1.5
+
+
+def _score_sentence(
+    sentence: SentenceCitation,
+    *,
+    query_tokens: set[str],
+    review_like: bool,
+    results_rich: bool,
+) -> tuple[float, float, bool]:
+    overlap = _query_overlap(query_tokens, sentence.text, sentence.verbatim_quote)
+    traceable = _is_traceable_sentence(sentence)
+    score = 0.0
+
+    score += 5.0 if sentence.importance == "high" else 2.5
+    score += min(4.0, overlap * 8.0)
+    score += _section_weight(sentence, review_like=review_like, results_rich=results_rich)
+
+    if traceable:
+        score += 4.0
+    elif sentence.section in {"results", "background", "discussion", "conclusion"}:
+        score -= 2.0
+
+    if _has_stat_signal(sentence.text, sentence.verbatim_quote, sentence.stats):
+        score += 2.5
+
+    if sentence.use_in == "results" and sentence.section == "results":
+        score += 0.8
+    if sentence.use_in == "introduction" and sentence.section == "background":
+        score += 0.8
+    if sentence.use_in == "discussion" and sentence.section in {"discussion", "conclusion"}:
+        score += 0.8
+
+    if sentence.source_kind == "cited_reference_claim":
+        score += 1.5
+        if not sentence.cited_ref_ids:
+            score -= 4.0
+
+    if sentence.claim_type == "reported_fact":
+        score += 0.5
+
+    length = len(_tokenise(sentence.text))
+    if length < 5:
+        score -= 1.0
+    elif length > 45:
+        score -= 0.5
+
+    if _looks_boilerplate(sentence.text, sentence.verbatim_quote):
+        score -= 6.0
+
+    return score, overlap, traceable
+
+
+def _derive_paper_purpose_profile(
+    sentence_bank: list[SentenceCitation],
+    pub_year: Optional[int],
+    evidence_grade: str,
+) -> dict:
+    """Derive paper-level citation purpose metadata from the sentence bank."""
+    from collections import Counter
+    import datetime
+
+    counts: Counter = Counter()
+    is_seminal = False
+    evidence_types: list[str] = []
+
+    for sent in sentence_bank:
+        if sent.primary_purpose:
+            counts[sent.primary_purpose] += 2  # dominant weight
+        for sp in sent.secondary_purposes:
+            counts[sp] += 1
+        if sent.is_seminal:
+            is_seminal = True
+        if sent.evidence_type:
+            evidence_types.append(sent.evidence_type)
+
+    # Normalise to weights (sum ≈ 1.0)
+    total = sum(counts.values()) or 1
+    purpose_profile = {k: round(v / total, 3) for k, v in counts.most_common()}
+
+    # Recommended sections from top purposes
+    _purpose_to_section = {
+        "background": "introduction",
+        "prevalence_epidemiology": "introduction",
+        "theory": "introduction",
+        "identify_gap": "introduction",
+        "justify_study": "introduction",
+        "methodology": "methods",
+        "original_source": "introduction",
+        "compare_findings": "discussion",
+        "empirical_support": "results",
+        "support_claim": "discussion",
+        "limitation_acknowledged": "discussion",
+        "definition_terminology": "introduction",
+        "clinical_guideline": "introduction",
+        "population_context": "methods",
+        "measurement_validation": "methods",
+        "future_direction": "discussion",
+    }
+    seen_sections: list[str] = []
+    for purpose in list(counts.keys())[:3]:
+        sec = _purpose_to_section.get(purpose, "discussion")
+        if sec not in seen_sections:
+            seen_sections.append(sec)
+
+    # evidence_weight
+    strong_types = {"systematic_review", "meta_analysis"}
+    moderate_types = {"rct", "cohort", "psychometric_validation"}
+    dominant_et = evidence_types[0] if evidence_types else None
+    grade_lower = (evidence_grade or "").lower()
+    if grade_lower == "high" or dominant_et in strong_types:
+        evidence_weight = "strong"
+    elif grade_lower == "moderate" or dominant_et in moderate_types:
+        evidence_weight = "moderate"
+    elif grade_lower == "low" or dominant_et:
+        evidence_weight = "weak"
+    else:
+        evidence_weight = "unknown"
+
+    # recency_score
+    recency_score: Optional[float] = None
+    if pub_year:
+        current_year = datetime.datetime.now().year
+        recency_score = round(max(0.0, 1.0 - (current_year - pub_year) / 20.0), 3)
+
+    return dict(
+        purpose_profile=purpose_profile,
+        recommended_sections=seen_sections,
+        is_seminal=is_seminal,
+        evidence_type=dominant_et,
+        evidence_weight=evidence_weight,
+        recency_score=recency_score,
+    )
+
+
+def _sentence_from_result(item: ResultItem) -> Optional[SentenceCitation]:
+    finding = (item.finding or "").strip()
+    if not finding or finding == "NR":
+        return None
+    stats_bits = [item.effect_size, item.ci_95, item.p_value]
+    stats = " | ".join(bit for bit in stats_bits if bit and bit != "NR")
+    return SentenceCitation(
+        section="results",
+        text=finding,
+        verbatim_quote=(item.supporting_quote or "").strip(),
+        claim_type=item.claim_type or "reported_fact",
+        stats=stats,
+        importance="high" if stats else "medium",
+        use_in="results",
+        source_kind="paper_text",
+        cited_ref_ids=[],
+    )
+
+
+def _sentence_from_intro_claim(item: IntroductionClaim) -> Optional[SentenceCitation]:
+    claim = (item.claim or "").strip()
+    if not claim or claim == "NR":
+        return None
+    return SentenceCitation(
+        section="background",
+        text=claim,
+        verbatim_quote=(item.verbatim_quote or "").strip(),
+        claim_type="reported_fact" if item.claim_type == "reported_fact" else "author_interpretation",
+        stats="",
+        importance="high",
+        use_in="introduction",
+        source_kind="cited_reference_claim",
+        cited_ref_ids=[ref for ref in item.cited_ref_ids if ref],
+    )
+
+
+def _sentence_from_discussion_insight(item: DiscussionInsight) -> Optional[SentenceCitation]:
+    text = (item.text or "").strip()
+    if not text or text == "NR":
+        return None
+    importance = "high" if item.insight_type in {"comparison", "implication"} else "medium"
+    source_kind = "cited_reference_claim" if item.cited_ref_ids else "paper_text"
+    return SentenceCitation(
+        section="discussion",
+        text=text,
+        verbatim_quote=(item.verbatim_quote or "").strip(),
+        claim_type="author_interpretation",
+        stats="",
+        importance=importance,
+        use_in="discussion",
+        source_kind=source_kind,
+        cited_ref_ids=[ref for ref in item.cited_ref_ids if ref],
+    )
+
+
+def _build_writing_evidence_candidates(
+    parsed_sentence_bank: list[SentenceCitation],
+    results: list[ResultItem],
+    introduction_claims: list[IntroductionClaim],
+    discussion_insights: list[DiscussionInsight],
+) -> list[SentenceCitation]:
+    candidates: list[SentenceCitation] = list(parsed_sentence_bank)
+    candidates.extend(
+        sentence for sentence in (_sentence_from_result(item) for item in results)
+        if sentence is not None
+    )
+    candidates.extend(
+        sentence for sentence in (_sentence_from_intro_claim(item) for item in introduction_claims)
+        if sentence is not None
+    )
+    candidates.extend(
+        sentence for sentence in (_sentence_from_discussion_insight(item) for item in discussion_insights)
+        if sentence is not None
+    )
+    return candidates
+
+
+def _select_writing_evidence(
+    *,
+    query: str,
+    text_source: str,
+    triage: Triage,
+    methods: ExtractionMethods,
+    results: list[ResultItem],
+    parsed_sentence_bank: list[SentenceCitation],
+    introduction_claims: list[IntroductionClaim],
+    discussion_insights: list[DiscussionInsight],
+) -> tuple[list[SentenceCitation], WritingEvidenceMeta]:
+    query_tokens = _tokenise(query)
+    review_like = _review_like_paper(triage, methods)
+    results_rich = any(_result_has_quant_signal(item) for item in results)
+    raw_candidates = _build_writing_evidence_candidates(
+        parsed_sentence_bank,
+        results,
+        introduction_claims,
+        discussion_insights,
+    )
+
+    scored: list[tuple[float, float, bool, int, SentenceCitation]] = []
+    for index, sentence in enumerate(raw_candidates):
+        if not sentence.text or sentence.text == "NR":
+            continue
+        if sentence.source_kind == "cited_reference_claim" and not (
+            sentence.verbatim_quote and sentence.verbatim_quote != "NR" and sentence.cited_ref_ids
+        ):
+            continue
+        score, overlap, traceable = _score_sentence(
+            sentence,
+            query_tokens=query_tokens,
+            review_like=review_like,
+            results_rich=results_rich,
+        )
+        if score <= 0.5:
+            continue
+        scored.append((score, overlap, traceable, index, sentence))
+
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            0 if item[4].importance == "high" else 1,
+            item[3],
+        )
+    )
+
+    selected: list[SentenceCitation] = []
+    duplicates_removed = 0
+    for _score, _overlap, _traceable, _index, sentence in scored:
+        if any(_sentence_similarity(sentence, existing) >= 0.72 for existing in selected):
+            duplicates_removed += 1
+            continue
+        selected.append(sentence)
+        if len(selected) >= WRITING_EVIDENCE_MAX:
+            break
+
+    section_counts = Counter(sentence.section for sentence in selected)
+    dominant_sections = [section for section, _count in section_counts.most_common(3)]
+    traceable_candidates = sum(1 for _score, _overlap, traceable, _index, _sentence in scored if traceable)
+    avg_overlap = (
+        sum(overlap for _score, overlap, _traceable, _index, _sentence in scored) / len(scored)
+        if scored else 0.0
+    )
+    quantitative_candidates = sum(
+        1 for _score, _overlap, _traceable, _index, sentence in scored
+        if sentence.section == "results" or _has_stat_signal(sentence.text, sentence.verbatim_quote, sentence.stats)
+    )
+
+    limiting_factors: list[str] = []
+    if text_source == "abstract_only":
+        limiting_factors.append("abstract_only")
+    elif text_source == "none":
+        limiting_factors.append("no_text_available")
+
+    traceability_floor = 3 if text_source == "abstract_only" else 6
+    if traceable_candidates < traceability_floor:
+        limiting_factors.append("limited_traceable_claims")
+
+    if quantitative_candidates < 2:
+        limiting_factors.append("sparse_quantitative_findings")
+
+    if query_tokens and avg_overlap < 0.12:
+        limiting_factors.append("low_topic_overlap")
+
+    if duplicates_removed >= max(2, len(scored) // 3):
+        limiting_factors.append("high_redundancy_removed")
+
+    meta = WritingEvidenceMeta(
+        selected_count=len(selected),
+        max_count=WRITING_EVIDENCE_MAX,
+        dominant_sections=dominant_sections,
+        limiting_factors=limiting_factors,
+    )
+    return selected, meta
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
@@ -725,8 +1282,9 @@ async def summarize_paper(
 
     full_text_used = text_source in ("pmc_xml", "full_pdf", "full_html")
 
-    # Sentence bank — extracted for all text sources (fewer sentences for abstract-only)
-    sentence_bank = _parse_sentence_bank(data.get("sentence_bank", []))
+    triage = _parse_triage(data.get("triage", {}))
+    methods = _parse_methods(data.get("methods", {}))
+    results = _parse_results(data.get("results", []))
 
     # Only parse intro/discussion fields when full text was available
     intro_claims:    list[IntroductionClaim] = []
@@ -737,25 +1295,53 @@ async def summarize_paper(
         disc_insights = _parse_discussion_insights(data.get("discussion_insights", []))
         cited_refs    = _parse_cited_references(data.get("cited_references", []))
 
+    parsed_sentence_bank = _parse_sentence_bank(data.get("sentence_bank", []))
+    sentence_bank, writing_evidence_meta = _select_writing_evidence(
+        query=query or "",
+        text_source=text_source,
+        triage=triage,
+        methods=methods,
+        results=results,
+        parsed_sentence_bank=parsed_sentence_bank,
+        introduction_claims=intro_claims,
+        discussion_insights=disc_insights,
+    )
+
+    critical_appraisal = _parse_critical_appraisal(data.get("critical_appraisal", {}))
+    pub_year = bibliography.year if bibliography else None
+    purpose_meta = _derive_paper_purpose_profile(
+        sentence_bank=sentence_bank,
+        pub_year=pub_year,
+        evidence_grade=critical_appraisal.evidence_grade,
+    )
+
     summary = PaperSummary(
         paper_key=_paper_key(paper),
         full_text_used=full_text_used,
         text_source=text_source,
-        triage=_parse_triage(data.get("triage", {})),
+        triage=triage,
         bibliography=bibliography,
-        methods=_parse_methods(data.get("methods", {})),
-        results=_parse_results(data.get("results", [])),
+        methods=methods,
+        results=results,
         limitations=_list_field(data, "limitations"),
-        critical_appraisal=_parse_critical_appraisal(data.get("critical_appraisal", {})),
+        critical_appraisal=critical_appraisal,
         evidence_quotes=_parse_quotes(data.get("evidence_quotes", [])),
         missing_info=_list_field(data, "missing_info"),
         confidence=_parse_confidence(data.get("confidence", {})),
         one_line_takeaway=_str_field(data, "one_line_takeaway"),
         keywords=_list_field(data, "keywords"),
         sentence_bank=sentence_bank,
+        writing_evidence_meta=writing_evidence_meta,
         introduction_claims=intro_claims,
         discussion_insights=disc_insights,
         cited_references=cited_refs,
+        # ── Citation purpose profile ──────────────────────────────────────
+        purpose_profile=purpose_meta["purpose_profile"],
+        recommended_sections=purpose_meta["recommended_sections"],
+        is_seminal=purpose_meta["is_seminal"],
+        evidence_type=purpose_meta["evidence_type"],
+        evidence_weight=purpose_meta["evidence_weight"],
+        recency_score=purpose_meta["recency_score"],
     )
 
     # Write BibTeX entry to the project .bib file whenever a save folder is configured.

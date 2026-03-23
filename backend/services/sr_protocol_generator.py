@@ -7,10 +7,12 @@ generates search strings for 8 databases, and optionally registers on OSF.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import uuid
+import io
 from datetime import datetime
 from typing import Optional
 
@@ -50,6 +52,305 @@ _PRISMA_P_ITEMS = {
     "16": "Meta-bias — potential biases that may affect the review process",
     "17": "Funding — sources, support, and role of funders",
 }
+
+_PRISMA_P_CHECKLIST_TEMPLATE_ROWS = [
+    {"kind": "section", "label": "ADMINISTRATIVE INFORMATION"},
+    {"kind": "group", "label": "Title:"},
+    {"kind": "item", "topic": "Identification", "item_no": "1a",
+     "checklist_item": "Identify the report as a protocol of a systematic review"},
+    {"kind": "item", "topic": "Update", "item_no": "1b",
+     "checklist_item": "If the protocol is for an update of a previous systematic review, identify as such"},
+    {"kind": "item", "topic": "Registration", "item_no": "2",
+     "checklist_item": "If registered, provide the name of the registry (such as PROSPERO) and registration number"},
+    {"kind": "group", "label": "Authors:"},
+    {"kind": "item", "topic": "Contact", "item_no": "3a",
+     "checklist_item": "Provide name, institutional affiliation, e-mail address of all protocol authors; provide physical mailing address of corresponding author"},
+    {"kind": "item", "topic": "Contributions", "item_no": "3b",
+     "checklist_item": "Describe contributions of protocol authors and identify the guarantor of the review"},
+    {"kind": "item", "topic": "Amendments", "item_no": "4",
+     "checklist_item": "If the protocol represents an amendment of a previously completed or published protocol, identify as such and list changes; otherwise, state plan for documenting important protocol amendments"},
+    {"kind": "group", "label": "Support:"},
+    {"kind": "item", "topic": "Sources", "item_no": "5a",
+     "checklist_item": "Indicate sources of financial or other support for the review"},
+    {"kind": "item", "topic": "Sponsor", "item_no": "5b",
+     "checklist_item": "Provide name for the review funder and/or sponsor"},
+    {"kind": "item", "topic": "Role of sponsor or funder", "item_no": "5c",
+     "checklist_item": "Describe roles of funder(s), sponsor(s), and/or institution(s), if any, in developing the protocol"},
+    {"kind": "section", "label": "INTRODUCTION"},
+    {"kind": "item", "topic": "Rationale", "item_no": "6",
+     "checklist_item": "Describe the rationale for the review in the context of what is already known"},
+    {"kind": "item", "topic": "Objectives", "item_no": "7",
+     "checklist_item": "Provide an explicit statement of the question(s) the review will address with reference to participants, interventions, comparators, and outcomes (PICO)"},
+    {"kind": "section", "label": "METHODS"},
+    {"kind": "item", "topic": "Eligibility criteria", "item_no": "8",
+     "checklist_item": "Specify the study characteristics (such as PICO, study design, setting, time frame) and report characteristics (such as years considered, language, publication status) to be used as criteria for eligibility for the review"},
+    {"kind": "item", "topic": "Information sources", "item_no": "9",
+     "checklist_item": "Describe all intended information sources (such as electronic databases, contact with study authors, trial registers or other grey literature sources) with planned dates of coverage"},
+    {"kind": "item", "topic": "Search strategy", "item_no": "10",
+     "checklist_item": "Present draft of search strategy to be used for at least one electronic database, including planned limits, such that it could be repeated"},
+    {"kind": "group", "label": "Study records:"},
+    {"kind": "item", "topic": "Data management", "item_no": "11a",
+     "checklist_item": "Describe the mechanism(s) that will be used to manage records and data throughout the review"},
+    {"kind": "item", "topic": "Selection process", "item_no": "11b",
+     "checklist_item": "State the process that will be used for selecting studies (such as two independent reviewers) through each phase of the review (that is, screening, eligibility and inclusion in meta-analysis)"},
+    {"kind": "item", "topic": "Data collection process", "item_no": "11c",
+     "checklist_item": "Describe planned method of extracting data from reports (such as piloting forms, done independently, in duplicate), any processes for obtaining and confirming data from investigators"},
+    {"kind": "item", "topic": "Data items", "item_no": "12",
+     "checklist_item": "List and define all variables for which data will be sought (such as PICO items, funding sources), any pre-planned data assumptions and simplifications"},
+    {"kind": "item", "topic": "Outcomes and prioritization", "item_no": "13",
+     "checklist_item": "List and define all outcomes for which data will be sought, including prioritization of main and additional outcomes, with rationale"},
+    {"kind": "item", "topic": "Risk of bias in individual studies", "item_no": "14",
+     "checklist_item": "Describe anticipated methods for assessing risk of bias of individual studies, including whether this will be done at the outcome or study level, or both; state how this information will be used in data synthesis"},
+    {"kind": "item", "topic": "Data synthesis", "item_no": "15a",
+     "checklist_item": "Describe criteria under which study data will be quantitatively synthesised"},
+    {"kind": "item", "topic": "Data synthesis", "item_no": "15b",
+     "checklist_item": "If data are appropriate for quantitative synthesis, describe planned summary measures, methods of handling data and methods of combining data from studies, including any planned exploration of consistency (such as I2, Kendall’s τ)"},
+    {"kind": "item", "topic": "Data synthesis", "item_no": "15c",
+     "checklist_item": "Describe any proposed additional analyses (such as sensitivity or subgroup analyses, meta-regression)"},
+    {"kind": "item", "topic": "Data synthesis", "item_no": "15d",
+     "checklist_item": "If quantitative synthesis is not appropriate, describe the type of summary planned"},
+    {"kind": "item", "topic": "Meta-bias(es)", "item_no": "16",
+     "checklist_item": "Specify any planned assessment of meta-bias(es) (such as publication bias across studies, selective reporting within studies)"},
+    {"kind": "item", "topic": "Confidence in cumulative evidence", "item_no": "17",
+     "checklist_item": "Describe how the strength of the body of evidence will be assessed (such as GRADE)"},
+]
+
+_PRISMA_P_PAGE_ALIASES = {
+    "1a": ["administrative information", "title"],
+    "1b": ["administrative information", "title"],
+    "2": ["administrative information", "registration"],
+    "3a": ["administrative information", "authors"],
+    "3b": ["administrative information", "authors"],
+    "4": ["administrative information", "amendments"],
+    "5a": ["administrative information", "support", "funding"],
+    "5b": ["administrative information", "support", "sponsor"],
+    "5c": ["administrative information", "support", "sponsor"],
+    "6": ["background and rationale", "introduction", "background"],
+    "7": ["objectives"],
+    "8": ["eligibility criteria"],
+    "9": ["information sources"],
+    "10": ["search strategy"],
+    "11a": ["study records", "data management", "records management"],
+    "11b": ["selection process", "screening", "study records"],
+    "11c": ["data collection process", "study records"],
+    "12": ["data items"],
+    "13": ["outcomes and prioritization", "outcomes"],
+    "14": ["risk of bias assessment", "risk of bias"],
+    "15a": ["data synthesis", "synthesis methods", "synthesis plan"],
+    "15b": ["data synthesis", "effect measures", "synthesis methods"],
+    "15c": ["data synthesis", "subgroup and sensitivity analyses", "subgroup sensitivity"],
+    "15d": ["data synthesis", "narrative synthesis", "synthesis methods"],
+    "16": ["meta bias assessment", "reporting bias assessment", "meta bias", "reporting bias"],
+    "17": ["confidence in evidence", "certainty of evidence", "grade", "confidence"],
+}
+
+
+def _join_readable_list(items: list[str]) -> str:
+    cleaned = [str(item).strip() for item in items if str(item).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
+def _ensure_sentence(text: str) -> str:
+    trimmed = (text or "").strip()
+    if not trimmed:
+        return ""
+    return trimmed if trimmed[-1] in ".!?" else f"{trimmed}."
+
+
+def _coerce_string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _strip_control_chars(text: str) -> str:
+    return "".join(ch for ch in text if ch in "\n\r\t" or ord(ch) >= 32)
+
+
+def _json_safe(value):
+    if isinstance(value, str):
+        return _strip_control_chars(value)
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
+
+
+def _load_llm_json(raw: str) -> dict:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+
+    seen: set[str] = set()
+    last_error: Exception | None = None
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            try:
+                return json.loads(candidate, strict=False)
+            except json.JSONDecodeError as inner_exc:
+                last_error = inner_exc
+
+    if last_error:
+        raise last_error
+    return {}
+
+
+def _parse_tagged_text_phase_response(raw: str) -> tuple[str, str]:
+    text = (raw or "").strip()
+    if not text:
+        return "", ""
+
+    if text.startswith("{"):
+        try:
+            payload = _load_llm_json(text)
+            if isinstance(payload, dict):
+                reply = str(payload.get("chat_reply") or "").strip()
+                body = str(payload.get("text") or "").strip()
+                if reply or body:
+                    return reply, body
+        except Exception:
+            pass
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:markdown|md|text)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    reply = ""
+    body = ""
+
+    tagged_match = re.search(
+        r"CHAT_REPLY:\s*(.*?)\s*TEXT:\s*<<<\s*(.*?)\s*>>>\s*$",
+        text,
+        flags=re.DOTALL,
+    )
+    if tagged_match:
+        reply = tagged_match.group(1).strip()
+        body = tagged_match.group(2).strip()
+        return reply, body
+
+    text_idx = text.find("TEXT:")
+    if text_idx != -1:
+        before = text[:text_idx].strip()
+        after = text[text_idx + len("TEXT:"):].strip()
+        if before.startswith("CHAT_REPLY:"):
+            reply = before[len("CHAT_REPLY:"):].strip()
+        body = after
+        if body.startswith("<<<"):
+            body = body[3:].lstrip()
+        if body.endswith(">>>"):
+            body = body[:-3].rstrip()
+        return reply, body.strip()
+
+    if text.startswith("CHAT_REPLY:"):
+        reply = text[len("CHAT_REPLY:"):].strip()
+        return reply, ""
+
+    return "", text
+
+
+def _build_data_collection_narrative(content: dict | None) -> str:
+    if not isinstance(content, dict):
+        return ""
+
+    parts: list[str] = []
+    extraction_method = str(content.get("extraction_method") or content.get("data_collection_notes") or "").strip()
+    extraction_team = str(content.get("extraction_team") or "").strip()
+    pilot_testing = str(content.get("pilot_testing") or "").strip()
+    disagreement_resolution = str(content.get("disagreement_resolution") or "").strip()
+    software = str(content.get("software") or "").strip()
+    author_contact = str(content.get("author_contact") or "").strip()
+
+    if extraction_method:
+        parts.append(_ensure_sentence(extraction_method))
+    if extraction_team:
+        parts.append(_ensure_sentence(f"Data extraction will be undertaken by {extraction_team}"))
+    if pilot_testing:
+        parts.append(_ensure_sentence(f"The extraction approach will be piloted {pilot_testing}"))
+    if disagreement_resolution:
+        parts.append(_ensure_sentence(f"Disagreements will be resolved through {disagreement_resolution}"))
+    if software:
+        parts.append(_ensure_sentence(f"Extraction records will be managed using {software}"))
+    if author_contact:
+        parts.append(_ensure_sentence(f"Where needed, study authors will be contacted {author_contact}"))
+
+    return " ".join(part for part in parts if part)
+
+
+def _build_data_items_markdown(content: dict | None, section_prefix: str = "") -> str:
+    if not isinstance(content, dict):
+        return ""
+
+    sections = [
+        (
+            "1",
+            "Study Characteristics",
+            "The following study-level descriptors will be recorded for each included study: ",
+            _coerce_string_list(content.get("study_characteristics")),
+        ),
+        (
+            "2",
+            "Participant Characteristics",
+            "Participant-level data to be extracted will include ",
+            _coerce_string_list(content.get("participant_characteristics")),
+        ),
+        (
+            "3",
+            "Intervention and Comparator Details",
+            "Information pertaining to the exposure, intervention, or comparator will include ",
+            _coerce_string_list(content.get("intervention_characteristics")),
+        ),
+        (
+            "4",
+            "Outcome Data",
+            "Outcome data to be extracted will include ",
+            _coerce_string_list(content.get("outcome_items")),
+        ),
+        (
+            "5",
+            "Methodological Variables",
+            "Methodological data to be recorded will include ",
+            _coerce_string_list(content.get("methodological_items")),
+        ),
+    ]
+
+    blocks: list[str] = []
+    for suffix, title, intro, items in sections:
+        if not items:
+            continue
+        heading = f"#### {section_prefix}.{suffix} {title}" if section_prefix else f"#### {title}"
+        blocks.extend([
+            heading,
+            "",
+            _ensure_sentence(f"{intro}{_join_readable_list(items)}"),
+            "",
+        ])
+
+    return "\n".join(blocks).strip()
 
 # ── Cochrane/JBI study-design-specific extraction schema templates ─────────────
 # Sources: Cochrane Handbook Ch.11, JBI Manual, SRDR+, PRISMA 2020, RoB 2.0, QUADAS-2
@@ -450,7 +751,7 @@ Apply the Cochrane/JBI methodologist workflow and return the structured JSON."""
             ),
             json_mode=True, temperature=0.2,
         )
-        result = json.loads(resp.text)
+        result = _load_llm_json(resp.text)
         # Guarantee review_type override and required keys
         if "pico" in result:
             result["pico"]["review_type"] = review_type
@@ -533,6 +834,7 @@ The document MUST include ALL 17 PRISMA-P items and these sections in order:
 6. Dissemination Plans
 
 Use formal academic writing. Be specific about tools, software, and statistical methods.
+Within section 4.5 Data Items, use brief subsection headings for the major domains when details are available, such as Study Characteristics, Participant Characteristics, Intervention and Comparator Details, Outcome Data, and Methodological Variables.
 Return ONLY the Markdown text — no JSON, no preamble."""
 
     population = pico.get("population", "")
@@ -565,9 +867,20 @@ Return ONLY the Markdown text — no JSON, no preamble."""
         elig = prisma_p_data.get("methods_eligibility", {})
         dc = prisma_p_data.get("methods_data_collection", {})
         synth = prisma_p_data.get("methods_synthesis", {})
+        builder = prisma_p_data.get("protocol_builder", {})
+        phase_snapshots = builder.get("phases", {}) if isinstance(builder, dict) else {}
+        data_collection_phase = phase_snapshots.get("data_collection", {}) if isinstance(phase_snapshots, dict) else {}
+        data_items_phase = phase_snapshots.get("data_items", {}) if isinstance(phase_snapshots, dict) else {}
+        data_collection_content = data_collection_phase.get("content", {}) if isinstance(data_collection_phase, dict) else {}
+        data_items_content = data_items_phase.get("content", {}) if isinstance(data_items_phase, dict) else {}
 
         if admin.get("review_title"):
             context_lines.insert(0, f"**Title:** {admin['review_title']}")
+        if admin.get("registration_name"):
+            registration_line = str(admin["registration_name"])
+            if admin.get("registration_number"):
+                registration_line += f" ({admin['registration_number']})"
+            context_lines.append(f"**Registration / Submission Target:** {registration_line}")
         if admin.get("authors") and isinstance(admin["authors"], list):
             author_str = "; ".join(
                 a.get("name", "") + (f" ({a.get('affiliation','')})" if a.get("affiliation") else "")
@@ -575,8 +888,16 @@ Return ONLY the Markdown text — no JSON, no preamble."""
             )
             if author_str:
                 context_lines.append(f"**Authors:** {author_str}")
+        if admin.get("contributions"):
+            context_lines.append(f"**Author Contributions:** {admin['contributions']}")
         if admin.get("funding_sources"):
             context_lines.append(f"**Funding:** {admin['funding_sources']}")
+        if admin.get("competing_interests"):
+            context_lines.append(f"**Competing Interests:** {admin['competing_interests']}")
+        if admin.get("amendment_plan"):
+            context_lines.append(f"**Amendment Policy:** {admin['amendment_plan']}")
+        if admin.get("sponsor_role"):
+            context_lines.append(f"**Sponsor Role:** {admin['sponsor_role']}")
         if intro.get("rationale"):
             context_lines.append(f"\n**Rationale:**\n{intro['rationale']}")
         if elig.get("inclusion_criteria") and isinstance(elig["inclusion_criteria"], list):
@@ -587,6 +908,12 @@ Return ONLY the Markdown text — no JSON, no preamble."""
             context_lines.append("**Databases:** " + ", ".join(elig["databases"]))
         if dc.get("selection_process"):
             context_lines.append(f"**Selection Process:** {dc['selection_process']}")
+        data_collection_narrative = _build_data_collection_narrative(data_collection_content or dc)
+        if data_collection_narrative:
+            context_lines.append(f"**Data Collection Process:** {data_collection_narrative}")
+        data_items_markdown = _build_data_items_markdown(data_items_content, section_prefix="4.5")
+        if data_items_markdown:
+            context_lines.append(f"**Data Items Structure:**\n{data_items_markdown}")
         if dc.get("outcome_prioritization"):
             context_lines.append(f"**Outcome Prioritization:** {dc['outcome_prioritization']}")
         if synth.get("rob_tool"):
@@ -599,6 +926,23 @@ Return ONLY the Markdown text — no JSON, no preamble."""
             context_lines.append(f"**Publication Bias Plan:** {synth['publication_bias_plan']}")
         if synth.get("grade_plan"):
             context_lines.append(f"**GRADE Plan:** {synth['grade_plan']}")
+
+        phase_snapshot_lines: dict[str, dict] = {}
+        if isinstance(phase_snapshots, dict):
+            for phase_id, snapshot in phase_snapshots.items():
+                if not isinstance(snapshot, dict):
+                    continue
+                content = snapshot.get("content", {})
+                if not isinstance(content, dict):
+                    continue
+                compact = {
+                    key: value for key, value in content.items()
+                    if key != "__type" and value not in ("", [], {}, None)
+                }
+                if compact:
+                    phase_snapshot_lines[phase_id] = compact
+        if phase_snapshot_lines:
+            context_lines.append("**Protocol Builder Section Data:**\n" + json.dumps(phase_snapshot_lines, indent=2)[:4000])
 
     user = "Generate a complete PRISMA-P 2015 protocol document for:\n\n" + "\n".join(context_lines)
 
@@ -665,7 +1009,7 @@ Map ALL PROSPERO fields. For fields not determinable from the PICO/protocol, pro
 
     try:
         raw = await ai_provider.complete(system=system, user=user, json_mode=True, temperature=0.2)
-        result = json.loads(raw)
+        result = _load_llm_json(raw)
         # Ensure copy_paste_guide is always present
         if "copy_paste_guide" not in result:
             result["copy_paste_guide"] = (
@@ -718,7 +1062,7 @@ Map to Campbell Collaboration template."""
 
     try:
         raw = await ai_provider.complete(system=system, user=user, json_mode=True, temperature=0.2)
-        return json.loads(raw)
+        return _load_llm_json(raw)
     except Exception as e:
         logger.error("Campbell field mapping failed: %s", e)
         return {"error": str(e)}
@@ -796,7 +1140,7 @@ Generate comprehensive search strings for all 9 databases."""
             ),
             json_mode=True, temperature=0.2,
         )
-        return json.loads(resp.text)
+        return _load_llm_json(resp.text)
     except Exception as e:
         logger.error("Search string generation failed: %s", e)
         return {"error": str(e)}
@@ -900,7 +1244,167 @@ async def register_on_osf(
         }
 
 
-async def generate_protocol_docx(protocol_text: str, pico: dict) -> bytes:
+def _normalize_heading(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _estimate_line_units(text: str, kind: str) -> float:
+    words = re.findall(r"\S+", text or "")
+    count = len(words)
+    if kind == "heading1":
+        return 2.5 + max(0, count - 6) * 0.08
+    if kind == "heading2":
+        return 2.1 + max(0, count - 8) * 0.05
+    if kind == "heading3":
+        return 1.7 + max(0, count - 8) * 0.05
+    if kind == "bullet":
+        return max(1.0, count / 9.0)
+    if kind == "code":
+        return max(1.0, count / 7.0)
+    if kind == "blank":
+        return 0.4
+    return max(1.0, count / 11.0)
+
+
+def _build_protocol_heading_pages(protocol_text: str, lines_per_page: float = 42.0) -> dict[str, int]:
+    heading_pages: dict[str, int] = {}
+    cursor = 0.0
+    in_code_block = False
+
+    for raw_line in protocol_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            cursor += 0.4
+            continue
+
+        if not line:
+            cursor += _estimate_line_units("", "blank")
+            continue
+
+        kind = "paragraph"
+        content = line
+        if in_code_block:
+            kind = "code"
+        elif line.startswith("# "):
+            kind = "heading1"
+            content = line[2:].strip()
+        elif line.startswith("## "):
+            kind = "heading2"
+            content = line[3:].strip()
+        elif line.startswith("### "):
+            kind = "heading3"
+            content = line[4:].strip()
+        elif line.startswith("#### "):
+            kind = "heading4"
+            content = line[5:].strip()
+        elif line.startswith("- ") or line.startswith("* "):
+            kind = "bullet"
+            content = line[2:].strip()
+
+        page_no = max(1, int(cursor // lines_per_page) + 1)
+        if kind.startswith("heading"):
+            heading_pages.setdefault(_normalize_heading(content), page_no)
+
+        cursor += _estimate_line_units(content, kind)
+
+    return heading_pages
+
+
+def _resolve_page_number(
+    aliases: list[str],
+    heading_pages: dict[str, int],
+    fallback_page: int,
+) -> int:
+    normalized_aliases = [_normalize_heading(alias) for alias in aliases]
+
+    for alias in normalized_aliases:
+        if alias in heading_pages:
+            return heading_pages[alias]
+
+    for alias in normalized_aliases:
+        for heading, page_no in heading_pages.items():
+            if alias and (alias in heading or heading in alias):
+                return page_no
+
+    return fallback_page
+
+
+def _build_prisma_p_page_refs(protocol_text: str) -> dict[str, str]:
+    heading_pages = _build_protocol_heading_pages(protocol_text)
+    admin_page = _resolve_page_number(["administrative information", "title"], heading_pages, 1)
+    intro_page = _resolve_page_number(["background and rationale", "introduction"], heading_pages, admin_page)
+    objectives_page = _resolve_page_number(["objectives"], heading_pages, intro_page)
+    methods_page = _resolve_page_number(["methods"], heading_pages, objectives_page)
+
+    refs: dict[str, str] = {}
+    for item_no, aliases in _PRISMA_P_PAGE_ALIASES.items():
+        fallback_page = methods_page
+        if item_no in {"1a", "1b", "2", "3a", "3b", "4", "5a", "5b", "5c"}:
+            fallback_page = admin_page
+        elif item_no == "6":
+            fallback_page = intro_page
+        elif item_no == "7":
+            fallback_page = objectives_page
+        refs[item_no] = str(_resolve_page_number(aliases, heading_pages, fallback_page))
+    return refs
+
+
+def _protocol_title(pico: dict, prisma_p_data: Optional[dict] = None) -> str:
+    admin = (prisma_p_data or {}).get("administrative", {})
+    if isinstance(admin, dict):
+        title = str(admin.get("review_title") or "").strip()
+        if title:
+            return title
+
+    population = str(pico.get("population") or "").strip()
+    intervention = str(pico.get("intervention") or "").strip()
+    outcome = str(pico.get("outcome") or "").strip()
+    if population or intervention or outcome:
+        parts = [part for part in (population, intervention, outcome) if part]
+        return "Protocol: " + " / ".join(parts[:3])
+    return "Systematic Review Protocol"
+
+
+def _append_field_run(paragraph, instruction: str) -> None:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    run = paragraph.add_run()
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr_text = OxmlElement("w:instrText")
+    instr_text.set(qn("xml:space"), "preserve")
+    instr_text.text = instruction
+    fld_separate = OxmlElement("w:fldChar")
+    fld_separate.set(qn("w:fldCharType"), "separate")
+    display_text = OxmlElement("w:t")
+    display_text.text = "1"
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+
+    run._r.append(fld_begin)
+    run._r.append(instr_text)
+    run._r.append(fld_separate)
+    run._r.append(display_text)
+    run._r.append(fld_end)
+
+
+def _add_page_number_footer(doc) -> None:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    footer = doc.sections[0].footer
+    paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.text = "Page "
+    _append_field_run(paragraph, "PAGE")
+
+
+async def generate_protocol_docx(
+    protocol_text: str,
+    pico: dict,
+    prisma_p_data: Optional[dict] = None,
+) -> bytes:
     """
     Generate a downloadable .docx of the protocol following PRISMA-P structure.
     """
@@ -912,9 +1416,10 @@ async def generate_protocol_docx(protocol_text: str, pico: dict) -> bytes:
         raise ImportError("python-docx required: pip install python-docx")
 
     doc = Document()
+    _add_page_number_footer(doc)
 
     # Title
-    title_para = doc.add_heading("Systematic Review Protocol", level=0)
+    title_para = doc.add_heading(_protocol_title(pico, prisma_p_data), level=0)
     title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # PICO summary box
@@ -946,27 +1451,75 @@ async def generate_protocol_docx(protocol_text: str, pico: dict) -> bytes:
             doc.add_heading(line[3:], level=2)
         elif line.startswith("### "):
             doc.add_heading(line[4:], level=3)
+        elif line.startswith("#### "):
+            doc.add_heading(line[5:], level=4)
         elif line.startswith("- ") or line.startswith("* "):
             doc.add_paragraph(line[2:], style="List Bullet")
         else:
             doc.add_paragraph(line)
 
-    # PRISMA-P checklist appendix
-    doc.add_page_break()
-    doc.add_heading("PRISMA-P 2015 Checklist", level=1)
-    checklist_table = doc.add_table(rows=1 + len(_PRISMA_P_ITEMS), cols=3)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+async def generate_prisma_p_checklist_docx(
+    protocol_text: str,
+    pico: dict,
+    prisma_p_data: Optional[dict] = None,
+) -> bytes:
+    """
+    Generate a separate PRISMA-P checklist .docx with reported protocol page numbers.
+    """
+    try:
+        from docx import Document
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+    except ImportError:
+        raise ImportError("python-docx required: pip install python-docx")
+
+    doc = Document()
+    _add_page_number_footer(doc)
+
+    title_para = doc.add_heading("PRISMA-P 2015 Checklist", level=0)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    protocol_title_para = doc.add_paragraph()
+    protocol_title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    protocol_title_run = protocol_title_para.add_run(_protocol_title(pico, prisma_p_data))
+    protocol_title_run.italic = True
+
+    note_para = doc.add_paragraph()
+    note_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    note_run = note_para.add_run("Reported page numbers refer to the exported protocol manuscript.")
+    note_run.font.size = Pt(9)
+
+    page_refs = _build_prisma_p_page_refs(protocol_text)
+
+    checklist_table = doc.add_table(rows=1, cols=4)
     checklist_table.style = "Table Grid"
     header_cells = checklist_table.rows[0].cells
-    header_cells[0].text = "Item"
-    header_cells[1].text = "Description"
-    header_cells[2].text = "Status"
-    for i, (item_id, desc) in enumerate(_PRISMA_P_ITEMS.items()):
-        row = checklist_table.rows[i + 1].cells
-        row[0].text = item_id
-        row[1].text = desc
-        row[2].text = "✓"
+    header_cells[0].text = "Section and topic"
+    header_cells[1].text = "Item No"
+    header_cells[2].text = "Checklist item"
+    header_cells[3].text = "Reported on page No."
 
-    import io
+    for row_def in _PRISMA_P_CHECKLIST_TEMPLATE_ROWS:
+        row_cells = checklist_table.add_row().cells
+        if row_def["kind"] in {"section", "group"}:
+            merged = row_cells[0]
+            for idx in range(1, 4):
+                merged = merged.merge(row_cells[idx])
+            merged.text = row_def["label"]
+            if merged.paragraphs and merged.paragraphs[0].runs:
+                merged.paragraphs[0].runs[0].bold = True
+            continue
+
+        row_cells[0].text = row_def["topic"]
+        row_cells[1].text = row_def["item_no"]
+        row_cells[2].text = row_def["checklist_item"]
+        row_cells[3].text = page_refs.get(row_def["item_no"], "")
+
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -1137,7 +1690,7 @@ Generate the research question."""
             ),
             json_mode=True, temperature=0.2,
         )
-        result = json.loads(resp.text)
+        result = _load_llm_json(resp.text)
         result.setdefault("review_question", "")
         result.setdefault("alternative_phrasings", ["", "", ""])
         result.setdefault("methodological_cautions", "")
@@ -1242,7 +1795,7 @@ The background MUST retain these four ## subheadings (add any that are missing):
 ## How the Intervention Could Work
 ## Why It Is Important to Do This Review
 
-Return JSON: { "text": "...", "chat_reply": "..." }
+Return the revised section in the response format requested by the caller.
 - text: revised background (1000–1500 words) with all four ## subheadings intact, prose paragraphs only
 - chat_reply: 1–2 sentences summarising what was revised
 Maintain formal scholarly academic tone.""",
@@ -1250,7 +1803,7 @@ Maintain formal scholarly academic tone.""",
     "rationale": """You are a systematic review methodologist writing the 'Rationale & Gap' section of a protocol.
 The current rationale draft and conversation history are provided in the context.
 Revise the rationale based on the user's latest feedback, preserving what is good.
-Return JSON: { "text": "...", "chat_reply": "..." }
+Return the revised section in the response format requested by the caller.
 - text: revised 2–3 paragraph rationale explaining: (1) existing systematic reviews on this topic and their limitations or outdatedness, (2) the specific evidence gap this review fills, (3) why this review is needed now and who will benefit
 - chat_reply: 1–2 sentences summarising what was revised
 Reference Campbell Collaboration, Cochrane, or JBI guidance where relevant.""",
@@ -1346,7 +1899,7 @@ Return JSON: {
   "author_contact": "...",
   "chat_reply": "..."
 }
-- extraction_method: independent dual extraction or single with verification
+- extraction_method: a polished paragraph suitable for the manuscript that explains the overall data extraction process in prose, including whether extraction is independent/duplicate or single with verification
 - extraction_team: who extracts (e.g. two independent reviewers, student + senior)
 - pilot_testing: calibration on a sample before full extraction
 - disagreement_resolution: consensus, third reviewer arbitration
@@ -1367,6 +1920,7 @@ Return JSON: {
 - intervention_characteristics: type, dose, duration, delivery mode, provider, comparator details
 - outcome_items: primary outcomes (measure, instrument, time points), secondary outcomes
 - methodological_items: sample size, randomisation, blinding, follow-up rate, ITT analysis
+- These lists will be rendered into manuscript subheadings in this order: Study Characteristics, Participant Characteristics, Intervention and Comparator Details, Outcome Data, Methodological Variables
 Each list: 4–6 items appropriate for this review type and PICO.""",
 
     "rob_assessment": """You are a systematic review methodologist recommending risk of bias assessment tools.
@@ -1489,6 +2043,7 @@ async def generate_phase_content(
     phase: str,
     pico_context: dict,
     context_data: dict,
+    current_content: dict | None,
     messages: list[dict],
     ai_provider: AIProvider,
     review_type: str = "systematic_review",
@@ -1548,6 +2103,23 @@ Research question: {review_question}
     if current_draft:
         pico_summary += f"\n\nCurrent draft to revise:\n{current_draft[:2000]}"
 
+    if current_content:
+        try:
+            current_content_json = json.dumps(current_content, indent=2, ensure_ascii=False)
+        except Exception:
+            current_content_json = str(current_content)
+        pico_summary += f"\n\nCurrent section content:\n{current_content_json[:2500]}"
+
+    evidence_pack = context_data.get("evidence_pack")
+    evidence_context = ""
+    if phase in {"background", "rationale"} and isinstance(evidence_pack, dict):
+        summaries = evidence_pack.get("summaries", []) or []
+        papers = evidence_pack.get("ranked_papers", []) or []
+        evidence_context = (
+            _format_summary_sources_with_src_markers(summaries)
+            if summaries else _format_papers_with_src_markers(papers)
+        )
+
     if protocol_document:
         pico_summary += f"\n\nFull protocol document:\n{protocol_document[:5000]}"
 
@@ -1571,7 +2143,15 @@ This is the first draft for the '{phase}' phase. Generate appropriate content.""
 Conversation history:
 {conversation}
 
-Update the content based on the latest user feedback."""
+Update the content based on the latest user feedback.
+Return the updated structured content for this phase, preserving useful existing fields unless the user explicitly asks to remove or replace them."""
+
+    if evidence_context:
+        user_prompt += (
+            "\n\nEvidence pack for citation-grounded revision "
+            "(use ONLY these [SRC{n}] markers if you cite evidence):\n"
+            f"{evidence_context[:14000]}"
+        )
 
     # For text-only phases (objectives), return plain text wrapped in dict
     if phase == "objectives":
@@ -1588,6 +2168,56 @@ Update the content based on the latest user feedback."""
         except Exception as e:
             return {"reply": f"Error: {e}", "content": {}}
 
+    if phase in {"background", "rationale"} and mode == "direct":
+        tagged_system = (
+            system_prompt
+            + "\nIf an evidence pack is provided, cite ONLY with the supplied [SRC{n}] markers and do not invent any citation."
+            + "\n\nReturn plain text in EXACTLY this format:\n"
+              "CHAT_REPLY:\n"
+              "<1-2 sentence summary of what you revised>\n\n"
+              "TEXT:\n"
+              "<<<\n"
+              "<the full revised section text>\n"
+              ">>>\n"
+              "Do NOT return JSON. Do NOT use code fences."
+        )
+        try:
+            resp = await ai_provider.guarded_complete(
+                system=tagged_system,
+                user=user_prompt,
+                config=CompletionConfig(
+                    output_format=OutputFormat.PROSE,
+                    budget=TokenBudget(target_words=1800),
+                    max_continuations=2,
+                ),
+                temperature=0.3,
+            )
+            reply, text = _parse_tagged_text_phase_response(resp.text)
+            if not text.strip():
+                raise ValueError("Model returned no revised text for this section.")
+            if not reply:
+                reply = "I've updated this section based on your feedback."
+            if isinstance(evidence_pack, dict) and _evidence_sources_from_pack(evidence_pack):
+                updated_pack, _new_cited_ids, warnings = _refresh_pack_references(evidence_pack, phase, text)
+                if warnings:
+                    reply += f" {len(warnings)} citation marker(s) still need manual review."
+                return {
+                    "reply": reply,
+                    "content": {
+                        "text": updated_pack.get(f"{phase}_draft", text.strip()),
+                        "references_md": updated_pack.get("references_md", ""),
+                        "references_json": updated_pack.get("references_json", []),
+                        "bibtex": updated_pack.get("bibtex", ""),
+                        "cited_ids": updated_pack.get("cited_ids", []),
+                        "citation_warnings": warnings,
+                        "evidence_pack": updated_pack,
+                    },
+                }
+            return {"reply": reply, "content": {"text": text.strip()}}
+        except Exception as e:
+            logger.error("generate_phase_content(%s) tagged-text path failed: %s", phase, e)
+            return {"reply": f"Error generating content: {e}", "content": {}}
+
     # For structured JSON phases
     try:
         resp = await ai_provider.guarded_complete(
@@ -1599,7 +2229,7 @@ Update the content based on the latest user feedback."""
             ),
             json_mode=True, temperature=0.25,
         )
-        result = json.loads(resp.text)
+        result = _load_llm_json(resp.text)
         reply = result.pop("chat_reply", "Content generated. Review it above and let me know if you want any changes.")
         if not reply:
             reply = "I've updated this section based on your feedback."
@@ -1613,7 +2243,7 @@ Update the content based on the latest user feedback."""
 
 _BACKGROUND_CITATION_SYSTEM = """You are a systematic review methodologist writing the 'Background' section for a PRISMA-P 2015 compliant protocol.
 
-You have been provided a numbered list of papers retrieved from a literature search. These are the ONLY papers you may cite.
+You have been provided a numbered set of evidence-backed source summaries derived from the literature search. These are the ONLY sources you may cite.
 
 CITATION RULES (strictly enforced):
 - Cite papers using ONLY the [SRC{n}] marker format (e.g. [SRC1], [SRC3])
@@ -1643,7 +2273,7 @@ WRITING STANDARDS:
 
 _RATIONALE_CITATION_SYSTEM = """You are a systematic review methodologist writing the 'Rationale & Gap' section for a PRISMA-P 2015 compliant protocol.
 
-You have been provided a numbered list of papers. Cite ONLY these papers using [SRC{n}] markers.
+You have been provided a numbered set of evidence-backed source summaries derived from full-text or abstract analysis. Cite ONLY these sources using [SRC{n}] markers.
 
 Write 3–4 focused paragraphs (400–600 words total):
 1. Summarise existing systematic reviews or evidence syntheses on this topic [SRC{n}] and their limitations (recency, scope, methodological gaps)
@@ -1733,7 +2363,7 @@ def _paper_to_dict(p) -> dict:
         }
     if "id" not in d or not d["id"]:
         d["id"] = str(uuid.uuid4())
-    return d
+    return _json_safe(d)
 
 
 def _format_authors_short(authors) -> str:
@@ -1778,8 +2408,7 @@ def _resolve_citation_markers(text: str, papers: list[dict]) -> tuple[str, list[
     warnings: list[str] = []
     max_n = len(papers)
 
-    def replacer(m: re.Match) -> str:
-        n = int(m.group(1))
+    def _citation_for_index(n: int) -> str:
         if 1 <= n <= max_n:
             p = papers[n - 1]
             author = _format_authors_short(p.get("authors", ""))
@@ -1788,11 +2417,31 @@ def _resolve_citation_markers(text: str, papers: list[dict]) -> tuple[str, list[
             if pid not in cited_ids:
                 cited_ids.append(pid)
             return f"({author}, {year})"
-        else:
-            warnings.append(f"[SRC{n}] out of range (only {max_n} papers)")
-            return f"[SRC{n}]"
+        warnings.append(f"[SRC{n}] out of range (only {max_n} papers)")
+        return f"[SRC{n}]"
 
-    resolved = re.sub(r"\[SRC(\d+)\]", replacer, text)
+    def multi_replacer(m: re.Match) -> str:
+        numbers = [int(num) for num in re.findall(r"(?:SRC)?(\d+)", m.group(1), flags=re.IGNORECASE)]
+        if not numbers:
+            return m.group(0)
+        citations = []
+        for n in numbers:
+            resolved_citation = _citation_for_index(n)
+            if resolved_citation.startswith("(") and resolved_citation.endswith(")"):
+                citations.append(resolved_citation[1:-1])
+            else:
+                citations.append(resolved_citation)
+        if len(citations) == 1:
+            return f"({citations[0]})"
+        return f"({'; '.join(citations)})"
+
+    resolved = re.sub(
+        r"\[((?:SRC?\d+\s*[,;]\s*)+SRC?\d+)\]",
+        multi_replacer,
+        text,
+        flags=re.IGNORECASE,
+    )
+    resolved = re.sub(r"\[SRC(\d+)\]", lambda m: _citation_for_index(int(m.group(1))), resolved, flags=re.IGNORECASE)
     return resolved, cited_ids, warnings
 
 
@@ -1877,11 +2526,171 @@ def _format_bibtex(papers: list[dict]) -> str:
     return "\n\n".join(entries)
 
 
+def _evidence_sources_from_pack(pack: dict) -> list[dict]:
+    summaries = pack.get("summaries", []) or []
+    if summaries:
+        return [_summary_to_source_dict(summary) for summary in summaries]
+    return list(pack.get("ranked_papers", []) or [])
+
+
+def _ordered_cited_papers(sources: list[dict], cited_ids: list[str]) -> list[dict]:
+    source_by_id = {
+        str(source.get("id")): source
+        for source in sources
+        if source.get("id") is not None
+    }
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    for cited_id in cited_ids:
+        sid = str(cited_id)
+        if sid in seen:
+            continue
+        paper = source_by_id.get(sid)
+        if paper:
+            ordered.append(paper)
+            seen.add(sid)
+    return ordered
+
+
+def _refresh_pack_references(pack: dict, section: str, draft_raw: str) -> tuple[dict, list[str], list[str]]:
+    sources = _evidence_sources_from_pack(pack)
+    resolved_text, new_cited_ids, warnings = _resolve_citation_markers(draft_raw, sources)
+    has_src_markers = bool(re.search(r"\[(?:SRC\d+)(?:\s*[,;]\s*SRC\d+)*\]", draft_raw, flags=re.IGNORECASE))
+    if not new_cited_ids and not has_src_markers:
+        preserved_pack = dict(pack)
+        preserved_pack[f"{section}_draft"] = draft_raw.strip()
+        return preserved_pack, [], ["No [SRCn] markers were returned, so the existing references were preserved."]
+    all_cited_ids = (
+        new_cited_ids
+        if section == "background"
+        else list(dict.fromkeys([*(pack.get("cited_ids", []) or []), *new_cited_ids]))
+    )
+    cited_papers = _ordered_cited_papers(sources, all_cited_ids)
+
+    updated_pack = dict(pack)
+    updated_pack.update({
+        "cited_ids": all_cited_ids,
+        f"{section}_draft": resolved_text.strip(),
+        "references_md": _format_apa_references(cited_papers),
+        "references_json": _format_csl_json(cited_papers),
+        "bibtex": _format_bibtex(cited_papers),
+    })
+    return updated_pack, new_cited_ids, warnings
+
+
+def _compact_evidence_summary(summary: dict, paper: dict) -> dict:
+    sentence_bank = summary.get("sentence_bank", []) or []
+    ranked_bank = sorted(
+        sentence_bank,
+        key=lambda sent: (
+            sent.get("importance") != "high",
+            sent.get("use_in") not in {"introduction", "discussion", "results"},
+            sent.get("section") not in {"background", "discussion", "results"},
+        ),
+    )
+
+    return _json_safe({
+        "source_id": paper.get("id") or summary.get("paper_key") or str(uuid.uuid4()),
+        "paper_key": summary.get("paper_key") or paper.get("doi") or (paper.get("title") or "")[:60].lower().strip(),
+        "bibliography": summary.get("bibliography") or {
+            "title": paper.get("title", ""),
+            "authors": paper.get("authors", []),
+            "year": paper.get("year"),
+            "journal": paper.get("journal", ""),
+            "doi": paper.get("doi", ""),
+        },
+        "methods": summary.get("methods") or {},
+        "results": (summary.get("results") or [])[:2],
+        "critical_appraisal": summary.get("critical_appraisal") or {},
+        "one_line_takeaway": summary.get("one_line_takeaway", ""),
+        "sentence_bank": ranked_bank[:6],
+        "full_text_used": bool(summary.get("full_text_used")),
+        "text_source": summary.get("text_source", ""),
+    })
+
+
+def _summary_to_source_dict(summary: dict) -> dict:
+    bibliography = summary.get("bibliography") or {}
+    return {
+        "id": summary.get("source_id") or summary.get("paper_key") or str(uuid.uuid4()),
+        "paper_key": summary.get("paper_key") or "",
+        "authors": bibliography.get("authors") or [],
+        "year": bibliography.get("year"),
+        "title": bibliography.get("title") or "",
+        "journal": bibliography.get("journal") or "",
+        "doi": bibliography.get("doi") or "",
+        "one_line_takeaway": summary.get("one_line_takeaway") or "",
+        "methods": summary.get("methods") or {},
+        "results": summary.get("results") or [],
+        "critical_appraisal": summary.get("critical_appraisal") or {},
+        "sentence_bank": summary.get("sentence_bank") or [],
+        "full_text_used": bool(summary.get("full_text_used")),
+        "text_source": summary.get("text_source") or "",
+    }
+
+
+def _format_summary_sources_with_src_markers(summaries: list[dict]) -> str:
+    lines: list[str] = []
+    for i, summary in enumerate(summaries, 1):
+        src = _summary_to_source_dict(summary)
+        authors = _format_authors_short(src.get("authors", ""))
+        year = src.get("year") or "n.d."
+        title = src.get("title") or "Untitled"
+        journal = src.get("journal") or ""
+        doi = src.get("doi") or ""
+
+        header = f"[SRC{i}] {authors} ({year}). {title}."
+        if journal:
+            header += f" {journal}."
+        if doi:
+            header += f" https://doi.org/{doi}"
+        lines.append(header)
+
+        takeaway = str(src.get("one_line_takeaway") or "").strip()
+        if takeaway and takeaway != "NR":
+            lines.append(f"  Takeaway: {takeaway}")
+
+        methods = src.get("methods") or {}
+        study_design = str(methods.get("study_design") or "").strip()
+        sample_n = str(methods.get("sample_n") or "").strip()
+        if study_design or sample_n:
+            study_bits = [bit for bit in [study_design, f"N={sample_n}" if sample_n else ""] if bit]
+            lines.append(f"  Study: {' | '.join(study_bits)}")
+
+        evidence = str((src.get("critical_appraisal") or {}).get("evidence_grade") or "").strip()
+        if evidence and evidence != "NR":
+            lines.append(f"  Evidence: {evidence}")
+
+        sentence_bank = src.get("sentence_bank") or []
+        if sentence_bank:
+            for sent in sentence_bank[:6]:
+                text = str(sent.get("text") or "").strip()
+                if not text:
+                    continue
+                stats = str(sent.get("stats") or "").strip()
+                importance = "★" if sent.get("importance") == "high" else "-"
+                use_in = str(sent.get("use_in") or "discussion").upper()
+                line = f"  {importance} [{use_in}] {text}"
+                if stats and stats != "NR":
+                    line += f" ({stats})"
+                lines.append(line)
+        else:
+            first_result = (src.get("results") or [{}])[0] or {}
+            finding = str(first_result.get("finding") or "").strip()
+            if finding and finding != "NR":
+                lines.append(f"  Finding: {finding}")
+
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
 async def build_evidence_pack(
     query: str,
     ai_provider: AIProvider,
     n_articles: int = 20,
     pico_context: dict | None = None,
+    fetch_settings=None,
 ) -> dict:
     """
     Run a scoping literature search (NOT the formal review search) to build
@@ -1891,26 +2700,84 @@ async def build_evidence_pack(
     Text generation (background/rationale) is handled separately by
     write_background_from_pack() and write_rationale_from_pack().
     """
+    from models import Paper
     from services.literature_engine import LiteratureEngine
+    from services.paper_summarizer import summarize_paper
+    from services.query_expander import expand_query, heuristic_expand_query
 
     engine = LiteratureEngine()
-    queries = _build_background_queries(query, pico_context)
+    base_queries = _build_background_queries(query, pico_context)
+    try:
+        expanded = await expand_query(ai_provider, query, article_type="systematic_review")
+        queries = list(dict.fromkeys([*(expanded.queries or []), *base_queries]))[:8]
+        pubmed_queries = expanded.pubmed_queries or None
+    except Exception as exc:
+        logger.warning("build_evidence_pack query expansion failed: %s", exc)
+        fallback = heuristic_expand_query(query, article_type="systematic_review")
+        queries = list(dict.fromkeys([*(fallback.queries or []), *base_queries]))[:8]
+        pubmed_queries = fallback.pubmed_queries or None
+
     logger.info("build_evidence_pack: queries=%s n_articles=%d", queries, n_articles)
 
     raw_papers: list = []
+    final_papers: list[dict] = []
     try:
-        async for event in engine.search_all_streaming(queries, total_limit=n_articles * 3):
+        async for event in engine.search_all_streaming(
+            queries,
+            total_limit=n_articles,
+            pubmed_queries=pubmed_queries,
+        ):
             etype = event.get("type", "")
-            if etype == "result":
+            if etype in {"papers", "result"}:
                 raw_papers.extend(event.get("papers", []))
-            elif etype == "ranking":
-                # After ranking event the pool is the best subset; stop collecting
-                break
+            elif etype == "complete":
+                final_papers = event.get("papers", []) or []
     except Exception as exc:
         logger.warning("build_evidence_pack search error: %s", exc)
 
-    unique = _deduplicate_papers(raw_papers)[:n_articles]
+    unique = final_papers or _deduplicate_papers(raw_papers)[:n_articles]
     paper_dicts = [_paper_to_dict(p) for p in unique]
+
+    summary_limit = min(len(paper_dicts), 20)
+    summaries: list[dict] = []
+    summary_warnings: list[str] = []
+
+    async def _summarize_one(paper_dict: dict) -> tuple[dict | None, str | None]:
+        try:
+            paper = Paper(
+                title=str(paper_dict.get("title") or ""),
+                authors=list(paper_dict.get("authors") or []),
+                abstract=paper_dict.get("abstract"),
+                doi=paper_dict.get("doi"),
+                pmid=paper_dict.get("pmid"),
+                pmcid=paper_dict.get("pmcid"),
+                year=paper_dict.get("year"),
+                journal=paper_dict.get("journal"),
+                citation_count=paper_dict.get("citation_count"),
+                oa_pdf_url=paper_dict.get("oa_pdf_url"),
+                source=str(paper_dict.get("source") or "openalex"),
+            )
+            summary = await summarize_paper(
+                ai_provider,
+                paper,
+                query,
+                fetch_settings=fetch_settings,
+                session_id="",
+            )
+            return _compact_evidence_summary(summary.model_dump(), paper_dict), None
+        except Exception as exc:
+            title = str(paper_dict.get("title") or "Untitled")[:80]
+            logger.warning("Evidence-pack summarization failed for %s: %s", title, exc)
+            return None, f"Could not summarize '{title}': {exc}"
+
+    if summary_limit:
+        tasks = [asyncio.create_task(_summarize_one(paper_dict)) for paper_dict in paper_dicts[:summary_limit]]
+        for task in asyncio.as_completed(tasks):
+            compact_summary, warning = await task
+            if compact_summary:
+                summaries.append(compact_summary)
+            if warning:
+                summary_warnings.append(warning)
 
     return {
         "search_terms": queries,
@@ -1919,12 +2786,15 @@ async def build_evidence_pack(
         "retrieved_count": len(raw_papers),
         "deduplicated_count": len(paper_dicts),
         "ranked_papers": paper_dicts,
+        "summaries": summaries,
+        "summary_count": len(summaries),
         "cited_ids": [],
         "background_draft": "",
         "rationale_draft": "",
         "references_md": "",
         "references_json": [],
         "bibtex": "",
+        "warnings": summary_warnings,
     }
 
 
@@ -1939,12 +2809,14 @@ async def write_background_from_pack(
     validation. Returns updated pack dict + list of any citation warnings.
     """
     papers = pack.get("ranked_papers", [])
-    paper_context = _format_papers_with_src_markers(papers)
+    summaries = pack.get("summaries", []) or []
+    sources = _evidence_sources_from_pack(pack)
+    paper_context = _format_summary_sources_with_src_markers(summaries) if summaries else _format_papers_with_src_markers(papers)
 
     user_msg = (
         f"Research topic: {query}\n"
         f"Review type: {review_type}\n\n"
-        f"Papers (cite using [SRC{{n}}] markers only):\n{paper_context}\n\n"
+        f"Evidence sources (cite using [SRC{{n}}] markers only):\n{paper_context}\n\n"
         "Write the full structured Background section (1000–1500 words) with four ## subheadings."
     )
 
@@ -1963,7 +2835,7 @@ async def write_background_from_pack(
         logger.error("write_background_from_pack AI call failed: %s", exc)
         return {"pack": pack, "warnings": [str(exc)]}
 
-    resolved_text, cited_ids, warnings = _resolve_citation_markers(draft_raw, papers)
+    updated_pack, cited_ids, warnings = _refresh_pack_references(pack, "background", draft_raw)
 
     # If >20% citations unresolved, re-prompt once
     if warnings and len(warnings) > max(1, len(cited_ids)) * 0.2:
@@ -1980,31 +2852,19 @@ async def write_background_from_pack(
                 temperature=0.2,
             )
             draft_raw = resp.text
-            resolved_text, cited_ids, warnings = _resolve_citation_markers(draft_raw, papers)
+            updated_pack, cited_ids, warnings = _refresh_pack_references(pack, "background", draft_raw)
         except Exception:
             pass
 
-    cited_papers = [p for p in papers if p.get("id") in cited_ids]
-    references_md = _format_apa_references(cited_papers)
-    references_json = _format_csl_json(cited_papers)
-    bibtex = _format_bibtex(cited_papers)
-
-    pack = dict(pack)
-    pack.update({
-        "cited_ids": cited_ids,
-        "background_draft": resolved_text.strip(),
-        "references_md": references_md,
-        "references_json": references_json,
-        "bibtex": bibtex,
-    })
-    sources_used = len(cited_papers)
+    pack = updated_pack
+    sources_used = len(_ordered_cited_papers(sources, pack.get("cited_ids", []) or []))
     summary = (
         f"I searched the literature and found **{pack['deduplicated_count']} papers** on '{query[:60]}'. "
-        f"**{sources_used} papers** are cited in this background. "
+        f"**{sources_used} sources** are cited in this background. "
         "It covers four subheadings: The Problem, The Intervention, How It Works, and Why This Review Is Needed. "
         "Review the text and tell me what to expand, change, or add."
     )
-    return {"pack": pack, "warnings": warnings, "summary": summary}
+    return {"pack": pack, "warnings": [*(pack.get("warnings", []) or []), *warnings], "summary": summary}
 
 
 async def write_rationale_from_pack(
@@ -2019,13 +2879,15 @@ async def write_rationale_from_pack(
     Returns updated pack + summary.
     """
     papers = pack.get("ranked_papers", [])
-    paper_context = _format_papers_with_src_markers(papers)
+    summaries = pack.get("summaries", []) or []
+    sources = _evidence_sources_from_pack(pack)
+    paper_context = _format_summary_sources_with_src_markers(summaries) if summaries else _format_papers_with_src_markers(papers)
 
     user_msg = (
         f"Research topic: {query}\n"
         f"Review type: {review_type}\n\n"
         f"Background already written:\n{pack.get('background_draft', '')[:400]}\n\n"
-        f"Papers (cite using [SRC{{n}}] markers only):\n{paper_context}\n\n"
+        f"Evidence sources (cite using [SRC{{n}}] markers only):\n{paper_context}\n\n"
         "Write the Rationale & Gap section (400–600 words, 3–4 paragraphs)."
     )
 
@@ -2044,26 +2906,10 @@ async def write_rationale_from_pack(
         logger.error("write_rationale_from_pack failed: %s", exc)
         return {"pack": pack, "warnings": [str(exc)], "summary": "Error generating rationale."}
 
-    resolved_text, new_cited_ids, warnings = _resolve_citation_markers(draft_raw, papers)
-
-    # Merge cited_ids
-    all_cited = list(dict.fromkeys(pack.get("cited_ids", []) + new_cited_ids))
-    all_cited_papers = [p for p in papers if p.get("id") in all_cited]
-    references_md = _format_apa_references(all_cited_papers)
-    references_json = _format_csl_json(all_cited_papers)
-    bibtex = _format_bibtex(all_cited_papers)
-
-    pack = dict(pack)
-    pack.update({
-        "cited_ids": all_cited,
-        "rationale_draft": resolved_text.strip(),
-        "references_md": references_md,
-        "references_json": references_json,
-        "bibtex": bibtex,
-    })
+    pack, new_cited_ids, warnings = _refresh_pack_references(pack, "rationale", draft_raw)
     summary = (
-        f"Rationale drafted using the same evidence pack ({len(papers)} papers). "
-        f"{len(new_cited_ids)} papers cited in this section. "
+        f"Rationale drafted using the same evidence pack ({len(sources)} sources). "
+        f"{len(new_cited_ids)} sources cited in this section. "
         "Tell me what to revise or expand."
     )
-    return {"pack": pack, "warnings": warnings, "summary": summary}
+    return {"pack": pack, "warnings": [*(pack.get("warnings", []) or []), *warnings], "summary": summary}

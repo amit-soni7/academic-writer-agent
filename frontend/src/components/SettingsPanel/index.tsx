@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   type AISettings,
   type Provider,
@@ -10,7 +11,10 @@ import {
   fetchSettings,
   revealProviderApiKey,
   saveSettings,
+  startGeminiOAuth,
   testSettings,
+  testSciHubMirror,
+  disconnectGeminiOAuth,
 } from '../../api/settings';
 
 interface Props {
@@ -22,7 +26,7 @@ interface Props {
 type TestState = 'idle' | 'testing' | 'ok' | 'fail';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 // Navigation views: menu → ai (provider list) → ai:providerid (detail) → pdf → scihub
-type View = 'menu' | 'ai' | `ai:${Provider}` | 'pdf' | 'scihub';
+type View = 'menu' | 'ai' | `ai:${Provider}` | 'pdf' | 'scihub' | 'trackchanges';
 
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
@@ -94,6 +98,8 @@ function normalizeSettings(input: AISettings): AISettings {
     pdf_save_path:    input.pdf_save_path  ?? null,
     sci_hub_enabled:  Boolean(input.sci_hub_enabled),
     http_proxy:       input.http_proxy     ?? null,
+    scihub_mirrors:   input.scihub_mirrors ?? ['https://sci-hub.su', 'https://www.sci-hub.ren'],
+    track_changes_author: input.track_changes_author ?? null,
   };
 }
 
@@ -131,13 +137,22 @@ function Spinner() {
   );
 }
 
+function readErrorDetail(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const response = (err as { response?: { data?: { detail?: unknown } } }).response;
+  const detail = response?.data?.detail;
+  return typeof detail === 'string' ? detail : undefined;
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function SettingsPanel({ open, onClose, onSaved }: Props) {
+  const navigate = useNavigate();
   const [settings, setSettings] = useState<AISettings>(normalizeSettings({
     provider: 'openai', model: PROVIDER_DEFAULT_MODEL.openai, api_key: '', base_url: null,
     has_api_key: false, provider_configs: buildDefaultConfigs(),
     pdf_save_enabled: false, pdf_save_path: null, sci_hub_enabled: false, http_proxy: null,
+    scihub_mirrors: ['https://sci-hub.su', 'https://www.sci-hub.ren'],
   }));
 
   const [view,          setView]          = useState<View>('menu');
@@ -147,9 +162,12 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   const [saveError,     setSaveError]     = useState('');
   const [testState,     setTestState]     = useState<TestState>('idle');
   const [testMessage,   setTestMessage]   = useState('');
+  const [testAuthSource, setTestAuthSource] = useState('');
   const [modelsLoading, setModelsLoading] = useState<Partial<Record<Provider, boolean>>>({});
   const [modelSource,   setModelSource]   = useState<Partial<Record<Provider, string>>>({});
+  const [modelAuthSource, setModelAuthSource] = useState<Partial<Record<Provider, string>>>({});
   const [dynamicModels, setDynamicModels] = useState<Partial<Record<Provider, ProviderModelOption[]>>>({});
+  const [geminiAuthBusy, setGeminiAuthBusy] = useState<'idle' | 'connecting' | 'disconnecting'>('idle');
 
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -162,9 +180,36 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     if (!open) return;
     setView('menu');
     setTestState('idle');
+    setTestAuthSource('');
     fetchSettings()
       .then((s) => setSettings(normalizeSettings(s)))
       .catch(() => {});
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const url = new URL(window.location.href);
+    const oauthStatus = url.searchParams.get('gemini_oauth');
+    if (!oauthStatus) return;
+
+    setView('ai:gemini');
+    if (oauthStatus === 'success') {
+      setTestState('ok');
+      setTestAuthSource('oauth');
+      setTestMessage('Gemini OAuth connected.');
+      fetchSettings()
+        .then((s) => setSettings(normalizeSettings(s)))
+        .catch(() => {});
+    } else {
+      const raw = url.searchParams.get('msg') || 'unknown_error';
+      setTestState('fail');
+      setTestAuthSource('');
+      setTestMessage(`Gemini OAuth failed: ${raw.replace(/_/g, ' ')}`);
+    }
+
+    url.searchParams.delete('gemini_oauth');
+    url.searchParams.delete('msg');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
   }, [open]);
 
   useEffect(() => {
@@ -175,10 +220,11 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [open, onClose]);
 
-  // Auto-fetch models when entering a provider detail view
+  // Auto-fetch models only for local providers (ollama/llamacpp) — cloud providers use curated static list
   useEffect(() => {
     if (!view.startsWith('ai:')) return;
     const pid = view.slice(3) as Provider;
+    if (!LOCAL_IDS.has(pid)) return;
     void loadModels(pid, false);
   }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -202,6 +248,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       return s;
     });
     setTestState('idle');
+    setTestAuthSource('');
   }
 
   function switchActiveProvider(provider: Provider) {
@@ -215,6 +262,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       provider_configs: { ...providerConfigs, [provider]: { ...cfg, base_url: cfg.base_url ?? defaultBaseUrl(provider) } },
     }));
     setTestState('idle');
+    setTestAuthSource('');
   }
 
   async function handleRevealKey(provider: Provider) {
@@ -237,14 +285,21 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     const cfg = providerConfigs[provider];
     setModelsLoading((s) => ({ ...s, [provider]: true }));
     try {
-      const resp = await fetchProviderModels({ provider, api_key: cfg?.api_key || '', base_url: cfg?.base_url ?? null });
+      const resp = await fetchProviderModels({
+        provider,
+        api_key: cfg?.api_key || '',
+        base_url: cfg?.base_url ?? null,
+        auth_method: cfg?.auth_method || 'api_key',
+      });
       if (resp.models?.length) {
         setDynamicModels((s) => ({ ...s, [provider]: resp.models }));
         setModelSource((s) => ({ ...s, [provider]: resp.source }));
+        setModelAuthSource((s) => ({ ...s, [provider]: resp.auth_source || '' }));
         if (!cfg?.model && resp.models[0]) updateConfig(provider, { model: resp.models[0].value });
       }
     } catch {
       setModelSource((s) => ({ ...s, [provider]: 'fallback' }));
+      setModelAuthSource((s) => ({ ...s, [provider]: '' }));
     } finally {
       setModelsLoading((s) => ({ ...s, [provider]: false }));
     }
@@ -274,7 +329,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       setSaveState('saved');
       setTimeout(() => { onClose(); setSaveState('idle'); }, 900);
     } catch (err: unknown) {
-      const detail = (err as any)?.response?.data?.detail;
+      const detail = readErrorDetail(err);
       const msg    = err instanceof Error ? err.message : 'Save failed.';
       setSaveError(detail || msg);
       setSaveState('error');
@@ -284,16 +339,57 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   async function handleTest() {
     setTestState('testing');
     setTestMessage('');
+    setTestAuthSource('');
     try {
       const result = await testSettings(buildPayload());
       setTestState('ok');
       setTestMessage(result.message);
+      setTestAuthSource(result.auth_source || '');
       void handleSave();
     } catch (err: unknown) {
       setTestState('fail');
+      setTestAuthSource('');
       const msg    = err instanceof Error ? err.message : 'Connection failed.';
-      const detail = (err as any)?.response?.data?.detail;
+      const detail = readErrorDetail(err);
       setTestMessage(detail || msg);
+    }
+  }
+
+  async function handleGeminiConnect() {
+    setGeminiAuthBusy('connecting');
+    setTestState('idle');
+    setTestMessage('');
+    setTestAuthSource('');
+    try {
+      const data = await startGeminiOAuth();
+      window.location.href = data.auth_url;
+    } catch (err: unknown) {
+      setGeminiAuthBusy('idle');
+      setTestState('fail');
+      const msg = err instanceof Error ? err.message : 'Unable to start Gemini OAuth.';
+      const detail = readErrorDetail(err);
+      setTestMessage(detail || msg);
+    }
+  }
+
+  async function handleGeminiDisconnect() {
+    setGeminiAuthBusy('disconnecting');
+    try {
+      await disconnectGeminiOAuth();
+      const fresh = await fetchSettings();
+      const normalized = normalizeSettings(fresh);
+      setSettings(normalized);
+      onSaved(normalized);
+      setTestState('idle');
+      setTestMessage('');
+      setTestAuthSource('');
+    } catch (err: unknown) {
+      setTestState('fail');
+      const msg = err instanceof Error ? err.message : 'Unable to disconnect Gemini OAuth.';
+      const detail = readErrorDetail(err);
+      setTestMessage(detail || msg);
+    } finally {
+      setGeminiAuthBusy('idle');
     }
   }
 
@@ -356,6 +452,18 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       subtitle: sciSummary,
       badge: null,
     },
+    {
+      key: 'trackchanges' as const,
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+            d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+        </svg>
+      ),
+      label: 'Track Changes',
+      subtitle: settings.track_changes_author || 'Amit',
+      badge: null,
+    },
   ] as const;
 
   function MenuView() {
@@ -383,6 +491,29 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
               </svg>
             </button>
           ))}
+
+          {/* AI Usage & Costs */}
+          <button
+            type="button"
+            onClick={() => { onClose(); navigate('/usage'); }}
+            className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl border border-slate-200 bg-white hover:border-brand-300 hover:shadow-sm transition-all text-left group"
+          >
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
+              style={{ background: 'var(--gold-faint)', color: 'var(--gold)' }}>
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                  d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-slate-800">AI Usage & Costs</p>
+              <p className="text-xs text-slate-500 mt-0.5">Token consumption, costs by project and stage</p>
+            </div>
+            <svg className="w-4 h-4 text-slate-400 group-hover:text-slate-600 flex-shrink-0 transition-colors"
+              fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
         </div>
       </div>
     );
@@ -470,8 +601,16 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     const isActive = activeProvider === pid;
     const isLocal  = LOCAL_IDS.has(pid);
     const hasKey   = cfg?.has_api_key || Boolean(cfg?.api_key);
-    const modelList = (dynamicModels[pid]?.length ? dynamicModels[pid] : PROVIDER_MODELS[pid]) ?? [];
+    const authMethod = (cfg?.auth_method || 'api_key') as string;
+    // Cloud providers (openai/gemini/claude) always use curated static list — ignore API-fetched list
+    const modelList = (isLocal && dynamicModels[pid]?.length ? dynamicModels[pid] : PROVIDER_MODELS[pid]) ?? [];
     const currentModel = cfg?.model || PROVIDER_DEFAULT_MODEL[pid];
+    const isGemini = pid === 'gemini';
+    const geminiUsingFallback = isGemini && testState === 'ok' && testAuthSource === 'api_key_fallback';
+    const geminiUsingOAuth = isGemini && authMethod === 'oauth' && testAuthSource === 'oauth';
+    const apiKeyLabel = isGemini && authMethod === 'oauth'
+      ? 'Gemini API Key Fallback'
+      : isLocal ? 'API Key (optional)' : 'API Key';
 
     return (
       <>
@@ -508,11 +647,99 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
             )}
           </div>
 
+          {isGemini && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Authentication
+                </label>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  OAuth is primary. If OAuth fails and a Gemini API key is saved, the backend retries once with the API key.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => updateConfig('gemini', { auth_method: 'oauth' })}
+                  className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
+                    authMethod === 'oauth'
+                      ? 'border-brand-500 bg-brand-50 text-brand-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white'
+                  }`}
+                >
+                  Google OAuth
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateConfig('gemini', { auth_method: 'api_key' })}
+                  className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
+                    authMethod === 'api_key'
+                      ? 'border-brand-500 bg-brand-50 text-brand-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white'
+                  }`}
+                >
+                  API Key
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {cfg?.oauth_connected && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-medium">
+                    OAuth connected
+                  </span>
+                )}
+                {hasKey && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-sky-100 text-sky-700 font-medium">
+                    API key fallback saved
+                  </span>
+                )}
+                {authMethod === 'oauth' && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-700 font-medium">
+                    OAuth active
+                  </span>
+                )}
+                {geminiUsingFallback && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
+                    Using API key fallback
+                  </span>
+                )}
+                {geminiUsingOAuth && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-violet-100 text-violet-700 font-medium">
+                    Using OAuth
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleGeminiConnect()}
+                  disabled={geminiAuthBusy !== 'idle'}
+                  className="px-3 py-2 rounded-xl text-xs font-semibold text-white disabled:opacity-40 transition-colors"
+                  style={{ background: 'var(--gold)' }}
+                >
+                  {geminiAuthBusy === 'connecting'
+                    ? 'Connecting...'
+                    : cfg?.oauth_connected ? 'Reconnect Google' : 'Connect Google'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleGeminiDisconnect()}
+                  disabled={geminiAuthBusy !== 'idle' || !cfg?.oauth_connected}
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 bg-slate-50 hover:bg-white disabled:opacity-40 transition-colors"
+                >
+                  {geminiAuthBusy === 'disconnecting' ? 'Disconnecting...' : 'Disconnect'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* API Key */}
           {pid !== 'ollama' && (
             <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2">
               <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                {isLocal ? 'API Key (optional)' : 'API Key'}
+                {apiKeyLabel}
               </label>
               <div className="relative">
                 <input
@@ -539,7 +766,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
               )}
               {pid === 'gemini' && (
                 <p className="text-[11px] text-slate-500">
-                  Free API key —{' '}
+                  {authMethod === 'oauth' ? 'Saved key is used as fallback when OAuth fails. ' : 'Free API key — '}
                   <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
                     className="underline" style={{ color: 'var(--gold)' }}>
                     get one at aistudio.google.com
@@ -585,16 +812,27 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Model</label>
-              <button type="button" onClick={() => void loadModels(pid, true)}
-                disabled={Boolean(modelsLoading[pid])}
-                className="text-[11px] px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1">
-                {modelsLoading[pid] ? <><Spinner /> Fetching…</> : '↻ Fetch models'}
-              </button>
+              {isLocal && (
+                <button type="button" onClick={() => void loadModels(pid, true)}
+                  disabled={Boolean(modelsLoading[pid])}
+                  className="text-[11px] px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1">
+                  {modelsLoading[pid] ? <><Spinner /> Fetching…</> : '↻ Fetch models'}
+                </button>
+              )}
             </div>
 
             {modelSource[pid] && (
               <p className="text-[10px] text-slate-400">
                 {modelSource[pid] === 'api' ? 'Fetched live from API' : 'Using fallback list'}
+              </p>
+            )}
+            {pid === 'gemini' && modelAuthSource[pid] && modelSource[pid] === 'api' && (
+              <p className="text-[10px] text-slate-400">
+                {modelAuthSource[pid] === 'oauth'
+                  ? 'Gemini models fetched with OAuth'
+                  : modelAuthSource[pid] === 'api_key_fallback'
+                    ? 'Gemini models fetched with API key fallback'
+                    : 'Gemini models fetched with API key'}
               </p>
             )}
 
@@ -704,10 +942,64 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   // ── VIEW: Sci-Hub ────────────────────────────────────────────────────────────
 
   function SciHubView() {
+    const [newMirror, setNewMirror]   = useState('');
+    const [testing,   setTesting]     = useState<Record<string, 'idle' | 'testing' | 'ok' | 'fail'>>({});
+    const [testInfo,  setTestInfo]    = useState<Record<string, string>>({});
+
+    const mirrors: string[] = settings.scihub_mirrors ?? ['https://sci-hub.su', 'https://www.sci-hub.ren'];
+
+    async function handleTestAndAdd() {
+      const url = newMirror.trim().replace(/\/$/, '');
+      if (!url) return;
+      setTesting((t) => ({ ...t, [url]: 'testing' }));
+      try {
+        const res = await testSciHubMirror(url);
+        if (res.ok) {
+          setTesting((t) => ({ ...t, [url]: 'ok' }));
+          const kb = res.pdf_size_bytes ? ` · ${Math.round(res.pdf_size_bytes / 1024)} KB PDF` : '';
+          setTestInfo((t) => ({ ...t, [url]: `✓ ${res.latency_ms}ms${kb}` }));
+          if (!mirrors.includes(url)) {
+            setSettings((s) => ({ ...s, scihub_mirrors: [...(s.scihub_mirrors ?? []), url] }));
+          }
+          setNewMirror('');
+        } else {
+          setTesting((t) => ({ ...t, [url]: 'fail' }));
+          setTestInfo((t) => ({ ...t, [url]: res.error ?? 'Failed' }));
+        }
+      } catch {
+        setTesting((t) => ({ ...t, [url]: 'fail' }));
+        setTestInfo((t) => ({ ...t, [url]: 'Network error' }));
+      }
+    }
+
+    async function handleTestExisting(url: string) {
+      setTesting((t) => ({ ...t, [url]: 'testing' }));
+      try {
+        const res = await testSciHubMirror(url);
+        if (res.ok) {
+          setTesting((t) => ({ ...t, [url]: 'ok' }));
+          const kb = res.pdf_size_bytes ? ` · ${Math.round(res.pdf_size_bytes / 1024)} KB` : '';
+          setTestInfo((t) => ({ ...t, [url]: `${res.latency_ms}ms${kb}` }));
+        } else {
+          setTesting((t) => ({ ...t, [url]: 'fail' }));
+          setTestInfo((t) => ({ ...t, [url]: res.error ?? 'Failed' }));
+        }
+      } catch {
+        setTesting((t) => ({ ...t, [url]: 'fail' }));
+        setTestInfo((t) => ({ ...t, [url]: 'Network error' }));
+      }
+    }
+
+    function removeMirror(url: string) {
+      setSettings((s) => ({ ...s, scihub_mirrors: (s.scihub_mirrors ?? []).filter((m) => m !== url) }));
+    }
+
     return (
       <>
         <SubHeader title="Sci-Hub" onBack={() => setView('menu')} />
         <div className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
+
+          {/* Enable toggle */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
             <div className="flex items-start gap-3">
               <Toggle
@@ -736,6 +1028,125 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                 <p className="text-xs text-slate-500">For networks with restricted outbound access.</p>
               </div>
             )}
+          </div>
+
+          {/* Mirror manager */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+            <div>
+              <p className="text-sm font-semibold text-slate-800">Mirror URLs</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Tried in order — first responding mirror wins. Each URL is tested against a known open-access paper before being saved.
+              </p>
+            </div>
+
+            {/* Existing mirrors list */}
+            <div className="space-y-2">
+              {mirrors.map((url) => {
+                const state = testing[url] ?? 'idle';
+                const info  = testInfo[url];
+                return (
+                  <div key={url} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 bg-slate-50">
+                    <span className="flex-1 text-xs font-mono text-slate-700 truncate" title={url}>{url}</span>
+                    {state === 'testing' && (
+                      <span className="text-xs text-slate-400 animate-pulse">Testing…</span>
+                    )}
+                    {state === 'ok' && info && (
+                      <span className="text-xs text-emerald-600 font-medium">{info}</span>
+                    )}
+                    {state === 'fail' && info && (
+                      <span className="text-xs text-red-500 font-medium truncate max-w-[120px]" title={info}>{info}</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleTestExisting(url)}
+                      disabled={state === 'testing'}
+                      className="text-xs px-2 py-0.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-white transition-colors disabled:opacity-40"
+                    >
+                      Test
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeMirror(url)}
+                      className="text-slate-400 hover:text-red-500 transition-colors"
+                      title="Remove"
+                    >
+                      <span className="material-symbols-outlined text-sm">close</span>
+                    </button>
+                  </div>
+                );
+              })}
+              {mirrors.length === 0 && (
+                <p className="text-xs text-slate-400 italic">No mirrors configured — add one below.</p>
+              )}
+            </div>
+
+            {/* Add new mirror */}
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Add mirror URL
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newMirror}
+                  onChange={(e) => setNewMirror(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && void handleTestAndAdd()}
+                  placeholder="https://sci-hub.example.com"
+                  className="flex-1 rounded-xl border-2 border-slate-200 px-3 py-2 text-sm font-mono bg-slate-50 focus:outline-none focus:border-amber-400 focus:bg-white transition-colors"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleTestAndAdd()}
+                  disabled={!newMirror.trim() || testing[newMirror.trim()] === 'testing'}
+                  className="px-3 py-2 rounded-xl text-xs font-semibold text-white disabled:opacity-40 transition-colors whitespace-nowrap"
+                  style={{ background: 'var(--gold)' }}
+                >
+                  {testing[newMirror.trim()] === 'testing' ? 'Testing…' : 'Test & Add'}
+                </button>
+              </div>
+              {testing[newMirror.trim()] === 'fail' && testInfo[newMirror.trim()] && (
+                <p className="text-xs text-red-500">{testInfo[newMirror.trim()]}</p>
+              )}
+              <p className="text-xs text-slate-400">
+                Mirror is tested against a real paper — only added if it responds with a PDF.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="px-4 py-4 border-t border-slate-200 bg-white flex-shrink-0">
+          <button type="button" onClick={() => void handleSave()} disabled={saveState === 'saving'}
+            className="w-full px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-colors"
+            style={{ background: 'var(--gold)' }}>
+            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : 'Save'}
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  // ── VIEW: Track Changes ─────────────────────────────────────────────────────
+
+  function TrackChangesView() {
+    return (
+      <>
+        <SubHeader title="Track Changes" onBack={() => setView('menu')} />
+        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Author Name
+              </label>
+              <input
+                type="text"
+                value={settings.track_changes_author ?? ''}
+                onChange={(e) => setSettings((s) => ({ ...s, track_changes_author: e.target.value || null }))}
+                placeholder="Amit"
+                className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+              />
+              <p className="text-xs text-slate-500">
+                Default author name shown in Word track changes. You can override it at export time.
+              </p>
+            </div>
           </div>
         </div>
         <div className="px-4 py-4 border-t border-slate-200 bg-white flex-shrink-0">
@@ -783,6 +1194,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
         {view === 'ai'      && <AIListView />}
         {view === 'pdf'     && <PDFView />}
         {view === 'scihub'  && <SciHubView />}
+        {view === 'trackchanges' && <TrackChangesView />}
         {detailPid          && <ProviderDetailView pid={detailPid} />}
 
       </div>

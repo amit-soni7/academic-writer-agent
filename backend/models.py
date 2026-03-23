@@ -48,6 +48,7 @@ class WritingType(str, Enum):
     editorial           = "editorial"
     letter              = "letter"
     opinion             = "opinion"
+    study_protocol      = "study_protocol"
 
 
 class ArticleMode(str, Enum):
@@ -105,14 +106,20 @@ class AIProviderConfig(BaseModel):
     api_key: str = Field(default="")
     base_url: Optional[str] = Field(default=None, description="Custom base URL (Ollama only)")
     has_api_key: bool = Field(default=False, description="True when a key is stored server-side (masked in responses)")
+    auth_method: str = Field(default="api_key", description="api_key | oauth")
+    oauth_connected: bool = Field(default=False, description="True when the active provider has a live OAuth connection")
     # ── PDF persistence settings ───────────────────────────────────────────────
     pdf_save_enabled: bool = Field(default=False, description="Save downloaded PDFs to disk")
     pdf_save_path: Optional[str] = Field(default=None, description="Directory path for saved PDFs and BibTeX")
     # ── Sci-Hub settings ───────────────────────────────────────────────────────
     sci_hub_enabled: bool = Field(default=False, description="Use Sci-Hub as last-resort full-text source")
     http_proxy: Optional[str] = Field(default=None, description="HTTP proxy URL for Sci-Hub requests (e.g. http://proxy.uni.edu:8080)")
+    scihub_mirrors: list[str] = Field(default_factory=lambda: ["https://sci-hub.su", "https://www.sci-hub.ren"], description="Ordered list of Sci-Hub mirror URLs to try")
+    # ── Track changes settings ─────────────────────────────────────────────────
+    track_changes_author: Optional[str] = Field(default=None, description="Default author name for track changes in revision .docx exports")
     # ── OAuth (not persisted; populated at runtime for OAuth-connected providers) ──
     gemini_oauth_access_token: Optional[str] = Field(default=None, exclude=True, description="Runtime-only: valid OAuth access token for Gemini (not stored in DB)")
+    gemini_cloud_project_id: Optional[str] = Field(default=None, exclude=True, description="Runtime-only: Google Cloud project id used for Gemini OAuth calls")
 
 
 class ProviderConfigEntry(BaseModel):
@@ -145,6 +152,7 @@ class ProviderModelsRequest(BaseModel):
     provider: str
     api_key: str = ""
     base_url: Optional[str] = None
+    auth_method: str = ""
 
 
 class ModelOption(BaseModel):
@@ -155,6 +163,7 @@ class ModelOption(BaseModel):
 class ProviderModelsResponse(BaseModel):
     provider: str
     source: str = "fallback"
+    auth_source: Optional[str] = None
     models: list[ModelOption] = Field(default_factory=list)
 
 
@@ -170,6 +179,7 @@ class StreamSearchRequest(BaseModel):
     total_limit: int = Field(default=50, ge=10, le=10_000, description="Total papers wanted across all sources.")
     use_ai_expansion: bool = Field(default=True)
     article_type: Optional[str] = Field(default=None, description="Article type hint for framework selection (e.g. systematic_review, original_research)")
+    project_id: Optional[str] = Field(default=None, description="Persist live search state onto an existing project when available.")
 
 
 class SearchResponse(BaseModel):
@@ -228,6 +238,7 @@ class CreateProjectRequest(BaseModel):
     project_description: Optional[str] = None
     project_name: Optional[str] = None   # tentative title slug from search strategy
     project_type: Optional[str] = 'write'  # 'write' | 'revision' | 'systematic_review'
+    literature_search_state: Optional[dict] = None
     # SR-only fields (null/empty for non-SR projects)
     pico: Optional[dict] = None
     inclusion_criteria: list[str] = []
@@ -242,7 +253,7 @@ CreateSessionRequest = CreateProjectRequest
 class SummarizeAllRequest(BaseModel):
     query: str
     papers: list[Paper]
-    skip_excluded: bool = True   # skip papers with screening decision=exclude
+    skip_excluded: bool = False  # legacy field; novel article flow now summarizes all requested papers
 
 
 class ScreenPapersRequest(BaseModel):
@@ -406,6 +417,13 @@ class ConfidenceScore(BaseModel):
     notes: str     = ""
 
 
+class WritingEvidenceMeta(BaseModel):
+    selected_count: int = 0
+    max_count: int = 20
+    dominant_sections: list[str] = Field(default_factory=list)
+    limiting_factors: list[str] = Field(default_factory=list)
+
+
 class PaperSummary(BaseModel):
     """
     Full 3-pass evidence extraction for one paper.
@@ -413,7 +431,7 @@ class PaperSummary(BaseModel):
     """
     paper_key: str
     full_text_used: bool = False
-    text_source: str     = "abstract_only"   # pmc_xml | full_pdf | abstract_only | none
+    text_source: str     = "abstract_only"   # pmc_xml | full_pdf | full_html | abstract_only | none
 
     # ── Three passes ──────────────────────────────────────────────────────────
     triage:           Triage                   = Field(default_factory=Triage)
@@ -437,10 +455,21 @@ class PaperSummary(BaseModel):
 
     # ── Sentence bank (flat list of independently citable sentences) ─────────
     sentence_bank: list["SentenceCitation"] = []
+    writing_evidence_meta: WritingEvidenceMeta = Field(default_factory=WritingEvidenceMeta)
 
     # ── Cross-reference metadata (depth>0 = fetched as a cited paper) ─────────
     depth: int             = 0   # 0=primary, 1=cross-ref depth-1, 2=cross-ref depth-2
     cited_by_keys: list[str] = []  # paper_keys of primary papers that cited this one
+
+    # ── Citation purpose profile (derived from sentence_bank) ─────────────────
+    purpose_profile: dict[str, float] = Field(default_factory=dict)
+    # e.g. {"background": 0.7, "theory": 0.4, "identify_gap": 0.2}
+    recommended_sections: list[str]   = []   # derived top manuscript sections
+    is_seminal: bool                   = False
+    evidence_type: Optional[str]       = None
+    study_design: Optional[str]        = None
+    evidence_weight: Optional[str]     = None  # "strong" | "moderate" | "weak" | "unknown"
+    recency_score: Optional[float]     = None  # 0.0–1.0
 
 
 # ── Sentence bank ─────────────────────────────────────────────────────────────
@@ -454,6 +483,22 @@ class SentenceCitation(BaseModel):
     stats: str          = ""   # optional inline stats e.g. "OR=1.8 [1.2, 2.7] p=0.003"
     importance: str     = "medium"  # high | medium — high = must-cite for the research question
     use_in: str         = ""   # introduction | methods | results | discussion — target manuscript section
+    source_kind: str    = "paper_text"  # paper_text | cited_reference_claim
+    cited_ref_ids: list[str] = []       # link to the paper's cited_references when applicable
+
+    # ── Citation purpose (WHY this paper is cited) ────────────────────────────
+    primary_purpose: str          = ""   # dominant purpose from the taxonomy
+    secondary_purposes: list[str] = []   # additional applicable purposes
+    compare_sentiment: Optional[str] = None  # "consistent" | "contradicts" — only for compare_findings
+    # ── Source quality metadata ────────────────────────────────────────────────
+    evidence_type: Optional[str]  = None  # systematic_review | meta_analysis | rct | cohort |
+                                          # cross_sectional | qualitative | mixed_methods |
+                                          # psychometric_validation | theoretical | guideline |
+                                          # consensus_statement | review_narrative | primary_empirical
+    study_design: Optional[str]   = None
+    is_seminal: bool               = False
+    recency_score: Optional[float] = None  # 0.0–1.0
+    relevance_score: Optional[float] = None  # 0.0–1.0
 
 
 # ── Cross-reference & intro/discussion extraction ─────────────────────────────
@@ -487,6 +532,10 @@ class DiscussionInsight(BaseModel):
 
 class CrossReferenceRequest(BaseModel):
     depth: int = Field(default=1, ge=1, le=2, description="Expansion depth: 1 or 2 hops")
+    purpose_filter: list[str] = Field(
+        default_factory=list,
+        description="If set, expand only citations relevant to these purposes. Empty = all.",
+    )
 
 
 # ── Cross-paper synthesis ──────────────────────────────────────────────────────
@@ -533,6 +582,100 @@ class SynthesisResult(BaseModel):
     contradictions:     list[Contradiction]        = []
     gaps:               list[str]                  = []
     fact_bank:          list[FactBankEntry]        = []
+    manuscript_packs:   Optional["ManuscriptPack"] = None
+
+
+# ── Manuscript packs (deep synthesis → article builder bridge) ────────────
+
+class ThemeCluster(BaseModel):
+    """A thematic grouping of evidence within a manuscript section."""
+    theme_label: str
+    paper_keys: list[str] = []
+    sentences: list[dict] = []          # relevant sentence_bank entries
+    evidence_claims: list[dict] = []    # relevant evidence_matrix entries
+    contradictions: list[dict] = []
+    gaps: list[str] = []
+
+
+class SectionPack(BaseModel):
+    """Pre-organized evidence for one manuscript section."""
+    section_name: str                     # introduction, methods, results, discussion
+    theme_clusters: list[ThemeCluster] = []
+    narrative_arc: str = ""               # suggested rhetorical flow
+    key_citations: list[str] = []         # paper_keys ordered by priority
+
+
+class ManuscriptPack(BaseModel):
+    """Section-oriented evidence bundles for the article builder."""
+    section_packs: dict[str, SectionPack] = {}
+    central_argument: str = ""
+    evidence_strength_summary: str = ""
+
+
+# ── Deep synthesis (claim normalization + clustering) ─────────────────────
+
+class NormalizedClaim(BaseModel):
+    """A canonical evidence claim extracted and normalized across papers."""
+    claim_id: str
+    canonical_text: str
+    source_paper_keys: list[str] = []
+    population: str = ""
+    outcome: str = ""
+    effect_direction: str = ""     # positive | negative | null | mixed
+    effect_magnitude: str = ""
+    evidence_grade: str = ""
+    verbatim_quotes: list[str] = []
+
+
+class ContradictionDetail(BaseModel):
+    """Multi-dimensional explanation for why findings conflict."""
+    dimension: str = ""            # population | method | measurement | timeframe | context
+    description: str = ""
+    papers_a: list[str] = []
+    papers_b: list[str] = []
+    resolution_hypothesis: str = ""
+
+
+class ClaimCluster(BaseModel):
+    """A group of semantically related normalized claims."""
+    cluster_id: str
+    cluster_label: str
+    claims: list[NormalizedClaim] = []
+    synthesis_statement: str = ""
+    overall_direction: str = ""    # consistent | mixed | contradictory
+    strength: float = 0.0
+    contradiction_details: list[ContradictionDetail] = []
+
+
+class TheoryReference(BaseModel):
+    """A theoretical framework detected across multiple papers."""
+    theory_name: str
+    seminal_paper_keys: list[str] = []
+    applying_paper_keys: list[str] = []
+    support_level: str = ""        # strong | moderate | weak | mixed
+    description: str = ""
+
+
+class AutoFetchResult(BaseModel):
+    """Result of automatic evidence gap fetching during deep synthesis."""
+    thin_claims_detected: int = 0
+    queries_generated: list[str] = []
+    papers_found: int = 0
+    papers_summarized: int = 0
+    new_paper_keys: list[str] = []
+    skipped_duplicate: int = 0
+
+
+class DeepSynthesisResult(BaseModel):
+    """Full output of the multi-stage deep synthesis pipeline."""
+    normalized_claims: list[NormalizedClaim] = []
+    claim_clusters: list[ClaimCluster] = []
+    theory_map: list[TheoryReference] = []
+    manuscript_packs: ManuscriptPack = Field(default_factory=ManuscriptPack)
+    auto_fetch_result: Optional[AutoFetchResult] = None
+    pipeline_version: str = "1.0"
+    stages_completed: list[str] = []
+    warnings: list[dict] = []
 
 
 # ── Peer review ────────────────────────────────────────────────────────────────
@@ -605,6 +748,10 @@ class ImportManuscriptResult(BaseModel):
     sections_found: list[str]
     references_found: int
     manuscript_summary: str
+    section_index: list[dict] = []
+    prepared_docx: bool = False
+    reference_pdf_ready: bool = False
+    reference_pdf_warning: str = ""
 
 
 class ParseCommentsRequest(BaseModel):
@@ -629,6 +776,7 @@ class DiscussCommentRequest(BaseModel):
     doi_references: list[str] = []  # raw DOI strings; backend fetches metadata
     manuscript_text: str = ""       # numbered manuscript for context
     finalized_context: list[dict] = []  # finalized prior comments to avoid redundant edits
+    round_number: int = 1
 
 
 class FinalizeCommentRequest(BaseModel):
@@ -637,11 +785,19 @@ class FinalizeCommentRequest(BaseModel):
     comment_number: int
     finalized_plan: str
     manuscript_text: str = ""
+    round_number: int = 1
 
 
 class GenerateFromPlansRequest(BaseModel):
     round_number: int
     journal_name: str = ""
+    finalized_plans: list[dict] = []
+
+
+class GenerateAllDocsRequest(BaseModel):
+    """Request to generate all three revision documents at once."""
+    round_number: int = 1
+    author: str = "Amit"
 
 
 class RevisionWipPayload(BaseModel):
@@ -653,13 +809,14 @@ class RevisionWipPayload(BaseModel):
     suggestions: list[dict] = []
     comment_plans: list[dict] = []
     step: str = "manuscript"
-    finalized_plans: list[dict]     # list of serialized CommentPlan objects
+    finalized_plans: list[dict] = []     # list of serialized CommentPlan objects
 
 
 class SuggestChangesRequest(BaseModel):
     manuscript_text: str = ""
     journal_name: str = ""
     parsed_comments: list[RealReviewerComment] = []
+    round_number: int = 1
 
 
 class CommentChangeSuggestion(BaseModel):
@@ -677,6 +834,22 @@ class CommentChangeSuggestion(BaseModel):
     response_snippet: str = ""
     ambiguity_flag: bool = False
     ambiguity_question: str = ""
+
+
+# ── Comment work (per-comment persistence) ───────────────────────────────────
+
+class UpdateCommentWorkRequest(BaseModel):
+    """Partial update for one comment row in comment_work table."""
+    original_comment: Optional[str] = None
+    category: Optional[str] = None
+    current_plan: Optional[str] = None
+    doi_references: Optional[list[str]] = None
+    is_finalized: Optional[bool] = None
+
+
+class ReplaceCommentsRequest(BaseModel):
+    """Replace all comment_work rows for a round (after delete/split/reorder)."""
+    comments: list[dict] = []
 
 
 # ── Systematic Review Pipeline ─────────────────────────────────────────────────

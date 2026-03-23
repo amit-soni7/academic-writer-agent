@@ -25,6 +25,36 @@ def _number_lines(text: str) -> str:
     return "\n".join(f"{i+1:4d}  {line}" for i, line in enumerate(text.splitlines()))
 
 
+def _build_section_index_header(section_index: list[dict] | None) -> str:
+    """Build a compact section-to-line-range map for AI structural awareness."""
+    if not section_index:
+        return ""
+    lines = ["MANUSCRIPT STRUCTURE:"]
+    for s in section_index:
+        lines.append(f"  {s['name']}: Lines {s['start_line']}–{s['end_line']}")
+    return "\n".join(lines)
+
+
+def _build_full_context(
+    manuscript_text: str,
+    manuscript_summary: str = "",
+    section_index: list[dict] | None = None,
+) -> str:
+    """Build the full manuscript context: summary + section index + line-numbered text.
+
+    No truncation — the full manuscript is included.
+    """
+    parts: list[str] = []
+    if manuscript_summary:
+        parts.append(f"MANUSCRIPT SUMMARY:\n{manuscript_summary}")
+    idx_header = _build_section_index_header(section_index)
+    if idx_header:
+        parts.append(idx_header)
+    numbered = _number_lines(manuscript_text)
+    parts.append(f"FULL LINE-NUMBERED MANUSCRIPT:\n---\n{numbered}\n---")
+    return "\n\n".join(parts)
+
+
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
 _RESPONSE_SYSTEM = """You are an expert scientific author responding to peer-review comments from a journal.
@@ -125,7 +155,7 @@ async def generate_real_revision(
             user=_RESPONSE_USER_TMPL.format(
                 manuscript_summary=manuscript_summary or "(not provided)",
                 journal_name=journal_name or "the journal",
-                numbered_manuscript=numbered_ms[:12000],  # ~8k token safety
+                numbered_manuscript=numbered_ms,
                 comments_json=comments_json,
             ),
             temperature=0.15,
@@ -160,8 +190,8 @@ async def generate_real_revision(
         revised_article = await provider.complete(
             system=_REVISED_SYSTEM,
             user=_REVISED_USER_TMPL.format(
-                manuscript=manuscript[:10000],
-                responses_summary=responses_summary[:4000],
+                manuscript=manuscript,
+                responses_summary=responses_summary,
             ),
             temperature=0.20,
         )
@@ -235,11 +265,6 @@ _DISCUSS_USER_TMPL = """REVIEWER COMMENT:
 CURRENT CHANGE PLAN:
 {current_plan}
 
-LINE-NUMBERED MANUSCRIPT (first 8000 chars):
----
-{numbered_manuscript}
----
-
 {doi_block}{finalized_block}CONVERSATION HISTORY:
 {history_text}
 
@@ -258,6 +283,8 @@ async def discuss_comment(
     doi_refs: list[str],
     manuscript_text: str,
     finalized_context: list[dict] | None = None,
+    manuscript_summary: str = "",
+    section_index: list[dict] | None = None,
 ) -> dict:
     """
     One turn of the per-comment discussion.
@@ -291,7 +318,7 @@ async def discuss_comment(
         except ImportError:
             pass
 
-    numbered_ms = _number_lines(manuscript_text) if manuscript_text else "(manuscript not provided)"
+    full_ctx = _build_full_context(manuscript_text, manuscript_summary, section_index) if manuscript_text else "(manuscript not provided)"
 
     finalized_block = ""
     if finalized_context:
@@ -313,12 +340,12 @@ async def discuss_comment(
     else:
         history_text = "(no prior conversation)"
 
-    raw = await provider.complete(
+    raw = await provider.complete_cached(
+        cacheable_context=full_ctx,
         system=_DISCUSS_SYSTEM,
         user=_DISCUSS_USER_TMPL.format(
             original_comment=original_comment,
             current_plan=current_plan or "(none yet — please propose an initial plan)",
-            numbered_manuscript=numbered_ms[:8000],
             doi_block=doi_block,
             finalized_block=finalized_block,
             history_text=history_text,
@@ -346,24 +373,31 @@ _FINALIZE_SYSTEM = """You are an expert scientific author. The author has agreed
 Write:
 1. A formal, respectful author response letter paragraph (scholarly, professional tone)
 2. A precise action-taken location string
-3. A manuscript change-instructions block (plain text, exact edit operations)
+3. A JSON array of manuscript edit operations
 
 Return ONLY valid JSON (no markdown fences):
 {
   "author_response": "We thank Reviewer X for this insightful comment...",
-  "action_taken": "Introduction, paragraph 2, Lines 23–28 of the revised manuscript: [description]",
-  "manuscript_changes": "CHANGE Methods, Line 37 of the revised manuscript\nDELETE: \"...\"\nADD: \"...\""
+  "action_taken": "Introduction, paragraph 2, Lines 23-28: [description]",
+  "manuscript_changes": [
+    {"type": "replace", "find": "<EXACT text from manuscript>", "replace_with": "<new text>"},
+    {"type": "insert_after", "anchor": "<EXACT text of paragraph to insert after>", "text": "<new text>"},
+    {"type": "delete", "find": "<EXACT text to remove>"}
+  ]
 }
 
 Rules:
-- author_response: 2–4 paragraphs. Acknowledge the comment, explain the change, cite the plan.
+- author_response: 2-4 paragraphs. Acknowledge the comment, explain the change, cite the plan.
 - action_taken: be precise. If no text change, write "No change required: [reason]".
-- manuscript_changes must follow this strict format when text is edited:
-  Manuscript Change Instructions (what · where · exact text)
-  CHANGE <where>
-  DELETE: "<exact old text>"
-  ADD: "<exact new text>"
-  If no text change, return "No textual manuscript edit required."""
+- manuscript_changes: JSON array of edit operations. CRITICAL RULES:
+  1. "find" and "anchor" values MUST be copied character-for-character from the manuscript. Do NOT paraphrase.
+  2. "find"/"anchor" text must be at least 50 characters long to ensure uniqueness in the document.
+  3. For REPLACE (changing existing text): {"type": "replace", "find": "exact old text", "replace_with": "new text"}
+  4. For INSERT (adding new text after an existing paragraph): {"type": "insert_after", "anchor": "exact text of the paragraph to insert after (50+ chars)", "text": "new content"}
+  5. For DELETE (removing text without replacement): {"type": "delete", "find": "exact text to remove"}
+  6. If no text changes needed: return an empty array []
+  7. Multiple operations per comment are supported - list them all in the array.
+  8. Each operation must target a specific, locatable piece of text in the manuscript."""
 
 _FINALIZE_USER_TMPL = """REVIEWER COMMENT (Reviewer {reviewer_number}, Comment {comment_number}):
 {original_comment}
@@ -371,12 +405,7 @@ _FINALIZE_USER_TMPL = """REVIEWER COMMENT (Reviewer {reviewer_number}, Comment {
 FINALIZED CHANGE PLAN:
 {finalized_plan}
 
-MANUSCRIPT CONTEXT (line-numbered):
----
-{numbered_manuscript}
----
-
-Write the formal author response. Return JSON only."""
+Write the formal author response. For manuscript_changes, copy EXACT text from the manuscript for "find" and "anchor" fields. Return JSON only."""
 
 
 async def finalize_comment_response(
@@ -386,21 +415,23 @@ async def finalize_comment_response(
     manuscript_text: str,
     reviewer_number: int,
     comment_number: int,
+    manuscript_summary: str = "",
+    section_index: list[dict] | None = None,
 ) -> dict:
     """
     Write formal author_response and action_taken from an agreed change plan.
     Returns {author_response: str, action_taken: str, manuscript_changes: str}.
     """
-    numbered_ms = _number_lines(manuscript_text) if manuscript_text else "(manuscript not provided)"
+    full_ctx = _build_full_context(manuscript_text, manuscript_summary, section_index) if manuscript_text else "(manuscript not provided)"
 
-    raw = await provider.complete(
+    raw = await provider.complete_cached(
+        cacheable_context=full_ctx,
         system=_FINALIZE_SYSTEM,
         user=_FINALIZE_USER_TMPL.format(
             reviewer_number=reviewer_number,
             comment_number=comment_number,
             original_comment=original_comment,
             finalized_plan=finalized_plan or "(no specific plan — respond gracefully)",
-            numbered_manuscript=numbered_ms[:8000],
         ),
         temperature=0.15,
     )
@@ -408,16 +439,24 @@ async def finalize_comment_response(
     raw = re.sub(r'\s*```$', '', raw.strip())
     try:
         result = json.loads(raw)
+        # manuscript_changes: store as JSON string if it's a list (new format)
+        mc = result.get("manuscript_changes", [])
+        if isinstance(mc, list):
+            mc_str = json.dumps(mc)
+        elif isinstance(mc, str):
+            mc_str = mc  # legacy format or already stringified
+        else:
+            mc_str = "[]"
         return {
             "author_response": result.get("author_response", ""),
             "action_taken": result.get("action_taken", ""),
-            "manuscript_changes": result.get("manuscript_changes", "{}"),
+            "manuscript_changes": mc_str,
         }
     except Exception:
         return {
             "author_response": raw,
             "action_taken": "See response.",
-            "manuscript_changes": "{}",
+            "manuscript_changes": "[]",
         }
 
 
@@ -489,8 +528,8 @@ async def generate_revision_from_plans(
         revised_article = await provider.complete(
             system=_PLANS_REVISED_SYSTEM,
             user=_PLANS_REVISED_USER_TMPL.format(
-                manuscript=manuscript_text[:10000],
-                changes_summary=changes_summary[:5000],
+                manuscript=manuscript_text,
+                changes_summary=changes_summary,
             ),
             temperature=0.15,
         )
@@ -604,6 +643,8 @@ async def suggest_comment_changes(
     manuscript_text: str,
     parsed_comments: list[dict],
     journal_name: str = "",
+    manuscript_summary: str = "",
+    section_index: list[dict] | None = None,
 ) -> list[dict]:
     if not parsed_comments:
         return []
@@ -630,14 +671,15 @@ async def suggest_comment_changes(
             })
         return out
 
+    full_ctx = _build_full_context(manuscript_text, manuscript_summary, section_index)
     user_msg = (
-        f"Journal: {journal_name or 'N/A'}\n"
-        f"Manuscript excerpt (first 9000 chars):\n---\n{manuscript_text[:9000]}\n---\n\n"
+        f"Journal: {journal_name or 'N/A'}\n\n"
         f"Parsed reviewer comments JSON:\n{json.dumps(parsed_comments, ensure_ascii=False, indent=2)}\n\n"
         "Return JSON array only."
     )
 
-    raw = await provider.complete(
+    raw = await provider.complete_cached(
+        cacheable_context=full_ctx,
         system=_SUGGEST_SYSTEM,
         user=user_msg,
         json_mode=True,

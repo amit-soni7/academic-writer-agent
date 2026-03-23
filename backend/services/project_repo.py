@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -17,7 +18,7 @@ from typing import Optional
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from services.db import create_engine_async, projects, papers, summaries, journal_recs, screenings
+from services.db import create_engine_async, projects, papers, summaries, journal_recs, screenings, comment_work
 
 
 def _now() -> datetime:
@@ -33,6 +34,13 @@ def _auto_project_name(query: str) -> str:
     return slug or "project"
 
 
+def auto_project_title(query: str, max_len: int = 80) -> str:
+    """Create a readable fallback display title from the user's query."""
+    title = re.sub(r'\s+', ' ', (query or '').strip())
+    title = title[:max_len].strip()
+    return title or "Project"
+
+
 def slugify_project_name(text: str, max_len: int = 80) -> str:
     """Slugify any text into a clean folder-safe name."""
     slug = re.sub(r'[^a-zA-Z0-9 ]', '', text).strip()
@@ -40,10 +48,33 @@ def slugify_project_name(text: str, max_len: int = 80) -> str:
     return slug or "project"
 
 
-def _make_project_folder(project_name: str, pdf_save_path: Optional[str] = None) -> str:
-    """Return (and create) the project folder path."""
-    base = pdf_save_path or os.path.expanduser("~/Documents/AcademicWriter")
-    folder = os.path.join(base, project_name)
+def _project_base_dir() -> str:
+    """Return the base directory for all project folders: backend/public/projects/."""
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "public", "projects")
+
+
+def _project_storage_root(pdf_save_path: Optional[str] = None) -> str:
+    """Return the base directory used for project folders."""
+    custom_root = str(pdf_save_path or "").strip()
+    return custom_root or _project_base_dir()
+
+
+def resolve_project_folder_path(project_name: str, pdf_save_path: Optional[str] = None) -> str:
+    """Return the canonical folder path for a project name under the active storage root."""
+    folder_slug = slugify_project_name((project_name or "").strip() or "project") or "project"
+    return os.path.join(_project_storage_root(pdf_save_path), folder_slug)
+
+
+def ensure_project_folder(project_name: str, pdf_save_path: Optional[str] = None) -> str:
+    """Create and return the canonical project folder path."""
+    folder = resolve_project_folder_path(project_name, pdf_save_path=pdf_save_path)
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def _make_project_folder(project_name: str) -> str:
+    """Return (and create) the project folder path under backend/public/projects/."""
+    folder = os.path.join(_project_base_dir(), project_name)
     os.makedirs(folder, exist_ok=True)
     return folder
 
@@ -60,20 +91,20 @@ async def create_project(
     pdf_save_path: Optional[str] = None,
     project_name: Optional[str] = None,
     project_type: Optional[str] = 'write',
+    literature_search_state: Optional[dict] = None,
 ) -> str:
     eng = engine or create_engine_async()
     pid = uuid.uuid4().hex[:8]
 
-    # Use provided name (tentative title from search strategy) or fall back to query slug
-    project_name = slugify_project_name(project_name) if project_name else _auto_project_name(query)
-    project_folder = _make_project_folder(project_name, pdf_save_path)
+    display_name = (project_name or "").strip() or auto_project_title(query)
+    project_folder = ensure_project_folder(display_name, pdf_save_path=pdf_save_path)
 
     async with eng.begin() as conn:
         await conn.execute(insert(projects).values(
             project_id=pid,
             user_id=user_id,
             query=query,
-            project_name=project_name,
+            project_name=display_name,
             project_description=project_description,
             project_folder=project_folder,
             current_phase='intake',
@@ -82,6 +113,11 @@ async def create_project(
             article_type=article_type,
             project_type=project_type or 'write',
             revision_rounds='[]',
+            literature_search_state=(
+                literature_search_state
+                if projects.c.literature_search_state.type.__class__.__name__.lower() == 'jsonb' or literature_search_state is None
+                else json.dumps(literature_search_state, ensure_ascii=False)
+            ),
         ))
         is_jsonb = papers.c.data.type.__class__.__name__.lower() == 'jsonb'
         for p in papers_list:
@@ -143,13 +179,15 @@ async def load_project(user_id: str, project_id: str) -> Optional[dict]:
             except Exception:
                 return v
 
+        row_dict = dict(row)
+        row_dict["literature_search_state"] = _coerce(row_dict.get("literature_search_state"))
         papers_list = [_coerce(r[0]) for r in pr]
         summaries_map = {k: _coerce(v) for k, v in sr}
         jr_first = jr.mappings().first()
         journal_list = _coerce(jr_first["data"]) if jr_first else []
 
         return {
-            **dict(row),
+            **row_dict,
             'papers': papers_list,
             'summaries': summaries_map,
             'journal_recs': journal_list,
@@ -157,7 +195,7 @@ async def load_project(user_id: str, project_id: str) -> Optional[dict]:
 
 
 async def load_project_minimal(project_id: str) -> dict:
-    """Load just the project row (no papers/summaries) — for internal use."""
+    """Load the project row excluding heavy blob columns — for internal use."""
     eng = create_engine_async()
     async with eng.connect() as conn:
         row = (await conn.execute(select(projects).where(
@@ -226,6 +264,21 @@ async def get_existing_summary_keys(project_id: str) -> set[str]:
         return {r[0] for r in res}
 
 
+async def clear_project_summaries(project_id: str) -> int:
+    """Delete all summaries for a project. Returns count of deleted rows."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        result = await conn.execute(
+            delete(summaries).where(summaries.c.project_id == project_id)
+        )
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(updated_at=_now())
+        )
+        return result.rowcount
+
+
 async def save_journal_recs(project_id: str, recs: list[dict]) -> None:
     eng = create_engine_async()
     is_jsonb = journal_recs.c.data.type.__class__.__name__.lower() == 'jsonb'
@@ -279,13 +332,15 @@ async def update_project_name(project_id: str, new_name: str) -> str:
     """Rename project, rename folder on disk, return new folder path."""
     proj = await load_project_minimal(project_id)
     old_folder = proj.get("project_folder")
+    display_name = (new_name or "").strip() or "Project"
+    folder_slug = slugify_project_name(display_name)
     # Preserve the same base directory (user's pdf_save_path) when renaming
     if old_folder:
         base = os.path.dirname(old_folder)
-        new_folder = os.path.join(base, new_name)
+        new_folder = os.path.join(base, folder_slug)
         os.makedirs(new_folder, exist_ok=True)
     else:
-        new_folder = _make_project_folder(new_name)
+        new_folder = ensure_project_folder(display_name)
     if old_folder and os.path.exists(old_folder) and old_folder != new_folder:
         try:
             os.rename(old_folder, new_folder)
@@ -296,7 +351,7 @@ async def update_project_name(project_id: str, new_name: str) -> str:
         await conn.execute(
             update(projects)
             .where(projects.c.project_id == project_id)
-            .values(project_name=new_name, project_folder=new_folder, updated_at=_now())
+            .values(project_name=display_name, project_folder=new_folder, updated_at=_now())
         )
     return new_folder
 
@@ -323,17 +378,166 @@ async def update_project_folder(project_id: str, folder: str) -> None:
         )
 
 
+async def save_literature_search_state(
+    project_id: str,
+    state: dict | None,
+    *,
+    query: str | None = None,
+) -> None:
+    """Persist the live literature-search snapshot used to restore the dashboard."""
+    eng = create_engine_async()
+    is_jsonb = projects.c.literature_search_state.type.__class__.__name__.lower() == 'jsonb'
+    values: dict = {
+        "literature_search_state": state if is_jsonb or state is None else json.dumps(state, ensure_ascii=False),
+        "updated_at": _now(),
+    }
+    if query is not None:
+        values["query"] = query
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(**values)
+        )
+
+
+async def replace_project_papers(project_id: str, papers_list: list[dict]) -> None:
+    """Replace the project's selected paper set with a fresh ranked result list."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(delete(papers).where(papers.c.project_id == project_id))
+        is_jsonb = papers.c.data.type.__class__.__name__.lower() == 'jsonb'
+        for p in papers_list:
+            await conn.execute(insert(papers).values(
+                project_id=project_id,
+                paper_key=(p.get('doi') or (p.get('title') or '')[:60]).lower().strip(),
+                data=(p if is_jsonb else json.dumps(p, ensure_ascii=False)),
+            ))
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(updated_at=_now())
+        )
+
+
 # ── Revision round persistence ─────────────────────────────────────────────────
 
-async def save_base_manuscript(project_id: str, text: str) -> None:
-    """Store the imported manuscript text."""
+async def save_base_manuscript(
+    project_id: str,
+    text: str,
+    summary: str = "",
+    section_index: list[dict] | None = None,
+    gemini_cache_name: str = "",
+) -> None:
+    """Store the imported manuscript text and optional metadata."""
+    values: dict = {"base_manuscript": text, "updated_at": _now()}
+    if summary:
+        values["base_manuscript_summary"] = summary
+    if section_index is not None:
+        values["base_section_index"] = json.dumps(section_index, ensure_ascii=False)
+    if gemini_cache_name:
+        values["gemini_cache_name"] = gemini_cache_name
     eng = create_engine_async()
     async with eng.begin() as conn:
         await conn.execute(
             update(projects)
             .where(projects.c.project_id == project_id)
-            .values(base_manuscript=text, updated_at=_now())
+            .values(**values)
         )
+
+
+# ── Filesystem helpers ─────────────────────────────────────────────────────────
+
+def save_manuscript_files(
+    project_folder: str,
+    docx_bytes: bytes | None = None,
+    markdown_text: str = "",
+) -> dict:
+    """Save manuscript files to project folder. Returns dict of saved file paths."""
+    os.makedirs(project_folder, exist_ok=True)
+    paths: dict[str, str] = {}
+    docx_path = os.path.join(project_folder, "original_manuscript.docx")
+    md_path = os.path.join(project_folder, "original_manuscript.md")
+
+    if docx_bytes:
+        with open(docx_path, "wb") as f:
+            f.write(docx_bytes)
+        paths["original_docx"] = docx_path
+    elif os.path.exists(docx_path):
+        os.remove(docx_path)
+
+    if markdown_text:
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(markdown_text)
+        paths["original_md"] = md_path
+    elif os.path.exists(md_path):
+        os.remove(md_path)
+    return paths
+
+
+def get_original_docx_bytes(project_folder: str) -> bytes | None:
+    """Load original .docx from project folder (None if not found or text-only import)."""
+    if not project_folder:
+        return None
+    path = os.path.join(project_folder, "original_manuscript.docx")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    return None
+
+
+def save_round_export(project_folder: str, round_number: int, filename: str, data: bytes) -> str:
+    """Save a revision round export to round subfolder. Returns saved file path."""
+    round_dir = os.path.join(project_folder, f"round_{round_number}")
+    os.makedirs(round_dir, exist_ok=True)
+    path = os.path.join(round_dir, filename)
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def clear_round_exports(project_folder: str, round_number: int) -> None:
+    """Delete all previously generated files for a revision round."""
+    if not project_folder:
+        return
+    round_dir = os.path.join(project_folder, f"round_{round_number}")
+    if os.path.isdir(round_dir):
+        shutil.rmtree(round_dir)
+
+
+async def save_manuscript_paths(project_id: str, paths: dict) -> None:
+    """Persist manuscript file paths to DB (merge with existing)."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        row = (await conn.execute(
+            select(projects.c.manuscript_files).where(projects.c.project_id == project_id)
+        )).first()
+        existing = {}
+        if row and row[0]:
+            try:
+                existing = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            except Exception:
+                existing = {}
+        existing.update(paths)
+        await conn.execute(
+            update(projects).where(projects.c.project_id == project_id)
+            .values(manuscript_files=json.dumps(existing, ensure_ascii=False))
+        )
+
+
+async def get_manuscript_paths(project_id: str) -> dict:
+    """Retrieve stored manuscript file paths."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.manuscript_files).where(projects.c.project_id == project_id)
+        )).first()
+    if row and row[0]:
+        try:
+            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except Exception:
+            return {}
+    return {}
 
 
 async def get_revision_rounds(project_id: str) -> list[dict]:
@@ -372,6 +576,33 @@ async def get_synthesis_result(project_id: str) -> dict | None:
     async with eng.connect() as conn:
         row = (await conn.execute(
             select(projects.c.synthesis_result)
+            .where(projects.c.project_id == project_id)
+        )).first()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except Exception:
+            return None
+
+
+async def save_deep_synthesis_result(project_id: str, result: dict) -> None:
+    """Persist the deep synthesis result."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(deep_synthesis_result=json.dumps(result, ensure_ascii=False), updated_at=_now())
+        )
+
+
+async def get_deep_synthesis_result(project_id: str) -> dict | None:
+    """Return the saved deep synthesis result, or None if not yet run."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.deep_synthesis_result)
             .where(projects.c.project_id == project_id)
         )).first()
         if not row or not row[0]:
@@ -544,6 +775,202 @@ async def override_screening(project_id: str, paper_key: str, decision: str) -> 
                     overridden="true",
                 )
             )
+
+
+# ── Comment work CRUD ─────────────────────────────────────────────────────────
+
+async def upsert_comment_work_batch(
+    project_id: str, round_number: int, comments: list[dict],
+) -> None:
+    """Bulk upsert parsed comments into comment_work table (replaces existing)."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            delete(comment_work).where(
+                (comment_work.c.project_id == project_id)
+                & (comment_work.c.round_number == round_number)
+            )
+        )
+        now = datetime.utcnow().isoformat()
+        for c in comments:
+            await conn.execute(insert(comment_work).values(
+                project_id=project_id,
+                round_number=round_number,
+                reviewer_number=c.get("reviewer_number", 0),
+                comment_number=c.get("comment_number", 0),
+                original_comment=c.get("original_comment", ""),
+                category=c.get("category", "major"),
+                severity=c.get("severity", "major"),
+                domain=c.get("domain", "other"),
+                requirement_level=c.get("requirement_level", "unclear"),
+                ambiguity_flag="true" if c.get("ambiguity_flag") else "false",
+                ambiguity_question=c.get("ambiguity_question", ""),
+                intent_interpretation=c.get("intent_interpretation", ""),
+                # Preserve existing plan/discussion if passed (for replace-all scenarios)
+                discussion=json.dumps(c.get("discussion", [])),
+                current_plan=c.get("current_plan", ""),
+                doi_references=json.dumps(c.get("doi_references", [])),
+                is_finalized="true" if c.get("is_finalized") else "false",
+                author_response=c.get("author_response", ""),
+                action_taken=c.get("action_taken", ""),
+                manuscript_changes=c.get("manuscript_changes", ""),
+                suggestion=json.dumps(c["suggestion"]) if c.get("suggestion") else None,
+                created_at=now,
+                updated_at=now,
+            ))
+
+
+async def upsert_comment_suggestions_batch(
+    project_id: str, round_number: int, suggestions: list[dict],
+) -> None:
+    """Save AI suggestions for all comments at once."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        now = datetime.utcnow().isoformat()
+        for s in suggestions:
+            await conn.execute(
+                update(comment_work)
+                .where(
+                    (comment_work.c.project_id == project_id)
+                    & (comment_work.c.round_number == round_number)
+                    & (comment_work.c.reviewer_number == s.get("reviewer_number", 0))
+                    & (comment_work.c.comment_number == s.get("comment_number", 0))
+                )
+                .values(suggestion=json.dumps(s, ensure_ascii=False), updated_at=now)
+            )
+
+
+async def append_discussion_message(
+    project_id: str, round_number: int,
+    reviewer_number: int, comment_number: int,
+    messages: list[dict], updated_plan: str,
+) -> None:
+    """Append discussion messages and update the plan for one comment."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        row = (await conn.execute(
+            select(comment_work.c.discussion).where(
+                (comment_work.c.project_id == project_id)
+                & (comment_work.c.round_number == round_number)
+                & (comment_work.c.reviewer_number == reviewer_number)
+                & (comment_work.c.comment_number == comment_number)
+            )
+        )).first()
+        existing: list = []
+        if row and row[0]:
+            existing = row[0] if isinstance(row[0], list) else json.loads(row[0])
+        existing.extend(messages)
+        await conn.execute(
+            update(comment_work)
+            .where(
+                (comment_work.c.project_id == project_id)
+                & (comment_work.c.round_number == round_number)
+                & (comment_work.c.reviewer_number == reviewer_number)
+                & (comment_work.c.comment_number == comment_number)
+            )
+            .values(
+                discussion=json.dumps(existing, ensure_ascii=False),
+                current_plan=updated_plan,
+                updated_at=datetime.utcnow().isoformat(),
+            )
+        )
+
+
+async def save_comment_finalization(
+    project_id: str, round_number: int,
+    reviewer_number: int, comment_number: int,
+    author_response: str, action_taken: str, manuscript_changes: str,
+) -> None:
+    """Mark a comment as finalized and save the outputs."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(comment_work)
+            .where(
+                (comment_work.c.project_id == project_id)
+                & (comment_work.c.round_number == round_number)
+                & (comment_work.c.reviewer_number == reviewer_number)
+                & (comment_work.c.comment_number == comment_number)
+            )
+            .values(
+                is_finalized="true",
+                author_response=author_response,
+                action_taken=action_taken,
+                manuscript_changes=manuscript_changes,
+                updated_at=datetime.utcnow().isoformat(),
+            )
+        )
+
+
+async def update_comment_work_fields(
+    project_id: str, round_number: int,
+    reviewer_number: int, comment_number: int,
+    updates: dict,
+) -> None:
+    """Update arbitrary allowed fields on one comment_work row."""
+    allowed = {
+        "original_comment", "category", "severity", "domain", "requirement_level",
+        "current_plan", "doi_references", "is_finalized",
+        "author_response", "action_taken", "manuscript_changes",
+    }
+    values = {}
+    for k, v in updates.items():
+        if k not in allowed:
+            continue
+        if k == "doi_references":
+            values[k] = json.dumps(v, ensure_ascii=False)
+        elif k == "is_finalized":
+            values[k] = "true" if v else "false"
+            if not v:
+                values["author_response"] = ""
+                values["action_taken"] = ""
+                values["manuscript_changes"] = ""
+        else:
+            values[k] = v
+    if not values:
+        return
+    values["updated_at"] = datetime.utcnow().isoformat()
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(comment_work)
+            .where(
+                (comment_work.c.project_id == project_id)
+                & (comment_work.c.round_number == round_number)
+                & (comment_work.c.reviewer_number == reviewer_number)
+                & (comment_work.c.comment_number == comment_number)
+            )
+            .values(**values)
+        )
+
+
+async def get_comment_work_rows(
+    project_id: str, round_number: int,
+) -> list[dict]:
+    """Load all comment_work rows for one round, ordered by reviewer then comment."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        res = await conn.execute(
+            select(comment_work)
+            .where(
+                (comment_work.c.project_id == project_id)
+                & (comment_work.c.round_number == round_number)
+            )
+            .order_by(comment_work.c.reviewer_number, comment_work.c.comment_number)
+        )
+        rows = []
+        for r in res.mappings():
+            d = dict(r)
+            for field in ("suggestion", "discussion", "doi_references"):
+                if isinstance(d.get(field), str):
+                    try:
+                        d[field] = json.loads(d[field])
+                    except Exception:
+                        pass
+            d["is_finalized"] = d.get("is_finalized") == "true"
+            d["ambiguity_flag"] = d.get("ambiguity_flag") == "true"
+            rows.append(d)
+        return rows
 
 
 # ── Backward-compat aliases (used by tests and other services) ─────────────────

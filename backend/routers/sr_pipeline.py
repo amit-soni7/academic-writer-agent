@@ -21,6 +21,7 @@ import csv
 import io
 import json
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -42,6 +43,8 @@ from routers.settings import load_settings_for_user
 from services.ai_provider import AIProvider
 from services.auth import get_current_user
 from services.db import create_engine_async, projects, sr_protocols, sr_search_runs, _IS_PG
+from services.paper_fetcher import FetchSettings
+from services.provider_resolver import build_provider_for_user_config
 from services.sr_audit import get_audit_log
 from services.sr_data_extraction_service import (
     extract_with_dual_pass,
@@ -55,6 +58,7 @@ from services.sr_protocol_generator import (
     generate_database_search_strings,
     generate_phase_content,
     generate_prisma_p_checklist,
+    generate_prisma_p_checklist_docx,
     generate_protocol_document,
     generate_protocol_docx,
     generate_review_question_from_elements,
@@ -87,6 +91,7 @@ from services.sr_synthesis_service import (
     run_meta_analysis,
 )
 from sqlalchemy import insert, select, update
+from services.token_context import TokenContext
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sr", tags=["systematic-review"])
@@ -98,9 +103,64 @@ def _sse(data: dict) -> str:
 
 async def _get_provider(user_id: str) -> AIProvider:
     cfg = await load_settings_for_user(user_id)
-    if cfg.api_key or cfg.provider in ("ollama", "llamacpp"):
-        return AIProvider(cfg)
+    provider = await build_provider_for_user_config(user_id, cfg)
+    if provider:
+        return provider
     raise HTTPException(status_code=422, detail="AI provider not configured. Please add an API key in Settings.")
+
+
+async def _get_project_folder(project_id: str) -> str | None:
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = await conn.execute(
+            select(projects.c.project_folder).where(projects.c.project_id == project_id)
+        )
+        return row.scalar_one_or_none()
+
+
+def _write_protocol_evidence_artifacts(project_folder: str | None, pack: dict) -> dict:
+    updated_pack = dict(pack)
+    if not project_folder:
+        return updated_pack
+
+    os.makedirs(project_folder, exist_ok=True)
+    full_papers_path = os.path.join(project_folder, "full_papers")
+    updated_pack["saved_full_papers_path"] = full_papers_path
+
+    bibtex = str(updated_pack.get("bibtex") or "").strip()
+    bib_path = os.path.join(project_folder, "protocol_evidence_references.bib")
+    if bibtex:
+        with open(bib_path, "w", encoding="utf-8") as handle:
+            handle.write(bibtex + "\n")
+        updated_pack["saved_bib_path"] = bib_path
+    elif os.path.exists(bib_path):
+        os.remove(bib_path)
+        updated_pack["saved_bib_path"] = None
+
+    return updated_pack
+
+
+async def _persist_protocol_evidence_pack(project_id: str, pack: dict) -> dict:
+    project_folder = await _get_project_folder(project_id)
+    updated_pack = _write_protocol_evidence_artifacts(project_folder, pack)
+    try:
+        await _upsert_protocol(project_id, evidence_pack=updated_pack)
+    except Exception as exc:
+        logger.warning("Could not persist evidence_pack: %s", exc)
+    return updated_pack
+
+
+async def _fetch_settings_for_protocol(user_id: str, project_id: str) -> FetchSettings:
+    cfg = await load_settings_for_user(user_id)
+    project_folder = await _get_project_folder(project_id)
+
+    return FetchSettings(
+        pdf_save_enabled=cfg.pdf_save_enabled or bool(project_folder),
+        pdf_save_path=cfg.pdf_save_path,
+        project_folder=project_folder,
+        sci_hub_enabled=cfg.sci_hub_enabled,
+        http_proxy=cfg.http_proxy,
+    )
 
 
 async def _load_pico(project_id: str) -> dict:
@@ -171,7 +231,7 @@ async def _get_sr_protocol(project_id: str) -> dict | None:
         return None
     d = dict(row._mapping)
     for json_col in ("pico", "prospero_fields", "prisma_p_checklist", "campbell_fields",
-                     "comet_cos_search", "search_strategies"):
+                     "comet_cos_search", "search_strategies", "evidence_pack"):
         if isinstance(d.get(json_col), str):
             try:
                 d[json_col] = json.loads(d[json_col])
@@ -312,15 +372,21 @@ async def api_phase_chat(
     """
     provider = await _get_provider(user["id"])
     messages = [{"role": m.role, "text": m.text} for m in body.messages]
-    return await generate_phase_content(
+    result = await generate_phase_content(
         phase=body.phase,
         pico_context=body.pico_context,
         context_data=body.context_data,
+        current_content=body.current_content,
         messages=messages,
         ai_provider=provider,
         review_type=body.review_type,
         mode=body.mode,
     )
+    if body.phase in {"background", "rationale"} and isinstance(result.get("content"), dict):
+        pack = result["content"].get("evidence_pack")
+        if isinstance(pack, dict) and (pack.get("summaries") or pack.get("ranked_papers")):
+            result["content"]["evidence_pack"] = await _persist_protocol_evidence_pack(project_id, pack)
+    return result
 
 
 # ── Evidence Pack endpoints ────────────────────────────────────────────────────
@@ -347,12 +413,14 @@ async def api_build_evidence_pack(
     if not body.query.strip():
         raise HTTPException(status_code=422, detail="query must not be empty")
     provider = await _get_provider(user["id"])
+    fetch_settings = await _fetch_settings_for_protocol(user["id"], project_id)
 
     pack = await build_evidence_pack(
         query=body.query,
         ai_provider=provider,
         n_articles=body.n_articles,
         pico_context=body.pico_context or None,
+        fetch_settings=fetch_settings,
     )
     result = await write_background_from_pack(
         pack=pack,
@@ -360,19 +428,7 @@ async def api_build_evidence_pack(
         ai_provider=provider,
         review_type=body.review_type,
     )
-
-    # Persist pack to sr_protocols
-    eng = create_engine_async()
-    try:
-        async with eng.begin() as conn:
-            await conn.execute(
-                sr_protocols.update()
-                .where(sr_protocols.c.project_id == project_id)
-                .values(evidence_pack=result["pack"])
-            )
-    except Exception as exc:
-        import logging as _log
-        _log.getLogger(__name__).warning("Could not persist evidence_pack: %s", exc)
+    result["pack"] = await _persist_protocol_evidence_pack(project_id, result["pack"])
 
     return {"pack": result["pack"], "warnings": result.get("warnings", []), "summary": result.get("summary", "")}
 
@@ -396,9 +452,9 @@ async def api_write_rationale(
         raise HTTPException(status_code=422, detail="query must not be empty")
 
     # Load existing pack
-    eng = create_engine_async()
     pack = None
     try:
+        eng = create_engine_async()
         async with eng.connect() as conn:
             row = await conn.execute(
                 sr_protocols.select().where(sr_protocols.c.project_id == project_id)
@@ -419,18 +475,7 @@ async def api_write_rationale(
         ai_provider=provider,
         review_type=body.review_type,
     )
-
-    # Persist updated pack
-    try:
-        async with eng.begin() as conn:
-            await conn.execute(
-                sr_protocols.update()
-                .where(sr_protocols.c.project_id == project_id)
-                .values(evidence_pack=result["pack"])
-            )
-    except Exception as exc:
-        import logging as _log
-        _log.getLogger(__name__).warning("Could not update evidence_pack: %s", exc)
+    result["pack"] = await _persist_protocol_evidence_pack(project_id, result["pack"])
 
     return {"pack": result["pack"], "warnings": result.get("warnings", []), "summary": result.get("summary", "")}
 
@@ -725,13 +770,14 @@ async def generate_protocol(project_id: str, user=Depends(get_current_user)):
     async def _stream():
         yield _sse({"type": "progress", "message": "Generating PRISMA-P compliant protocol..."})
         try:
-            protocol_text = await generate_protocol_document(pico, provider, prisma_p_data=prisma_p_raw)
-            yield _sse({"type": "progress", "message": "Mapping to PROSPERO fields..."})
-            prospero = await map_to_prospero_fields(pico, protocol_text, provider)
-            yield _sse({"type": "progress", "message": "Generating search strings for 8 databases..."})
-            search_strings = await generate_database_search_strings(pico, provider)
-            yield _sse({"type": "progress", "message": "Building PRISMA-P checklist..."})
-            checklist = await generate_prisma_p_checklist(protocol_text)
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="sr_protocol"):
+                protocol_text = await generate_protocol_document(pico, provider, prisma_p_data=prisma_p_raw)
+                yield _sse({"type": "progress", "message": "Mapping to PROSPERO fields..."})
+                prospero = await map_to_prospero_fields(pico, protocol_text, provider)
+                yield _sse({"type": "progress", "message": "Generating search strings for 8 databases..."})
+                search_strings = await generate_database_search_strings(pico, provider)
+                yield _sse({"type": "progress", "message": "Building PRISMA-P checklist..."})
+                checklist = await generate_prisma_p_checklist(protocol_text)
 
             await _upsert_protocol(
                 project_id,
@@ -796,6 +842,25 @@ async def get_search_strings(project_id: str, user=Depends(get_current_user)):
     return {"search_strategies": protocol.get("search_strategies", {})}
 
 
+@router.post("/{project_id}/protocol/export_references_bib")
+async def export_protocol_references_bib(project_id: str, user=Depends(get_current_user)):
+    """Download the current protocol evidence-pack references as BibTeX."""
+    protocol = await _get_sr_protocol(project_id)
+    if not protocol or not protocol.get("evidence_pack"):
+        raise HTTPException(status_code=422, detail="Generate the background evidence pack first.")
+
+    evidence_pack = protocol.get("evidence_pack") or {}
+    bibtex = str(evidence_pack.get("bibtex") or "").strip()
+    if not bibtex:
+        raise HTTPException(status_code=422, detail="No cited references available for BibTeX export yet.")
+
+    return Response(
+        content=bibtex + "\n",
+        media_type="application/x-bibtex; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="SR_Protocol_References_{project_id}.bib"'},
+    )
+
+
 @router.post("/{project_id}/protocol/export_docx")
 async def export_protocol_docx(project_id: str, user=Depends(get_current_user)):
     """Download protocol as PRISMA-P structured Word document."""
@@ -803,14 +868,58 @@ async def export_protocol_docx(project_id: str, user=Depends(get_current_user)):
     if not protocol or not protocol.get("protocol_document"):
         raise HTTPException(status_code=422, detail="Generate the protocol first.")
     pico_data = await _load_pico(project_id)
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.prisma_p_data).where(projects.c.project_id == project_id)
+        )).fetchone()
+    prisma_p_data = row.prisma_p_data if row else None
+    if isinstance(prisma_p_data, str):
+        try:
+            prisma_p_data = json.loads(prisma_p_data)
+        except Exception:
+            prisma_p_data = None
     docx_bytes = await generate_protocol_docx(
         protocol_text=protocol["protocol_document"],
         pico=pico_data["pico"],
+        prisma_p_data=prisma_p_data,
     )
     return Response(
         content=docx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="SR_Protocol_{project_id}.docx"'},
+    )
+
+
+@router.post("/{project_id}/protocol/export_prisma_p_docx")
+async def export_prisma_p_docx(project_id: str, user=Depends(get_current_user)):
+    """Download a standalone PRISMA-P checklist .docx with reported page numbers."""
+    protocol = await _get_sr_protocol(project_id)
+    if not protocol or not protocol.get("protocol_document"):
+        raise HTTPException(status_code=422, detail="Generate the protocol first.")
+
+    pico_data = await _load_pico(project_id)
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.prisma_p_data).where(projects.c.project_id == project_id)
+        )).fetchone()
+    prisma_p_data = row.prisma_p_data if row else None
+    if isinstance(prisma_p_data, str):
+        try:
+            prisma_p_data = json.loads(prisma_p_data)
+        except Exception:
+            prisma_p_data = None
+
+    docx_bytes = await generate_prisma_p_checklist_docx(
+        protocol_text=protocol["protocol_document"],
+        pico=pico_data["pico"],
+        prisma_p_data=prisma_p_data,
+    )
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="PRISMA-P_Checklist_{project_id}.docx"'},
     )
 
 
@@ -951,14 +1060,15 @@ async def ai_screen_papers(
         yield _sse({"type": "progress", "total": total, "screened": 0,
                     "message": f"Screening {total} papers ({stage})..."})
         try:
-            results = await screen_batch_ai(
-                papers=papers_list,
-                inclusion_criteria=pico_data["inclusion_criteria"],
-                exclusion_criteria=pico_data["exclusion_criteria"],
-                stage=stage,
-                ai_provider=provider,
-                project_id=project_id,
-            )
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="sr_screening"):
+                results = await screen_batch_ai(
+                    papers=papers_list,
+                    inclusion_criteria=pico_data["inclusion_criteria"],
+                    exclusion_criteria=pico_data["exclusion_criteria"],
+                    stage=stage,
+                    ai_provider=provider,
+                    project_id=project_id,
+                )
             screened = 0
             for result in results:
                 screened += 1
@@ -1102,14 +1212,15 @@ async def extract_single_paper(
     async def _stream():
         yield _sse({"type": "progress", "message": f"Extracting data from {paper_key}..."})
         try:
-            extraction = await extract_with_dual_pass(
-                project_id=project_id,
-                paper_key=paper_key,
-                full_text=full_text,
-                extraction_schema=pico_data["data_extraction_schema"],
-                pico=pico_data["pico"],
-                ai_provider=provider,
-            )
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="sr_extraction"):
+                extraction = await extract_with_dual_pass(
+                    project_id=project_id,
+                    paper_key=paper_key,
+                    full_text=full_text,
+                    extraction_schema=pico_data["data_extraction_schema"],
+                    pico=pico_data["pico"],
+                    ai_provider=provider,
+                )
             yield _sse({"type": "complete", "paper_key": paper_key, "extraction": extraction})
         except Exception as exc:
             logger.exception("Extraction failed for %s/%s", project_id, paper_key)
@@ -1174,14 +1285,15 @@ async def extract_all_papers(project_id: str, user=Depends(get_current_user)):
                 yield _sse({"type": "progress", "paper_key": paper_key,
                             "message": f"Extracting {paper_key}...", "extracted": extracted_count, "total": total})
                 try:
-                    extraction = await extract_with_dual_pass(
-                        project_id=project_id,
-                        paper_key=paper_key,
-                        full_text=full_text,
-                        extraction_schema=pico_data["data_extraction_schema"],
-                        pico=pico_data["pico"],
-                        ai_provider=provider,
-                    )
+                    async with TokenContext(project_id=project_id, user_id=user["id"], stage="sr_extraction"):
+                        extraction = await extract_with_dual_pass(
+                            project_id=project_id,
+                            paper_key=paper_key,
+                            full_text=full_text,
+                            extraction_schema=pico_data["data_extraction_schema"],
+                            pico=pico_data["pico"],
+                            ai_provider=provider,
+                        )
                     extracted_count += 1
                     yield _sse({"type": "paper_done", "paper_key": paper_key,
                                 "extracted": extracted_count, "total": total})
@@ -1311,13 +1423,14 @@ async def assess_rob(
         yield _sse({"type": "progress", "message": f"Assessing RoB 2.0 for {paper_key}...",
                     "note": "This assessment must be confirmed by a human before synthesis."})
         try:
-            assessment = await assess_rob2_ai(
-                project_id=project_id,
-                paper_key=paper_key,
-                paper_data=paper_d,
-                pico=pico_data["pico"],
-                ai_provider=provider,
-            )
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="sr_rob"):
+                assessment = await assess_rob2_ai(
+                    project_id=project_id,
+                    paper_key=paper_key,
+                    paper_data=paper_d,
+                    pico=pico_data["pico"],
+                    ai_provider=provider,
+                )
 
             # Check RobotReviewer
             cfg = await load_settings_for_user(user["id"])
@@ -1459,14 +1572,15 @@ async def run_synthesis(project_id: str, user=Depends(get_current_user)):
                 logger.warning("Meta-analysis failed (non-fatal): %s", ma_exc)
 
             yield _sse({"type": "progress", "message": "Generating GRADE-aware narrative synthesis..."})
-            synthesis_text = await generate_narrative_synthesis(
-                project_id=project_id,
-                pico=pico_data["pico"],
-                extraction_data=extractions,
-                rob_summary=rob_summary_data,
-                meta_results=meta_results,
-                ai_provider=provider,
-            )
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="sr_synthesis"):
+                synthesis_text = await generate_narrative_synthesis(
+                    project_id=project_id,
+                    pico=pico_data["pico"],
+                    extraction_data=extractions,
+                    rob_summary=rob_summary_data,
+                    meta_results=meta_results,
+                    ai_provider=provider,
+                )
 
             # Save synthesis to projects table
             from services.project_repo import save_synthesis_result

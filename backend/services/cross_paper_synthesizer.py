@@ -232,10 +232,16 @@ async def synthesize(
     provider: AIProvider,
     summaries: list[PaperSummary],
     query: str,
+    article_type: str = "",
+    sections: list[str] | None = None,
+    build_packs: bool = True,
 ) -> SynthesisResult:
     """
     Run cross-paper evidence synthesis over a list of extracted PaperSummary objects.
     Returns a structured SynthesisResult.
+
+    When build_packs=True (default), also builds manuscript packs that organize
+    evidence by manuscript section for the article builder.
     """
     if not summaries:
         return SynthesisResult()
@@ -267,10 +273,28 @@ async def synthesize(
             logger.warning("Failed to parse synthesis JSON")
             data = {}
 
-    return SynthesisResult(
+    result = SynthesisResult(
         evidence_matrix=_parse_evidence_matrix(data.get("evidence_matrix", [])),
         methods_comparison=_parse_methods_comparison(data.get("methods_comparison", [])),
         contradictions=_parse_contradictions(data.get("contradictions", [])),
         gaps=data.get("gaps", []) if isinstance(data.get("gaps"), list) else [],
         fact_bank=_parse_fact_bank(data.get("fact_bank", [])),
     )
+
+    # Build manuscript packs when requested
+    if build_packs and summaries:
+        try:
+            from services.manuscript_pack_builder import build_manuscript_packs
+            packs = await build_manuscript_packs(
+                provider=provider,
+                synthesis=result,
+                summaries=summaries,
+                article_type=article_type or "review",
+                sections=sections or [],
+                query=query or "",
+            )
+            result.manuscript_packs = packs
+        except Exception as e:
+            logger.warning("Manuscript pack building failed: %s", e)
+
+    return result

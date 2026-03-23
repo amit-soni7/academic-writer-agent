@@ -7,26 +7,33 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans:  ['Outfit', 'system-ui', 'sans-serif'],
-        serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
+        // design.md §3: Manrope for UI, Newsreader for content
+        sans:  ['Manrope', 'system-ui', 'sans-serif'],
+        serif: ['Newsreader', 'Georgia', 'serif'],
         mono:  ['"JetBrains Mono"', 'Menlo', 'monospace'],
+        // Legacy aliases (some components reference these)
+        ui:      ['Manrope', 'system-ui', 'sans-serif'],
+        content: ['Newsreader', 'Georgia', 'serif'],
       },
       colors: {
-        // ── Oxford Blue brand scale ─────────────────────────────────────────
-        // brand-500: bright blue (for text accents on dark bg)
-        // brand-600: dark navy  (for button bg — white text ≥ 4.5:1 in both themes)
+        // ── "Vibrant Intelligence" primary — Deep Indigo (design.md §2) ────
         brand: {
-          50:  '#eef4fb',
-          100: '#d8eaf8',
-          200: '#aaccea',
-          300: '#6ea8d8',
-          400: '#4a88c4',
-          500: '#5a9fd6',  // bright blue (text accent on dark bg)
-          600: '#1e3a5f',  // dark navy   (button bg, white text works)
-          700: '#16304f',  // deeper navy (button hover)
-          800: '#0e2040',
-          900: '#081020',
+          50:  '#e2dfff',   // primary-fixed
+          100: '#d5d3ff',
+          200: '#bdc2ff',   // primary-fixed-dim
+          300: '#9b9ef0',
+          400: '#6e6fdb',
+          500: '#504ed0',   // primary-container
+          600: '#3632b7',   // primary
+          700: '#2a27a0',
+          800: '#1f1c88',
+          900: '#0b006b',   // on-primary-fixed
         },
+      },
+      borderRadius: {
+        // design.md §5: xl roundedness for buttons
+        'xl': '1.5rem',
+        'full': '9999px',
       },
     },
   },

@@ -23,6 +23,7 @@ env/
 backend/sessions/
 backend/tmp/
 backend/output/
+backend/public/projects/*/
 backend/__pycache__/
 backend/**/__pycache__/
 

@@ -8,16 +8,97 @@
  * Export buttons: CSV (full nested fields) | Markdown table
  */
 import type { Paper, PaperSummary } from '../../types/paper';
+import { projectPaperPdfUrl } from '../../api/projects';
 
 interface Props {
   papers: Paper[];
   summaries: Record<string, PaperSummary>;
+  projectId?: string;
 }
+
+const WRITING_LIMITER_LABELS: Record<string, string> = {
+  abstract_only: 'Abstract only',
+  no_text_available: 'No text available',
+  sparse_quantitative_findings: 'Sparse quantitative findings',
+  limited_traceable_claims: 'Limited traceable claims',
+  low_topic_overlap: 'Low topic overlap',
+  high_redundancy_removed: 'High redundancy removed',
+};
+
+const SECTION_LABELS: Record<string, string> = {
+  background: 'Background',
+  methods: 'Methods',
+  results: 'Results',
+  discussion: 'Discussion',
+  conclusion: 'Conclusion',
+};
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 function paperKey(p: Paper) {
   return (p.doi || p.title.slice(0, 60)).toLowerCase().trim();
+}
+
+function paperPdfHref(paper: Paper, projectId?: string): string {
+  if (projectId) {
+    return projectPaperPdfUrl(projectId, paperKey(paper));
+  }
+  if (paper.oa_pdf_url) return paper.oa_pdf_url;
+  if (paper.doi) return `https://doi.org/${paper.doi}`;
+  return '';
+}
+
+function mainFinding(summary: PaperSummary): string {
+  const firstResult = summary.results.find((item) => item.finding && item.finding !== 'NR');
+  if (firstResult?.finding) return firstResult.finding;
+  const topSentence = summary.sentence_bank?.find((item) => item.importance === 'high' && item.text)
+    || summary.sentence_bank?.find((item) => item.text);
+  if (topSentence?.text) return topSentence.text;
+  return summary.one_line_takeaway || '';
+}
+
+function statsSummary(summary: PaperSummary): string {
+  const result = summary.results.find((item) => item.effect_size !== 'NR' || item.ci_95 !== 'NR' || item.p_value !== 'NR');
+  if (!result) return '';
+  return [result.effect_size, result.ci_95, result.p_value].filter((item) => item && item !== 'NR').join(' | ');
+}
+
+function compactList(items: string[], maxItems = 2): string {
+  return items.filter(Boolean).slice(0, maxItems).join('; ');
+}
+
+function getWritingEvidenceMeta(summary: PaperSummary) {
+  if (summary.writing_evidence_meta) return summary.writing_evidence_meta;
+  const counts = new Map<string, number>();
+  for (const item of summary.sentence_bank ?? []) {
+    counts.set(item.section, (counts.get(item.section) ?? 0) + 1);
+  }
+  const dominantSections = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([section]) => section);
+  const limitingFactors: string[] = [];
+  if (summary.text_source === 'abstract_only') limitingFactors.push('abstract_only');
+  if (summary.text_source === 'none') limitingFactors.push('no_text_available');
+  return {
+    selected_count: summary.sentence_bank?.length ?? 0,
+    max_count: 20,
+    dominant_sections: dominantSections,
+    limiting_factors: limitingFactors,
+  };
+}
+
+function sectionMixLabel(summary: PaperSummary): string {
+  const labels = getWritingEvidenceMeta(summary).dominant_sections
+    .map((section) => SECTION_LABELS[section] ?? section)
+    .filter(Boolean);
+  return labels.length ? `${labels.join(' + ')} dominant` : '';
+}
+
+function limiterLabels(summary: PaperSummary): string[] {
+  return getWritingEvidenceMeta(summary).limiting_factors
+    .map((factor) => WRITING_LIMITER_LABELS[factor] ?? factor.replace(/_/g, ' '))
+    .filter(Boolean);
 }
 
 function escCsv(v: string | null | undefined): string {
@@ -91,6 +172,9 @@ const CSV_FIELDS: Array<{ header: string; get: (s: PaperSummary) => string | nul
   { header: 'Confidence Notes',           get: s => s.confidence.notes },
   { header: 'One-line Takeaway',          get: s => s.one_line_takeaway },
   { header: 'Keywords',                   get: s => s.keywords.join('; ') },
+  { header: 'Writing Evidence Count',     get: s => String(getWritingEvidenceMeta(s).selected_count) },
+  { header: 'Writing Evidence Sections',  get: s => getWritingEvidenceMeta(s).dominant_sections.join('; ') },
+  { header: 'Writing Evidence Limiters',  get: s => getWritingEvidenceMeta(s).limiting_factors.join('; ') },
 ];
 
 const GRADE_CLS: Record<string, string> = {
@@ -116,7 +200,7 @@ function exportCsv(papers: Paper[], summaries: Record<string, PaperSummary>) {
 }
 
 function exportMarkdown(papers: Paper[], summaries: Record<string, PaperSummary>) {
-  const cols = ['#', 'Authors (Year)', 'Study Design', 'N', 'Main Finding', 'Effect / Stats', 'Evidence Grade', 'Takeaway'];
+  const cols = ['#', 'Paper', 'Study / Source', 'Sample / Setting', 'Main Finding', 'Effect / Stats', 'Evidence / Decision', 'Takeaway'];
   const sep  = cols.map(() => '---');
   const lines: string[] = [
     `| ${cols.join(' | ')} |`,
@@ -130,16 +214,16 @@ function exportMarkdown(papers: Paper[], summaries: Record<string, PaperSummary>
     const authors = s.bibliography.authors;
     const firstAuthor = authors.length ? authors[0] : 'Unknown';
     const year = s.bibliography.year ?? 'n.d.';
-    const r0 = s.results[0];
-    const statParts = [r0?.effect_size, r0?.ci_95, r0?.p_value].filter(x => x && x !== 'NR');
+    const finding = mainFinding(s);
+    const statText = statsSummary(s);
     const cells = [
       String(n),
-      `${firstAuthor} (${year})`.replace(/\|/g, '\\|'),
-      (s.methods.study_design ?? '—').replace(/\|/g, '\\|').slice(0, 30),
-      s.methods.sample_n ?? '—',
-      (r0?.finding ?? '—').replace(/\|/g, '\\|').slice(0, 120),
-      statParts.join('; ').replace(/\|/g, '\\|').slice(0, 60) || '—',
-      s.critical_appraisal.evidence_grade,
+      `${p.title} — ${firstAuthor} (${year})`.replace(/\|/g, '\\|').slice(0, 110),
+      `${s.methods.study_design || '—'}; ${s.text_source}`.replace(/\|/g, '\\|').slice(0, 60),
+      `${s.methods.sample_n || '—'}; ${(s.methods.setting || '—')}`.replace(/\|/g, '\\|').slice(0, 80),
+      (finding || '—').replace(/\|/g, '\\|').slice(0, 140),
+      (statText || '—').replace(/\|/g, '\\|').slice(0, 70),
+      `${s.critical_appraisal.evidence_grade}; ${s.triage.decision}`.replace(/\|/g, '\\|'),
       (s.one_line_takeaway ?? '').replace(/\|/g, '\\|').slice(0, 100),
     ];
     lines.push(`| ${cells.join(' | ')} |`);
@@ -149,7 +233,7 @@ function exportMarkdown(papers: Paper[], summaries: Record<string, PaperSummary>
 
 // ── component ──────────────────────────────────────────────────────────────────
 
-export default function SummaryMatrix({ papers, summaries }: Props) {
+export default function SummaryMatrix({ papers, summaries, projectId }: Props) {
   const summarisedPapers = papers.filter(p => summaries[paperKey(p)]);
 
   if (summarisedPapers.length === 0) {
@@ -198,11 +282,11 @@ export default function SummaryMatrix({ papers, summaries }: Props) {
 
       {/* Evidence table */}
       <div className="overflow-x-auto rounded-xl border border-slate-200">
-        <table className="w-full text-xs border-collapse min-w-[1200px]">
+        <table className="w-full text-xs border-collapse min-w-[1800px]">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-200">
-              {['#', 'Authors (Year)', 'Study Design', 'N', 'Main Finding',
-                'Effect / Stats', 'Evidence Grade', 'One-line Takeaway'].map(h => (
+              {['#', 'Paper', 'Study / Source', 'Sample / Setting', 'Outcomes / Exposure', 'Main Finding',
+                'Effect / Stats', 'Evidence / Decision', 'Limitations', 'One-line Takeaway', 'Writing Evidence', 'Paper PDF'].map(h => (
                 <th key={h} className="px-3 py-2.5 text-left font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">
                   {h}
                 </th>
@@ -212,12 +296,22 @@ export default function SummaryMatrix({ papers, summaries }: Props) {
           <tbody>
             {summarisedPapers.map((p, i) => {
               const s  = summaries[paperKey(p)]!;
-              const r0 = s.results[0];
               const authors = s.bibliography.authors;
               const firstAuthor = authors.length ? authors[0] : 'Unknown';
               const year = s.bibliography.year ?? 'n.d.';
-              const statParts = [r0?.effect_size, r0?.ci_95, r0?.p_value].filter(x => x && x !== 'NR');
               const grade = s.critical_appraisal.evidence_grade;
+              const finding = mainFinding(s);
+              const statText = statsSummary(s);
+              const pdfHref = paperPdfHref(p, projectId);
+              const writingMeta = getWritingEvidenceMeta(s);
+              const sentenceCount = writingMeta.selected_count;
+              const sectionMix = sectionMixLabel(s);
+              const limiters = limiterLabels(s);
+              const outcomeSummary = compactList(s.methods.primary_outcomes, 2)
+                || compactList(s.methods.secondary_outcomes, 2)
+                || s.methods.intervention_or_exposure
+                || '—';
+              const limitations = compactList(s.limitations, 2) || '—';
 
               return (
                 <tr key={paperKey(p)}
@@ -225,7 +319,10 @@ export default function SummaryMatrix({ papers, summaries }: Props) {
 
                   <td className="px-3 py-2.5 text-slate-400 tabular-nums text-right w-6">{i + 1}</td>
 
-                  <td className="px-3 py-2.5 max-w-[160px]">
+                  <td className="px-3 py-2.5 min-w-[260px] max-w-[320px]">
+                    <p className="font-semibold text-slate-800 leading-snug" title={p.title}>
+                      {p.title}
+                    </p>
                     <p className="font-medium text-slate-800 leading-snug">
                       {firstAuthor} ({year})
                     </p>
@@ -240,44 +337,115 @@ export default function SummaryMatrix({ papers, summaries }: Props) {
                     )}
                   </td>
 
-                  <td className="px-3 py-2.5 whitespace-nowrap">
-                    <span className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 font-medium">
-                      {s.methods.study_design !== 'NR' ? s.methods.study_design : s.triage.category}
-                    </span>
+                  <td className="px-3 py-2.5 min-w-[190px] max-w-[220px]">
+                    <div className="space-y-1.5">
+                      <span className="inline-flex px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 font-medium">
+                        {s.methods.study_design !== 'NR' ? s.methods.study_design : s.triage.category}
+                      </span>
+                      <div className="text-[11px] text-slate-500 space-y-1">
+                        <p>Source: {s.text_source}</p>
+                        <p>Category: {s.triage.category || '—'}</p>
+                      </div>
+                    </div>
                   </td>
 
-                  <td className="px-3 py-2.5 whitespace-nowrap text-slate-600 tabular-nums">
-                    {s.methods.sample_n !== 'NR' ? s.methods.sample_n : <span className="text-slate-300">—</span>}
-                  </td>
-
-                  <td className="px-3 py-2.5 max-w-[220px]">
-                    <p className="text-slate-700 leading-snug line-clamp-3" title={r0?.finding ?? ''}>
-                      {r0?.finding ?? <span className="text-slate-300">—</span>}
+                  <td className="px-3 py-2.5 min-w-[220px] max-w-[260px]">
+                    <p className="text-slate-700 leading-snug">
+                      {s.methods.sample_n !== 'NR' ? s.methods.sample_n : <span className="text-slate-300">—</span>}
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-500 leading-snug" title={s.methods.setting}>
+                      {s.methods.setting && s.methods.setting !== 'NR' ? s.methods.setting : 'Setting not reported'}
                     </p>
                   </td>
 
-                  <td className="px-3 py-2.5 max-w-[160px]">
-                    {statParts.length > 0 ? (
+                  <td className="px-3 py-2.5 min-w-[220px] max-w-[280px]">
+                    <p className="text-slate-700 leading-snug" title={outcomeSummary}>
+                      {outcomeSummary}
+                    </p>
+                    {s.methods.intervention_or_exposure && s.methods.intervention_or_exposure !== 'NR' && (
+                      <p className="mt-1 text-[11px] text-slate-500 leading-snug line-clamp-2" title={s.methods.intervention_or_exposure}>
+                        {s.methods.intervention_or_exposure}
+                      </p>
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2.5 min-w-[260px] max-w-[320px]">
+                    <p className="text-slate-700 leading-snug line-clamp-4" title={finding}>
+                      {finding || <span className="text-slate-300">—</span>}
+                    </p>
+                  </td>
+
+                  <td className="px-3 py-2.5 min-w-[180px] max-w-[220px]">
+                    {statText ? (
                       <p className="text-slate-600 leading-snug font-mono text-[11px]"
-                         title={statParts.join(' | ')}>
-                        {statParts.join(' | ').slice(0, 80)}
+                         title={statText}>
+                        {statText}
                       </p>
                     ) : (
                       <span className="text-slate-300 font-sans">—</span>
                     )}
                   </td>
 
-                  <td className="px-3 py-2.5 whitespace-nowrap">
-                    <span className={`px-2 py-0.5 rounded-full border font-medium ${gradeCls(grade)}`}>
-                      {grade}
-                    </span>
+                  <td className="px-3 py-2.5 min-w-[160px]">
+                    <div className="space-y-1.5">
+                      <span className={`inline-flex px-2 py-0.5 rounded-full border font-medium ${gradeCls(grade)}`}>
+                        {grade}
+                      </span>
+                      <span className="inline-flex px-2 py-0.5 rounded-full border bg-slate-100 text-slate-600 border-slate-200 font-medium">
+                        {s.triage.decision}
+                      </span>
+                    </div>
                   </td>
 
-                  <td className="px-3 py-2.5 max-w-[200px]">
+                  <td className="px-3 py-2.5 min-w-[220px] max-w-[260px]">
+                    <p className="text-slate-700 leading-snug line-clamp-4" title={limitations}>
+                      {limitations}
+                    </p>
+                  </td>
+
+                  <td className="px-3 py-2.5 min-w-[220px] max-w-[260px]">
                     <p className="text-slate-700 italic leading-snug line-clamp-2"
                        title={s.one_line_takeaway}>
                       {s.one_line_takeaway}
                     </p>
+                  </td>
+
+                  <td className="px-3 py-2.5 min-w-[170px]">
+                    <div className="space-y-1.5">
+                      <span className="inline-flex px-2 py-0.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-200 font-medium">
+                        {sentenceCount} high-quality statement{sentenceCount === 1 ? '' : 's'}
+                      </span>
+                      {sectionMix && (
+                        <p className="text-[11px] text-slate-500 leading-snug">
+                          {sectionMix}
+                        </p>
+                      )}
+                      {limiters.length > 0 && (
+                        <p className="text-[11px] text-amber-700 leading-snug">
+                          {limiters.join(' • ')}
+                        </p>
+                      )}
+                      {s.sentence_bank?.[0]?.text && (
+                        <p className="text-[11px] text-slate-500 leading-snug line-clamp-3" title={s.sentence_bank[0].text}>
+                          {s.sentence_bank[0].text}
+                        </p>
+                      )}
+                    </div>
+                  </td>
+
+                  <td className="px-3 py-2.5 whitespace-nowrap">
+                    {pdfHref ? (
+                      <a
+                        href={pdfHref}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700 font-medium hover:bg-emerald-100 transition-colors"
+                      >
+                        Open PDF
+                      </a>
+                    ) : (
+                      <span className="text-slate-300">—</span>
+                    )}
                   </td>
                 </tr>
               );

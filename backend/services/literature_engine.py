@@ -16,6 +16,7 @@ Rate-limit strategy (fixes for concurrent 429 errors)
 import asyncio
 import logging
 import math
+import re
 import xml.etree.ElementTree as ET
 from typing import AsyncIterator, Optional
 
@@ -43,6 +44,10 @@ S2_TIMEOUT = httpx.Timeout(15.0, connect=6.0)   # S2 is notoriously slow; hard-c
 HEADERS  = {
     "User-Agent": f"AcademicWriterAgent/0.2 (mailto:{POLITE_EMAIL})",
     "Accept": "application/json",
+}
+ARXIV_HEADERS = {
+    "User-Agent": f"AcademicWriterAgent/0.2 (mailto:{POLITE_EMAIL})",
+    "Accept": "application/atom+xml",
 }
 
 NCBI_BATCH       = 200   # max PMIDs per efetch call
@@ -80,6 +85,7 @@ class LiteratureEngine:
         url: str,
         params: dict,
         *,
+        headers: dict | None = None,
         max_retries: int = 4,
         base_wait: float = 2.0,
         source_label: str = "",
@@ -91,7 +97,7 @@ class LiteratureEngine:
         """
         for attempt in range(max_retries):
             try:
-                r = await client.get(url, params=params)
+                r = await client.get(url, params=params, headers=headers)
                 if r.status_code == 429:
                     # Honour server-supplied Retry-After if available
                     retry_after = r.headers.get("Retry-After") or r.headers.get("retry-after")
@@ -118,6 +124,40 @@ class LiteratureEngine:
                 await asyncio.sleep(base_wait * (2 ** attempt))
                 logger.warning("%s request error (attempt %d): %s", source_label, attempt + 1, exc)
         raise RuntimeError(f"Max retries exceeded for {url}")
+
+    @staticmethod
+    def _build_arxiv_search_query(queries: list[str]) -> str:
+        """
+        Build an arXiv-compliant search_query string.
+
+        arXiv expects explicit field prefixes, boolean operators, and quoted
+        phrases. Free-text expanded queries are therefore converted to
+        all:"..." phrase searches and combined with OR in a single request.
+        """
+        fielded_or_structured = re.compile(
+            r"\b(?:all|ti|au|abs|co|jr|cat|rn|id|submittedDate|lastUpdatedDate):"
+            r"|\b(?:AND|OR|ANDNOT)\b|[()\"]",
+            flags=re.IGNORECASE,
+        )
+
+        built: list[str] = []
+        seen: set[str] = set()
+        for raw in queries:
+            normalized = " ".join((raw or "").split())
+            if not normalized:
+                continue
+            if fielded_or_structured.search(normalized):
+                clause = normalized
+            else:
+                escaped = normalized.replace('"', "")
+                clause = f'all:"{escaped}"'
+            if clause.lower() in seen:
+                continue
+            seen.add(clause.lower())
+            built.append(f"({clause})")
+            if len(built) >= 4:
+                break
+        return " OR ".join(built)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Streaming entry point
@@ -353,18 +393,10 @@ class LiteratureEngine:
         return out[:total]
 
     async def _arxiv_multi(self, client, queries: list[str], total: int) -> list[Paper]:
-        seen: set[str] = set()
-        out: list[Paper] = []
-        per_q = max(min(total, ARXIV_PAGE), min(total, ARXIV_PAGE) // max(len(queries), 1))
-        for q in queries:
-            for p in await self._search_arxiv(client, q, per_q):
-                key = (p.doi or "").lower() or p.title[:60].lower()
-                if key not in seen:
-                    seen.add(key)
-                    out.append(p)
-            if len(out) >= total:
-                break
-        return out[:total]
+        search_query = self._build_arxiv_search_query(queries)
+        if not search_query:
+            return []
+        return await self._search_arxiv(client, search_query, min(total, ARXIV_PAGE))
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PubMed  (semaphore-protected, batched efetch)
@@ -857,25 +889,26 @@ class LiteratureEngine:
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def _search_arxiv(self, client: httpx.AsyncClient, query: str, max_results: int) -> list[Paper]:
-        # arXiv asks for ≤1 req/3s from automated clients; we do a single page.
+        # arXiv recommends a 3-second delay for repeated automated calls. We
+        # avoid that fan-out by folding expanded queries into one request.
         try:
             fetch = min(max_results, ARXIV_PAGE)
             r = await self._get(client, f"{ARXIV_BASE}/query", params={
-                "search_query": f"all:{query}",
+                "search_query": query,
                 "start":        0,
                 "max_results":  fetch,
                 "sortBy":       "relevance",
                 "sortOrder":    "descending",
-            }, max_retries=2, base_wait=3.0, source_label="arXiv")
+            }, headers=ARXIV_HEADERS, max_retries=2, base_wait=3.0, source_label="arXiv")
 
-            root = ET.fromstring(r.text)
+            root = ET.fromstring(r.content)
             papers: list[Paper] = []
             for entry in root.findall(f"{{{ATOM_NS}}}entry"):
                 title_el = entry.find(f"{{{ATOM_NS}}}title")
                 title = " ".join((title_el.text or "Untitled").split()).strip() if title_el is not None else "Untitled"
 
                 summary_el = entry.find(f"{{{ATOM_NS}}}summary")
-                abstract = summary_el.text.strip() if summary_el is not None and summary_el.text else None
+                abstract = " ".join(summary_el.text.split()).strip() if summary_el is not None and summary_el.text else None
 
                 authors = []
                 for author_el in entry.findall(f"{{{ATOM_NS}}}author"):

@@ -44,6 +44,7 @@ export function streamCrossReferences(
   sessionId: string,
   depth: 1 | 2,
   onEvent: (event: CrossRefEvent) => void,
+  purposeFilter: string[] = [],
 ): EventSource {
   // Use fetch-based SSE via POST (EventSource only supports GET)
   // We implement a simple fetch-based reader instead.
@@ -52,12 +53,15 @@ export function streamCrossReferences(
 
   const run = async () => {
     try {
+      const body: Record<string, unknown> = { depth };
+      if (purposeFilter.length > 0) body.purpose_filter = purposeFilter;
+
       const resp = await fetch(
         `${(api.defaults as any).baseURL}/api/projects/${sessionId}/stream_cross_references`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ depth }),
+          body: JSON.stringify(body),
           credentials: 'include',
           signal: controller.signal,
         },
@@ -105,6 +109,21 @@ export function streamCrossReferences(
 export async function getCrossRefStats(sessionId: string): Promise<CrossRefStats> {
   const { data } = await api.get<CrossRefStats>(
     `/api/projects/${sessionId}/cross_reference_stats`,
+  );
+  return data;
+}
+
+export interface CitationAuditResult {
+  unsupported_claims: { text: string; section: string; suggested_purpose: string }[];
+  missing_purposes_by_section: Record<string, string[]>;
+  uncited_key_papers: { paper_key: string; title: string; reason: string }[];
+  citation_stacking: { section: string; excerpt: string }[];
+  purpose_mismatch: { excerpt: string; issue: string }[];
+}
+
+export async function runCitationAudit(projectId: string): Promise<CitationAuditResult> {
+  const { data } = await api.post<CitationAuditResult>(
+    `/api/projects/${projectId}/citation_audit`,
   );
   return data;
 }

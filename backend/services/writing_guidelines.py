@@ -235,6 +235,41 @@ _ARTICLE_TYPE_GUIDELINES: dict[str, list[str]] = {
         "Discuss clinical or practical significance separately from statistical significance.",
         "Address all primary outcomes in Results even if non-significant.",
     ],
+    "study_protocol": [
+        "Follow SPIRIT 2013 (Standard Protocol Items: Recommendations for Intervention Trials); "
+        "cite the SPIRIT statement in the Methods section.",
+        "Write entirely in the FUTURE TENSE — this is a protocol, not a results paper.",
+        "TITLE: Include the study design explicitly (e.g. 'a protocol for a randomized controlled trial', "
+        "'a protocol for a cross-sectional study').",
+        "ABSTRACT: Structured with Background, Methods, Discussion, and a Trial registration line. "
+        "No citations in the abstract.",
+        "INTRODUCTION: Clearly state the evidence gap and justify why the trial/study is needed; "
+        "end with a concise objectives/hypothesis statement (SPIRIT item {7}).",
+        "ELIGIBILITY CRITERIA: List inclusion AND exclusion criteria as numbered sub-lists; "
+        "reference relevant classification systems (e.g. ASA, NYHA, ICD-10) where applicable.",
+        "INTERVENTIONS: Describe each arm in sufficient detail for independent replication — "
+        "specify timing, dose, route, duration, and any co-interventions permitted or prohibited.",
+        "OUTCOMES: Distinguish primary from secondary outcomes; for each, name the validated "
+        "measurement instrument and specify the exact assessment timepoint(s).",
+        "PARTICIPANT TIMELINE (SPIRIT Figure): Render as a markdown table with timepoints as column "
+        "headers and all enrolment/intervention/assessment items as rows.",
+        "SAMPLE SIZE: Show the calculation explicitly — effect size (or event rate), SD, power (≥80%), "
+        "two-sided α (0.05), anticipated dropout rate, and final n per arm.",
+        "RANDOMISATION: Describe sequence generation method, allocation ratio, stratification or "
+        "blocking (if any), and concealment mechanism in separate subsections.",
+        "BLINDING: State who will be blinded (participant, care provider, outcome assessor, analyst); "
+        "if open-label, provide justification.",
+        "STATISTICAL METHODS: Pre-specify the primary analysis (ITT and/or PP), the statistical test, "
+        "and how missing data will be handled (e.g. multiple imputation, GEE).",
+        "TRIAL REGISTRATION: Provide the registry name (e.g. ClinicalTrials.gov, ISRCTN, ChiCTR, "
+        "CTRI) and registration number; state whether registration preceded or followed first enrolment.",
+        "ETHICS: State the approving ethics committee, approval number, and approval date; "
+        "describe the informed consent process.",
+        "For non-RCT designs (cohort, cross-sectional, case-control): reference STROBE-Protocol "
+        "and adapt or omit randomisation/blinding sections accordingly.",
+        "Do NOT include results, outcome data, or conclusions drawn from data — "
+        "this is a protocol only.",
+    ],
 }
 
 

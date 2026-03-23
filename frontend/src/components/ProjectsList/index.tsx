@@ -7,19 +7,18 @@ interface Props {
   onResume: (projectId: string, query: string, projectType?: string | null, projectName?: string) => void;
 }
 
-const PHASE_LABELS: Record<string, { label: string; color: string }> = {
-  intake:          { label: 'intake',       color: 'bg-slate-200 text-slate-500' },
-  literature:      { label: 'literature',   color: 'bg-blue-100 text-blue-700' },
-  cross_reference: { label: 'cross-ref',    color: 'bg-violet-100 text-violet-700' },
-  journals:        { label: 'journals',     color: 'bg-indigo-100 text-indigo-700' },
-  article:         { label: 'article',      color: 'bg-emerald-100 text-emerald-700' },
+const PHASE_LABELS: Record<string, { label: string; cls: string }> = {
+  intake:          { label: 'intake',     cls: 'bg-slate-100 text-slate-500 border-slate-300' },
+  literature:      { label: 'literature', cls: 'bg-blue-100 text-blue-700 border-blue-200' },
+  cross_reference: { label: 'cross-ref',  cls: 'bg-violet-100 text-violet-700 border-violet-200' },
+  journals:        { label: 'journals',   cls: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+  article:         { label: 'article',    cls: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
 };
 
 function PhaseBadge({ phase }: { phase: string | null | undefined }) {
   const cfg = PHASE_LABELS[phase ?? 'intake'] ?? PHASE_LABELS['intake'];
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded border font-mono text-[10px] ${cfg.color}`}
-      style={{ borderColor: 'currentColor', borderOpacity: 0.3 }}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded border font-mono text-[10px] ${cfg.cls}`}>
       {cfg.label}
     </span>
   );
@@ -29,6 +28,13 @@ function truncatePath(p: string | null | undefined, parts = 2): string {
   if (!p) return '';
   const segs = p.replace(/\\/g, '/').split('/').filter(Boolean);
   return '…/' + segs.slice(-parts).join('/');
+}
+
+function humanizeProjectTitle(text: string | null | undefined): string {
+  return (text || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export default function ProjectsList({ onResume }: Props) {
@@ -101,9 +107,9 @@ export default function ProjectsList({ onResume }: Props) {
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-slate-800 truncate leading-snug">
-                  {p.project_name ?? p.query}
+                  {humanizeProjectTitle(p.project_name) || p.query}
                 </p>
-                {p.project_name && p.project_name !== p.query && (
+                {p.project_name && humanizeProjectTitle(p.project_name) !== p.query && (
                   <p className="text-xs text-slate-500 truncate mt-0.5">{p.query}</p>
                 )}
                 <div className="flex flex-wrap items-center gap-1.5 mt-1.5">

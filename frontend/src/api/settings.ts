@@ -25,6 +25,9 @@ export interface AISettings {
   // Sci-Hub
   sci_hub_enabled?: boolean;
   http_proxy?: string | null;
+  scihub_mirrors?: string[];
+  // Track Changes
+  track_changes_author?: string | null;
 }
 
 export interface ProviderModelOption {
@@ -32,23 +35,36 @@ export interface ProviderModelOption {
   label: string;
 }
 
+export interface SettingsTestResponse {
+  status: string;
+  message: string;
+  auth_source?: string | null;
+}
+
+export interface ProviderModelsResponsePayload {
+  provider: string;
+  source: string;
+  auth_source?: string | null;
+  models: ProviderModelOption[];
+}
+
 export const OPENAI_MODELS = [
-  { value: 'gpt-4o',         label: 'GPT-4o  (stable · recommended)' },
-  { value: 'gpt-4o-mini',    label: 'GPT-4o mini  (fast · cheap)' },
-  { value: 'gpt-4.1',        label: 'GPT-4.1  (smartest non-reasoning)' },
-  { value: 'gpt-5',          label: 'GPT-5  (reasoning · configurable effort)' },
-  { value: 'gpt-5-mini',     label: 'GPT-5 mini  (fast · cost-efficient)' },
-  { value: 'gpt-5-nano',     label: 'GPT-5 nano  (fastest · cheapest)' },
-  { value: 'gpt-5.2',        label: 'GPT-5.2  (best · coding & agentic tasks)' },
-  { value: 'gpt-5.2-pro',    label: 'GPT-5.2 Pro  (smarter · most precise)' },
+  { value: 'gpt-5.4',      label: 'GPT-5.4  (best intelligence · agentic, coding & professional)' },
+  { value: 'gpt-5.4-pro',  label: 'GPT-5.4 Pro  (smarter · more precise responses)' },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini  (strongest mini · coding & subagents)' },
+  { value: 'gpt-5.4-nano', label: 'GPT-5.4 nano  (cheapest · simple high-volume tasks)' },
+  { value: 'gpt-5-mini',   label: 'GPT-5 mini  (near-frontier · cost-sensitive & low-latency)' },
+  { value: 'gpt-5-nano',   label: 'GPT-5 nano  (fastest · most cost-efficient)' },
+  { value: 'gpt-5',        label: 'GPT-5  (reasoning · coding & agentic tasks)' },
+  { value: 'gpt-4.1',      label: 'GPT-4.1  (smartest non-reasoning model)' },
 ];
 
 export const GEMINI_MODELS = [
-  { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro  (latest · preview)' },
-  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash  (frontier performance · preview)' },
-  { value: 'gemini-3-pro-preview',   label: 'Gemini 3 Pro  (preview)' },
-  { value: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash  (best price-performance)' },
-  { value: 'gemini-2.5-flash-live',  label: 'Gemini 2.5 Flash Live  (real-time streaming)' },
+  { value: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash  (best price-performance · recommended)' },
+  { value: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro  (most capable)' },
+  { value: 'gemini-2.0-flash',       label: 'Gemini 2.0 Flash  (fast · stable)' },
+  { value: 'gemini-1.5-pro',         label: 'Gemini 1.5 Pro  (long context)' },
+  { value: 'gemini-1.5-flash',       label: 'Gemini 1.5 Flash  (lightweight · fast)' },
 ];
 
 export const CLAUDE_MODELS = [
@@ -88,8 +104,8 @@ export const PROVIDER_MODELS: Record<Provider, { value: string; label: string }[
 };
 
 export const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = {
-  openai:   'gpt-4o',
-  gemini:   'gemini-3.1-pro-preview',
+  openai:   'gpt-5.4',
+  gemini:   'gemini-2.5-flash',
   claude:   'claude-sonnet-4-6',
   ollama:   'qwen2.5:7b',
   llamacpp: 'qwen2.5-3b-instruct-q4_k_m.gguf',
@@ -107,8 +123,8 @@ export async function saveSettings(settings: AISettings): Promise<AISettings> {
 
 export async function testSettings(
   settings: AISettings,
-): Promise<{ status: string; message: string }> {
-  const { data } = await api.post('/api/settings/test', settings);
+): Promise<SettingsTestResponse> {
+  const { data } = await api.post<SettingsTestResponse>('/api/settings/test', settings);
   return data;
 }
 
@@ -119,10 +135,17 @@ export async function revealProviderApiKey(
   return data;
 }
 
+export async function testSciHubMirror(
+  url: string,
+): Promise<{ ok: boolean; latency_ms?: number; pdf_size_bytes?: number; error?: string }> {
+  const { data } = await api.post('/api/settings/test-scihub-mirror', { url });
+  return data;
+}
+
 export async function fetchProviderModels(
-  payload: { provider: Provider; api_key?: string; base_url?: string | null },
-): Promise<{ provider: string; source: string; models: ProviderModelOption[] }> {
-  const { data } = await api.post('/api/settings/models', payload);
+  payload: { provider: Provider; api_key?: string; base_url?: string | null; auth_method?: string },
+): Promise<ProviderModelsResponsePayload> {
+  const { data } = await api.post<ProviderModelsResponsePayload>('/api/settings/models', payload);
   return data;
 }
 

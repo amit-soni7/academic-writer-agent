@@ -18,19 +18,34 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 import httpx
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 from models import (
     AIProviderConfig,
     AppSettingsResponse,
     AppSettingsUpdateRequest,
     ModelOption,
+    ProviderConfigEntry,
     ProviderModelsRequest,
     ProviderModelsResponse,
     RevealApiKeyRequest,
     RevealApiKeyResponse,
 )
-from services.ai_provider import AIProvider
 from services.auth import get_current_user
+from services.llm_errors import (
+    LLMAuthError,
+    LLMBadRequestError,
+    LLMBillingError,
+    LLMConnectionError,
+    LLMError,
+    LLMQuotaExhaustedError,
+    LLMRateLimitError,
+    LLMServerError,
+)
+from services.provider_resolver import (
+    build_provider_for_user_config,
+    prepare_runtime_provider_config,
+)
 from services.secure_settings import (
     get_user_app_settings,
     get_user_ai_settings,
@@ -45,9 +60,10 @@ router = APIRouter(prefix="/api", tags=["settings"])
 
 _LEGACY_SETTINGS_FILE = Path(__file__).parent.parent / "settings.json"
 _GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+_GEMINI_NATIVE_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 _FALLBACK_MODELS: dict[str, list[str]] = {
-    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-5", "gpt-5-mini"],
+    "openai": ["gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-5-mini", "gpt-4.1"],
     "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
     "claude": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"],
     "ollama": ["qwen2.5:7b", "llama3.2", "mistral", "phi4"],
@@ -146,6 +162,135 @@ async def _list_anthropic_models(api_key: str) -> list[ModelOption]:
     return _model_options_from_names(names)
 
 
+async def _build_runtime_provider_config(
+    user_id: str,
+    *,
+    provider: str,
+    model: str = "",
+    api_key: str = "",
+    base_url: str | None = None,
+    auth_method: str = "",
+    oauth_connected: bool | None = None,
+) -> AIProviderConfig:
+    bundled = await get_user_app_settings(user_id)
+    stored_entry = (bundled.provider_configs.get(provider) if bundled else None) or ProviderConfigEntry()
+    stored_key = await get_user_provider_api_key(user_id, provider)
+    resolved_key = api_key or stored_key
+    resolved_model = model or stored_entry.model or (_FALLBACK_MODELS.get(provider, [""])[0] if _FALLBACK_MODELS.get(provider) else "")
+    resolved_auth_method = (auth_method or stored_entry.auth_method or "api_key").strip().lower() or "api_key"
+    runtime = AIProviderConfig(
+        provider=provider,
+        model=resolved_model,
+        api_key=resolved_key,
+        base_url=base_url if base_url is not None else stored_entry.base_url,
+        has_api_key=bool(resolved_key),
+        auth_method=resolved_auth_method,
+        oauth_connected=stored_entry.oauth_connected if oauth_connected is None else oauth_connected,
+    )
+    return await prepare_runtime_provider_config(user_id, runtime)
+
+
+def _extract_google_error_message(payload: dict, fallback: str) -> str:
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or fallback)
+    return fallback
+
+
+def _raise_gemini_status(status_code: int, message: str, retry_after: float | None = None) -> None:
+    kwargs = {
+        "provider": "gemini",
+        "model": "",
+        "status_code": status_code,
+        "retry_after": retry_after,
+    }
+    if status_code == 429:
+        low = message.lower()
+        if "quota" in low or "billing" in low or "exceeded" in low:
+            raise LLMQuotaExhaustedError(message, **kwargs)
+        raise LLMRateLimitError(message, **kwargs)
+    if status_code in (401, 403):
+        raise LLMAuthError(message, **kwargs)
+    if status_code == 402:
+        raise LLMBillingError(message, **kwargs)
+    if status_code in (500, 502, 503):
+        raise LLMServerError(message, **kwargs)
+    if status_code == 400:
+        raise LLMBadRequestError(message, **kwargs)
+    raise LLMError(message, **kwargs)
+
+
+async def _list_gemini_native_models(access_token: str, project_id: str) -> list[ModelOption]:
+    if not access_token:
+        raise LLMAuthError("Gemini OAuth is selected, but no valid OAuth access token is available.", provider="gemini", model="", status_code=401)
+    if not project_id:
+        raise LLMAuthError("Gemini OAuth requires GOOGLE_CLOUD_PROJECT_ID to be configured on the server.", provider="gemini", model="", status_code=401)
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                _GEMINI_NATIVE_MODELS_URL,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "x-goog-user-project": project_id,
+                },
+            )
+    except httpx.TimeoutException as exc:
+        raise LLMConnectionError(str(exc), provider="gemini", model="") from exc
+    except httpx.HTTPError as exc:
+        raise LLMConnectionError(str(exc), provider="gemini", model="") from exc
+
+    if resp.status_code >= 400:
+        retry_after = None
+        ra = resp.headers.get("retry-after")
+        if ra:
+            try:
+                retry_after = float(ra)
+            except ValueError:
+                retry_after = None
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        _raise_gemini_status(resp.status_code, _extract_google_error_message(payload, resp.text or "Gemini model discovery failed."), retry_after)
+
+    data = resp.json()
+    names: list[str] = []
+    for item in data.get("models", []) or []:
+        if not isinstance(item, dict):
+            continue
+        supported = item.get("supportedGenerationMethods") or []
+        if supported and "generateContent" not in supported:
+            continue
+        name = str(item.get("name") or "")
+        if name.startswith("models/"):
+            name = name.split("/", 1)[1]
+        names.append(name)
+    return _model_options_from_names(names)
+
+
+async def _list_gemini_models(config: AIProviderConfig) -> tuple[list[ModelOption], str | None]:
+    if config.auth_method == "oauth":
+        try:
+            models = await _list_gemini_native_models(
+                config.gemini_oauth_access_token or "",
+                config.gemini_cloud_project_id or "",
+            )
+            return models, "oauth"
+        except LLMAuthError as exc:
+            if not config.api_key:
+                raise
+            logger.warning("Gemini model discovery falling back to API key: %s", exc.raw_message[:200])
+            models = await _list_openai_compat_models(_GEMINI_OPENAI_BASE_URL, config.api_key)
+            return models, "api_key_fallback"
+
+    if config.api_key:
+        models = await _list_openai_compat_models(_GEMINI_OPENAI_BASE_URL, config.api_key)
+        return models, "api_key"
+    return [], None
+
+
 @router.get("/settings", response_model=AppSettingsResponse)
 async def get_settings(user=Depends(get_current_user)) -> AppSettingsResponse:
     bundled = await get_user_app_settings(user["id"])
@@ -196,21 +341,25 @@ async def list_provider_models(payload: ProviderModelsRequest, user=Depends(get_
     if not provider:
         raise HTTPException(status_code=400, detail="Provider is required.")
 
-    api_key = payload.api_key
-    if not api_key and provider in ("openai", "gemini", "claude"):
-        api_key = await get_user_provider_api_key(user["id"], provider)
-
     try:
         if provider == "openai":
+            api_key = payload.api_key or await get_user_provider_api_key(user["id"], provider)
             models = await _list_openai_compat_models(None, api_key)
             if models:
                 return ProviderModelsResponse(provider=provider, source="api", models=models)
         elif provider == "gemini":
-            if api_key:
-                models = await _list_openai_compat_models(_GEMINI_OPENAI_BASE_URL, api_key)
-                if models:
-                    return ProviderModelsResponse(provider=provider, source="api", models=models)
+            runtime = await _build_runtime_provider_config(
+                user["id"],
+                provider="gemini",
+                api_key=payload.api_key,
+                base_url=payload.base_url,
+                auth_method=payload.auth_method,
+            )
+            models, auth_source = await _list_gemini_models(runtime)
+            if models:
+                return ProviderModelsResponse(provider=provider, source="api", auth_source=auth_source, models=models)
         elif provider == "claude":
+            api_key = payload.api_key or await get_user_provider_api_key(user["id"], provider)
             models = await _list_anthropic_models(api_key)
             if models:
                 return ProviderModelsResponse(provider=provider, source="api", models=models)
@@ -219,6 +368,7 @@ async def list_provider_models(payload: ProviderModelsRequest, user=Depends(get_
             if models:
                 return ProviderModelsResponse(provider=provider, source="api", models=models)
         elif provider == "llamacpp":
+            api_key = payload.api_key or await get_user_provider_api_key(user["id"], provider)
             models = await _list_openai_compat_models(
                 ((payload.base_url or "http://localhost:8080").rstrip("/") + "/v1"),
                 api_key or "llama-local",
@@ -275,7 +425,7 @@ async def gemini_oauth_callback(
     if error:
         logger.warning("Gemini OAuth error for user %s: %s", user["id"], error)
         return RedirectResponse(
-            url=f"{FRONTEND_BASE_URL}/?gemini_oauth=error&msg={error}",
+            url=f"{FRONTEND_BASE_URL}/dashboard?gemini_oauth=error&msg={error}",
             status_code=302,
         )
 
@@ -284,7 +434,7 @@ async def gemini_oauth_callback(
     if not stored_state or stored_state != state:
         logger.warning("Gemini OAuth state mismatch for user %s", user["id"])
         return RedirectResponse(
-            url=f"{FRONTEND_BASE_URL}/?gemini_oauth=error&msg=invalid_state",
+            url=f"{FRONTEND_BASE_URL}/dashboard?gemini_oauth=error&msg=invalid_state",
             status_code=302,
         )
 
@@ -294,12 +444,12 @@ async def gemini_oauth_callback(
     except Exception as exc:
         logger.error("Gemini OAuth token exchange failed for user %s: %s", user["id"], exc)
         return RedirectResponse(
-            url=f"{FRONTEND_BASE_URL}/?gemini_oauth=error&msg=token_exchange_failed",
+            url=f"{FRONTEND_BASE_URL}/dashboard?gemini_oauth=error&msg=token_exchange_failed",
             status_code=302,
         )
 
     redirect = RedirectResponse(
-        url=f"{FRONTEND_BASE_URL}/?gemini_oauth=success",
+        url=f"{FRONTEND_BASE_URL}/dashboard?gemini_oauth=success",
         status_code=302,
     )
     redirect.delete_cookie(_GEMINI_OAUTH_STATE_COOKIE)
@@ -319,34 +469,113 @@ async def gemini_oauth_disconnect(user=Depends(get_current_user)) -> dict:
 async def test_settings(config: AppSettingsUpdateRequest, user=Depends(get_current_user)) -> dict:
     """
     Validate provider settings by sending a trivial prompt.
-    Uses the submitted key if provided, otherwise falls back to the user's saved key.
+    Uses the submitted provider config, then merges in saved credentials when needed.
     """
-    effective = AIProviderConfig(**config.model_dump(exclude={"provider_configs"}))
-
     provider_cfg = (config.provider_configs or {}).get(config.provider)
-    if provider_cfg and provider_cfg.api_key:
-        effective.api_key = provider_cfg.api_key
-    if provider_cfg and provider_cfg.base_url is not None:
-        effective.base_url = provider_cfg.base_url
-    if provider_cfg and provider_cfg.model:
-        effective.model = provider_cfg.model
+    runtime = await _build_runtime_provider_config(
+        user["id"],
+        provider=config.provider,
+        model=(provider_cfg.model if provider_cfg and provider_cfg.model else config.model),
+        api_key=(provider_cfg.api_key if provider_cfg else ""),
+        base_url=(provider_cfg.base_url if provider_cfg and provider_cfg.base_url is not None else config.base_url),
+        auth_method=(provider_cfg.auth_method if provider_cfg else ""),
+        oauth_connected=(provider_cfg.oauth_connected if provider_cfg else None),
+    )
 
-    if not effective.api_key and effective.provider not in ("ollama", "llamacpp"):
-        existing = await get_user_ai_settings(user["id"])
-        if existing and existing.api_key:
-            effective = AIProviderConfig(
-                provider=config.provider,
-                model=config.model,
-                api_key=existing.api_key,
-                base_url=config.base_url,
-                has_api_key=True,
-            )
+    provider = await build_provider_for_user_config(user["id"], runtime)
+    if provider is None:
+        raise HTTPException(status_code=400, detail="No usable credentials configured for the selected provider.")
 
-    if not effective.api_key and effective.provider not in ("ollama", "llamacpp"):
-        raise HTTPException(status_code=400, detail="No API key provided.")
-
-    provider = AIProvider(effective)
     ok, message = await provider.test_connection()
     if not ok:
         raise HTTPException(status_code=400, detail=f"Connection failed: {message}")
-    return {"status": "ok", "message": f"Connected — model replied: {message}"}
+
+    auth_source = provider.last_auth_source
+    auth_label = ""
+    if runtime.provider == "gemini":
+        if auth_source == "oauth":
+            auth_label = " using OAuth"
+        elif auth_source == "api_key_fallback":
+            auth_label = " using API key fallback"
+        elif auth_source == "api_key":
+            auth_label = " using API key"
+
+    return {
+        "status": "ok",
+        "auth_source": auth_source,
+        "message": f"Connected{auth_label} — model replied: {message}",
+    }
+
+
+class TestSciHubMirrorRequest(BaseModel):
+    url: str
+
+
+@router.post("/settings/test-scihub-mirror")
+async def test_scihub_mirror(payload: TestSciHubMirrorRequest, user=Depends(get_current_user)) -> dict:
+    """
+    Test whether a Sci-Hub mirror URL can fetch a known open-access paper.
+    Uses Ioannidis 2005 (PLOS Medicine) — always available on working mirrors.
+    Returns {ok, latency_ms, pdf_size_bytes, error?}.
+    """
+    import time
+    import re as _re
+
+    url = payload.url.rstrip("/")
+    if not url.startswith("http"):
+        return {"ok": False, "error": "URL must start with http:// or https://"}
+
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    TEST_DOI = "10.1371/journal.pmed.0020124"
+
+    try:
+        import httpx
+        t0 = time.monotonic()
+        async with httpx.AsyncClient(headers=HEADERS, timeout=httpx.Timeout(20.0, connect=8.0), follow_redirects=True) as c:
+            r = await c.get(f"{url}/{TEST_DOI}")
+            if r.status_code != 200:
+                return {"ok": False, "error": f"HTTP {r.status_code} from mirror"}
+
+            ct = r.headers.get("content-type", "")
+            if "pdf" in ct or r.content[:4] == b"%PDF":
+                elapsed = int((time.monotonic() - t0) * 1000)
+                return {"ok": True, "latency_ms": elapsed, "pdf_size_bytes": len(r.content)}
+
+            html = r.text
+
+            # Try citation_pdf_url meta (sci-hub.su style)
+            m = _re.search(r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)["\']', html, _re.I)
+            if not m:
+                m = _re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_pdf_url["\']', html, _re.I)
+            if m:
+                path = m.group(1)
+                pdf_url = (url + path) if path.startswith("/") else path
+                r2 = await c.get(pdf_url, headers={**HEADERS, "Referer": f"{url}/{TEST_DOI}"})
+                if r2.status_code == 200 and (r2.content[:4] == b"%PDF" or "pdf" in r2.headers.get("content-type", "")):
+                    elapsed = int((time.monotonic() - t0) * 1000)
+                    return {"ok": True, "latency_ms": elapsed, "pdf_size_bytes": len(r2.content)}
+
+            # Try embed src (sci-hub.ren / bban.top style)
+            m = _re.search(r'<embed[^>]+src=["\']([^"\']+\.pdf[^"\']*)["\']', html, _re.I)
+            if m:
+                embed_url = m.group(1).split("#")[0]
+                if embed_url.startswith("//"):
+                    embed_url = "https:" + embed_url
+                r2 = await c.get(embed_url, headers={**HEADERS, "Referer": f"{url}/{TEST_DOI}"})
+                if r2.status_code == 200 and (r2.content[:4] == b"%PDF" or "pdf" in r2.headers.get("content-type", "")):
+                    elapsed = int((time.monotonic() - t0) * 1000)
+                    return {"ok": True, "latency_ms": elapsed, "pdf_size_bytes": len(r2.content)}
+
+            return {"ok": False, "error": "Mirror responded but no PDF found (may need captcha or is unsupported)"}
+
+    except httpx.ConnectTimeout:
+        return {"ok": False, "error": "Connection timed out"}
+    except httpx.ConnectError:
+        return {"ok": False, "error": "Cannot connect to mirror"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
