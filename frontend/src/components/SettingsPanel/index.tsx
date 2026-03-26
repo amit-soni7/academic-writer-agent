@@ -7,6 +7,7 @@ import {
   type Provider,
   type ProviderConfigEntry,
   type ProviderModelOption,
+  CLAUDE_SETUP_TOKEN_MODELS,
   IMAGE_BACKEND_DEFAULT_MODEL,
   IMAGE_BACKEND_MODELS,
   PROVIDER_DEFAULT_MODEL,
@@ -51,9 +52,13 @@ const IMAGE_BACKENDS: { id: ImageBackend; label: string; subtitle: string }[] = 
 const API_KEY_PLACEHOLDERS: Record<Provider, string> = {
   openai:   'sk-...',
   gemini:   'AIza...',
-  claude:   'sk-ant-...',
+  claude:   'sk-ant-oat01-...',
   ollama:   '(not required)',
   llamacpp: 'llama-local (optional — only if server requires a key)',
+};
+
+const API_KEY_PLACEHOLDERS_FALLBACK: Partial<Record<Provider, string>> = {
+  claude: 'sk-ant-api03-...',
 };
 
 function defaultBaseUrl(p: Provider): string | null {
@@ -68,7 +73,7 @@ function buildDefaultConfigs(): Record<Provider, ProviderConfigEntry> {
   return {
     openai:   { auth_method: 'api_key', api_key: '', has_api_key: false, model: PROVIDER_DEFAULT_MODEL.openai,   base_url: null,                    oauth_connected: false },
     gemini:   { auth_method: 'api_key', api_key: '', has_api_key: false, model: PROVIDER_DEFAULT_MODEL.gemini,   base_url: null,                    oauth_connected: false },
-    claude:   { auth_method: 'api_key', api_key: '', has_api_key: false, model: PROVIDER_DEFAULT_MODEL.claude,   base_url: null,                    oauth_connected: false },
+    claude:   { auth_method: 'setup_token', api_key: '', has_api_key: false, model: PROVIDER_DEFAULT_MODEL.claude,   base_url: null,                    oauth_connected: false },
     ollama:   { auth_method: 'api_key', api_key: '', has_api_key: false, model: PROVIDER_DEFAULT_MODEL.ollama,   base_url: 'http://localhost:11434', oauth_connected: false },
     llamacpp: { auth_method: 'api_key', api_key: 'llama-local', has_api_key: false, model: PROVIDER_DEFAULT_MODEL.llamacpp, base_url: 'http://localhost:8080', oauth_connected: false },
   };
@@ -652,15 +657,21 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     const isLocal  = LOCAL_IDS.has(pid);
     const hasKey   = cfg?.has_api_key || Boolean(cfg?.api_key);
     const authMethod = (cfg?.auth_method || 'api_key') as string;
-    // Cloud providers (openai/gemini/claude) always use curated static list — ignore API-fetched list
-    const modelList = (isLocal && dynamicModels[pid]?.length ? dynamicModels[pid] : PROVIDER_MODELS[pid]) ?? [];
-    const currentModel = cfg?.model || PROVIDER_DEFAULT_MODEL[pid];
     const isGemini = pid === 'gemini';
+    const isClaude = pid === 'claude';
+    // Cloud providers (openai/gemini/claude) always use curated static list — ignore API-fetched list
+    // Setup tokens are Haiku-only; show restricted list when that auth method is selected.
+    const modelList = (isClaude && authMethod === 'setup_token')
+      ? CLAUDE_SETUP_TOKEN_MODELS
+      : (isLocal && dynamicModels[pid]?.length ? dynamicModels[pid] : PROVIDER_MODELS[pid]) ?? [];
+    const currentModel = cfg?.model || PROVIDER_DEFAULT_MODEL[pid];
     const geminiUsingFallback = isGemini && testState === 'ok' && testAuthSource === 'api_key_fallback';
     const geminiUsingOAuth = isGemini && authMethod === 'oauth' && testAuthSource === 'oauth';
     const apiKeyLabel = isGemini && authMethod === 'oauth'
       ? 'Gemini API Key Fallback'
-      : isLocal ? 'API Key (optional)' : 'API Key';
+      : isClaude && authMethod === 'setup_token'
+        ? 'Setup Token'
+        : isLocal ? 'API Key (optional)' : 'API Key';
 
     return (
       <>
@@ -785,6 +796,44 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
             </div>
           )}
 
+          {isClaude && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Authentication
+                </label>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Setup Token (Haiku only) uses your Claude subscription. API Key from console.anthropic.com for Sonnet/Opus.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => updateConfig('claude', { auth_method: 'setup_token', model: 'claude-haiku-4-5-20251001' })}
+                  className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
+                    authMethod === 'setup_token'
+                      ? 'border-brand-500 bg-brand-50 text-brand-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white'
+                  }`}
+                >
+                  Setup Token
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateConfig('claude', { auth_method: 'api_key' })}
+                  className={`rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
+                    authMethod === 'api_key'
+                      ? 'border-brand-500 bg-brand-50 text-brand-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-white'
+                  }`}
+                >
+                  API Key
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* API Key */}
           {pid !== 'ollama' && (
             <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2">
@@ -796,7 +845,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                   type={showKey[pid] ? 'text' : 'password'}
                   value={cfg?.api_key || ''}
                   onChange={(e) => updateConfig(pid, { api_key: e.target.value, has_api_key: Boolean(e.target.value) })}
-                  placeholder={API_KEY_PLACEHOLDERS[pid]}
+                  placeholder={isClaude && authMethod === 'api_key' ? (API_KEY_PLACEHOLDERS_FALLBACK[pid] ?? API_KEY_PLACEHOLDERS[pid]) : API_KEY_PLACEHOLDERS[pid]}
                   className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 pr-12 text-sm font-mono bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
                 />
                 <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
@@ -831,7 +880,12 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
                   </a>
                 </p>
               )}
-              {pid === 'claude' && (
+              {pid === 'claude' && authMethod === 'setup_token' && (
+                <p className="text-[11px] text-slate-500">
+                  Run <code className="bg-slate-100 px-1 rounded">claude setup-token</code> in your terminal to generate a token (starts with <code className="bg-slate-100 px-1 rounded">sk-ant-oat01-</code>).
+                </p>
+              )}
+              {pid === 'claude' && authMethod !== 'setup_token' && (
                 <p className="text-[11px] text-slate-500">
                   <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer"
                     className="underline" style={{ color: 'var(--gold)' }}>

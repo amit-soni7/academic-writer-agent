@@ -1,7 +1,7 @@
 import api from './client';
 
 export type Provider = 'openai' | 'gemini' | 'claude' | 'ollama' | 'llamacpp';
-export type ProviderAuthMethod = 'api_key' | 'oauth';
+export type ProviderAuthMethod = 'setup_token' | 'api_key' | 'oauth';
 export type ImageBackend = 'openai' | 'gemini_imagen';
 
 export interface ProviderConfigEntry {
@@ -84,7 +84,12 @@ export const GEMINI_MODELS = [
 export const CLAUDE_MODELS = [
   { value: 'claude-sonnet-4-6',           label: 'Claude Sonnet 4.6  (best quality)' },
   { value: 'claude-opus-4-6',             label: 'Claude Opus 4.6  (most capable)' },
-  { value: 'claude-haiku-4-5-20251001',   label: 'Claude Haiku 4.5  (fast · cheap)' },
+  { value: 'claude-haiku-4-5-20251001',   label: 'Claude Haiku 4.5  (fast · affordable)' },
+];
+
+// Setup tokens (sk-ant-oat01-) are scoped to Haiku only by Anthropic.
+export const CLAUDE_SETUP_TOKEN_MODELS = [
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5  (only model available with setup token)' },
 ];
 
 export const OLLAMA_MODELS = [

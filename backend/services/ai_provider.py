@@ -27,6 +27,7 @@ import openai
 from openai import AsyncOpenAI
 
 from models import AIProviderConfig
+from services.provider_config import get_model_meta
 from services.completion_guard import (
     CompletionConfig,
     CompletionGuard,
@@ -107,6 +108,7 @@ class AIProvider:
 
     def __init__(self, config: AIProviderConfig) -> None:
         self.config = config
+        self.model_meta = get_model_meta(config.provider, config.model)
         self.guard = CompletionGuard(self._retry_raw_call)
         self.last_auth_source: str | None = None
 
@@ -603,7 +605,18 @@ class AIProvider:
         Make one call to the Anthropic Claude API.
         Returns (text, normalized_stop_reason, tokens_used).
         """
-        client = anthropic.AsyncAnthropic(api_key=self.config.api_key)
+        key = self.config.api_key
+        if key.startswith("sk-ant-oat01-"):
+            client = anthropic.AsyncAnthropic(
+                auth_token=key,
+                default_headers={
+                    "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+                    "user-agent": "claude-cli/2.1.2 (external, cli)",
+                    "x-app": "cli",
+                },
+            )
+        else:
+            client = anthropic.AsyncAnthropic(api_key=key)
 
         # Claude has no dedicated JSON mode; inject the instruction into the system prompt.
         effective_system = (f"{system}\n\n{_JSON_INSTRUCTION}" if json_mode else system)
@@ -717,7 +730,18 @@ class AIProvider:
         max_tokens: int,
     ) -> str:
         """Claude call with cache_control on the cacheable context block."""
-        client = anthropic.AsyncAnthropic(api_key=self.config.api_key)
+        key = self.config.api_key
+        if key.startswith("sk-ant-oat01-"):
+            client = anthropic.AsyncAnthropic(
+                auth_token=key,
+                default_headers={
+                    "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+                    "user-agent": "claude-cli/2.1.2 (external, cli)",
+                    "x-app": "cli",
+                },
+            )
+        else:
+            client = anthropic.AsyncAnthropic(api_key=key)
 
         per_call_system = (f"{system}\n\n{_JSON_INSTRUCTION}" if json_mode else system)
 

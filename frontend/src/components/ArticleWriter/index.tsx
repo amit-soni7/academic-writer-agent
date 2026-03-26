@@ -26,6 +26,8 @@ import {
   streamDeepSynthesis,
   getDeepSynthesisResult,
   getPeerReviewResult,
+  generatePeerReview,
+  reviseAfterReview,
   writeArticle,
   generateTitle,
   approveTitle,
@@ -943,6 +945,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
 
   // Revision state
   const [revision, setRevision] = useState<RevisionResult | null>(null);
+  const [revisionState, setRevisionState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
 
   // Deep synthesis state
   const [deepSynthesis, setDeepSynthesis] = useState<DeepSynthesisResult | null>(null);
@@ -1162,6 +1165,35 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       `Point-by-Point Response – ${selectedJournal}`,
       revision.point_by_point_reply,
     );
+  }
+
+  async function handleGeneratePeerReview() {
+    setReviewState('running');
+    try {
+      const result = await generatePeerReview(sessionId);
+      setReview(result);
+      setReviewState('done');
+    } catch (err) {
+      setReviewState('error');
+      console.error('Peer review failed:', err);
+    }
+  }
+
+  async function handleReviseAfterReview() {
+    if (!articleText || !review) return;
+    setRevisionState('running');
+    try {
+      const result = await reviseAfterReview(sessionId, articleText, review, selectedJournal);
+      setRevision(result);
+      if (result.revised_article) {
+        setArticleText(result.revised_article);
+        setWordCount(result.revised_article.split(/\s+/).filter(Boolean).length);
+      }
+      setRevisionState('done');
+    } catch (err) {
+      setRevisionState('error');
+      console.error('Revision failed:', err);
+    }
   }
 
   const decisionConf = review ? (DECISION_CONFIG[review.decision] ?? DECISION_CONFIG.major_revision) : null;
@@ -1570,6 +1602,26 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
                     )}
                   </div>
                 )}
+
+                {/* ── Proceed to Peer Review CTA ── */}
+                <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-slate-100 rounded-b-2xl"
+                  style={{ background: 'var(--bg-subtle, #f8fafc)' }}>
+                  <span className="text-xs text-slate-400" style={{ fontFamily: 'Manrope, sans-serif' }}>
+                    Draft complete · {wordCount.toLocaleString()} words
+                  </span>
+                  <button
+                    onClick={() => onTabChange?.('peerreview')}
+                    className="inline-flex items-center gap-2 px-5 py-2 rounded-xl font-semibold text-sm text-white transition-all active:scale-95 hover:opacity-90"
+                    style={{
+                      fontFamily: 'Manrope, sans-serif',
+                      background: 'var(--gold, #4f46e5)',
+                      boxShadow: '0 2px 8px rgba(79,70,229,0.15)',
+                    }}
+                  >
+                    Proceed to Peer Review
+                    <span className="material-symbols-outlined text-base">arrow_forward</span>
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -1659,10 +1711,41 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
 
             {!review && reviewState !== 'running' && (
-              <div className="py-12 text-center text-slate-400 text-sm">
-                {!articleText
-                  ? 'Draft your article first, then click "Generate Peer Review".'
-                  : 'Click "Generate Peer Review" to get reviewer-grade feedback.'}
+              <div className="py-12 flex flex-col items-center justify-center text-center gap-6">
+                {!articleText ? (
+                  <p className="text-slate-400 text-sm">Draft your article first, then generate a peer review.</p>
+                ) : (
+                  <>
+                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center"
+                      style={{ background: 'var(--gold-faint, #ede9fe)' }}>
+                      <span className="material-symbols-outlined text-3xl"
+                        style={{ color: 'var(--gold, #4f46e5)', fontVariationSettings: "'FILL' 1" }}>rate_review</span>
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold mb-1"
+                        style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright, #1e293b)' }}>
+                        Ready for Peer Review
+                      </h3>
+                      <p className="text-sm text-slate-400 max-w-md">
+                        Generate a rigorous reviewer report with major/minor concerns and revision recommendations.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleGeneratePeerReview}
+                      disabled={reviewState === 'error'}
+                      className="inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-sm text-white
+                        transition-all hover:shadow-lg active:scale-95"
+                      style={{
+                        fontFamily: 'Manrope, sans-serif',
+                        background: 'linear-gradient(135deg, var(--gold, #4f46e5), var(--gold-light, #6366f1))',
+                        boxShadow: '0 4px 16px rgba(79,70,229,0.2)',
+                      }}
+                    >
+                      <span className="material-symbols-outlined text-lg">play_arrow</span>
+                      Generate Peer Review
+                    </button>
+                  </>
+                )}
               </div>
             )}
 
@@ -1742,6 +1825,22 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
                     </div>
                   </div>
                 )}
+
+                {/* Proceed to Revision CTA */}
+                <div className="flex items-center justify-end pt-4 border-t border-slate-100">
+                  <button
+                    onClick={() => onTabChange?.('revision')}
+                    className="inline-flex items-center gap-2 px-5 py-2 rounded-xl font-semibold text-sm text-white transition-all active:scale-95 hover:opacity-90"
+                    style={{
+                      fontFamily: 'Manrope, sans-serif',
+                      background: 'var(--gold, #4f46e5)',
+                      boxShadow: '0 2px 8px rgba(79,70,229,0.15)',
+                    }}
+                  >
+                    Proceed to Revision
+                    <span className="material-symbols-outlined text-base">arrow_forward</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1750,11 +1849,47 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
         {/* ── Revision tab ─────────────────────────────────────────────────── */}
         {tab === 'revision' && (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
-            {!revision && (
-              <div className="py-12 text-center text-slate-400 text-sm">
-                {!review
-                  ? 'Generate peer review first, then run revision.'
-                  : 'Click "Revise + Response Letter" to rewrite the manuscript and create a point-by-point response.'}
+            {!revision && revisionState !== 'running' && (
+              <div className="py-12 flex flex-col items-center justify-center text-center gap-6">
+                {!review ? (
+                  <p className="text-slate-400 text-sm">Generate peer review first, then run revision.</p>
+                ) : (
+                  <>
+                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center"
+                      style={{ background: 'var(--gold-faint, #ede9fe)' }}>
+                      <span className="material-symbols-outlined text-3xl"
+                        style={{ color: 'var(--gold, #4f46e5)', fontVariationSettings: "'FILL' 1" }}>edit_note</span>
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold mb-1"
+                        style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright, #1e293b)' }}>
+                        Ready for Revision
+                      </h3>
+                      <p className="text-sm text-slate-400 max-w-md">
+                        Revise the manuscript based on peer review feedback and generate a point-by-point response letter.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleReviseAfterReview}
+                      className="inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-sm text-white
+                        transition-all hover:shadow-lg active:scale-95"
+                      style={{
+                        fontFamily: 'Manrope, sans-serif',
+                        background: 'linear-gradient(135deg, var(--gold, #4f46e5), var(--gold-light, #6366f1))',
+                        boxShadow: '0 4px 16px rgba(79,70,229,0.2)',
+                      }}
+                    >
+                      <span className="material-symbols-outlined text-lg">play_arrow</span>
+                      Revise + Response Letter
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {revisionState === 'running' && (
+              <div className="py-12 text-center">
+                <LoadingLottie className="w-16 h-16 mx-auto" label="Revising manuscript and drafting response letter…" />
               </div>
             )}
 

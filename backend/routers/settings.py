@@ -16,6 +16,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+import anthropic
 import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -32,6 +33,7 @@ from models import (
     RevealApiKeyResponse,
 )
 from services.auth import get_current_user
+from services.provider_config import get_model_ids
 from services.llm_errors import (
     LLMAuthError,
     LLMBadRequestError,
@@ -62,13 +64,22 @@ _LEGACY_SETTINGS_FILE = Path(__file__).parent.parent / "settings.json"
 _GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 _GEMINI_NATIVE_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
-_FALLBACK_MODELS: dict[str, list[str]] = {
-    "openai": ["gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-5-mini", "gpt-4.1"],
-    "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
-    "claude": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"],
-    "ollama": ["qwen2.5:7b", "llama3.2", "mistral", "phi4"],
-    "llamacpp": ["qwen2.5-3b-instruct-q4_k_m.gguf"],
-}
+def _build_fallback_models() -> dict[str, list[str]]:
+    """Build fallback model lists from providers.json, with hardcoded safety net."""
+    _hardcoded = {
+        "openai": ["gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-5-mini", "gpt-4.1"],
+        "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+        "claude": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+        "ollama": ["qwen2.5:7b", "llama3.2", "mistral", "phi4"],
+        "llamacpp": ["qwen2.5-3b-instruct-q4_k_m.gguf"],
+    }
+    for provider in _hardcoded:
+        from_json = get_model_ids(provider)
+        if from_json:
+            _hardcoded[provider] = from_json
+    return _hardcoded
+
+_FALLBACK_MODELS = _build_fallback_models()
 
 
 def _load_legacy_settings() -> AIProviderConfig | None:
@@ -145,20 +156,19 @@ async def _list_ollama_models(base_url: str | None) -> list[ModelOption]:
 async def _list_anthropic_models(api_key: str) -> list[ModelOption]:
     if not api_key:
         return []
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        resp = await client.get(
-            "https://api.anthropic.com/v1/models",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
+    if api_key.startswith("sk-ant-oat01-"):
+        client = anthropic.AsyncAnthropic(
+            auth_token=api_key,
+            default_headers={
+                "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+                "user-agent": "claude-cli/2.1.2 (external, cli)",
+                "x-app": "cli",
             },
         )
-        resp.raise_for_status()
-        data = resp.json()
-    names: list[str] = []
-    for item in data.get("data", []) or []:
-        if isinstance(item, dict):
-            names.append(str(item.get("id") or ""))
+    else:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+    resp = await client.models.list()
+    names = [m.id for m in resp.data]
     return _model_options_from_names(names)
 
 

@@ -258,10 +258,12 @@ function WorkspaceTopBar() {
   );
 }
 
-function DashboardPage({ recentProjects, projectsLoading, onDeleteProject }: {
+function DashboardPage({ recentProjects, projectsLoading, onDeleteProject, showSidebarToggle, onSidebarToggle }: {
   recentProjects: ProjectMeta[];
   projectsLoading: boolean;
   onDeleteProject?: (projectId: string) => void;
+  showSidebarToggle?: boolean;
+  onSidebarToggle?: () => void;
 }) {
   const navigate = useNavigate();
   const { setSettingsOpen, isConfigured, authUserEmail, setAuthUserEmail, themePref, setThemePref } = useAppCtx();
@@ -319,7 +321,32 @@ function DashboardPage({ recentProjects, projectsLoading, onDeleteProject }: {
       {/* Top NavBar */}
       <header className="sticky top-0 z-40 flex justify-between items-center px-8 h-16 backdrop-blur-md border-b"
         style={{ background: 'color-mix(in srgb, var(--bg-base) 80%, transparent)', borderColor: 'var(--border-faint)' }}>
-        <div className="flex items-center w-1/3">
+        <div className="flex items-center gap-3 w-1/2">
+          {showSidebarToggle && onSidebarToggle && (
+            <button
+              type="button"
+              onClick={onSidebarToggle}
+              className="hidden lg:inline-flex items-center gap-2 px-3 py-2 rounded-full border border-slate-200 shadow-sm flex-shrink-0"
+              style={{ background: 'var(--bg-surface)' }}
+              aria-label="Open navigation"
+              title="Open navigation"
+            >
+              <img
+                src={appLogo}
+                alt="First Quill logo"
+                className="w-6 h-6 object-contain flex-shrink-0"
+              />
+              <span
+                className="text-lg font-semibold leading-none"
+                style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--gold)' }}
+              >
+                First Quill
+              </span>
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          )}
           <div className="relative w-full max-w-sm">
             <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
             <input
@@ -1246,22 +1273,6 @@ export default function App() {
         onSaved={(s) => { setAiSettings(s); }}
       />
 
-      {sidebarMode === 'hidden' && (
-        <button
-          type="button"
-          onClick={cycleSidebarMode}
-          className="hidden lg:inline-flex fixed top-4 left-4 z-30 w-9 h-9 items-center justify-center
-            rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 transition-colors"
-          style={{ background: 'var(--bg-surface)' }}
-          aria-label="Open navigation"
-          title="Open navigation"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </button>
-      )}
-
       <div className={`h-screen overflow-hidden grid grid-cols-1 ${sidebarWidthClass} transition-[grid-template-columns] duration-300 ease-in-out`}>
         <aside
           className={`hidden lg:flex lg:flex-col transition-[width,border-color] duration-300 ease-in-out overflow-hidden ${
@@ -1276,14 +1287,18 @@ export default function App() {
                   <button
                     type="button"
                     onClick={cycleSidebarMode}
-                    className="w-12 h-12 flex items-center justify-center rounded-xl transition-colors flex-shrink-0"
-                    style={{ border: '2px solid var(--border-muted)' }}
-                    aria-label="Navigation menu"
-                    title="Navigation"
+                    className="w-12 h-12 flex items-center justify-center rounded-xl transition-colors flex-shrink-0 overflow-hidden"
+                    style={{ border: '2px solid var(--border-muted)', background: 'var(--bg-surface)' }}
+                    aria-label="First Quill navigation"
+                    title="First Quill"
                     onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--bg-surface)'; }}
                   >
-                    <span className="material-symbols-outlined" style={{ color: 'var(--text-secondary)' }}>menu</span>
+                    <img
+                      src={appLogo}
+                      alt="First Quill logo"
+                      className="w-8 h-8 object-contain"
+                    />
                   </button>
                   <div
                     className={`min-w-0 overflow-hidden transition-all duration-300 ease-in-out ${
@@ -1291,10 +1306,6 @@ export default function App() {
                     }`}
                     aria-hidden={!showSidebarText}
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="material-symbols-outlined text-xs text-indigo-600" style={{ fontVariationSettings: "'FILL' 1" }}>edit_quill</span>
-                      <span className="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase" style={{ fontFamily: 'Manrope, sans-serif' }}>Researcher</span>
-                    </div>
                     <h2
                       className="text-2xl font-semibold leading-tight"
                       style={{
@@ -1325,8 +1336,8 @@ export default function App() {
                       key={id}
                       onClick={() => handleSidebarNav(id)}
                       className={`
-                        w-full flex items-center ${isSidebarCompact ? 'justify-center px-0' : 'gap-4 px-4'}
-                        py-3.5 rounded-xl text-sm text-left
+                        flex items-center text-sm text-left
+                        ${isSidebarCompact ? 'w-14 h-14 mx-auto justify-center rounded-full px-0 py-0' : 'w-full gap-4 px-4 py-3.5 rounded-xl'}
                         transition-all duration-200 animate-in active:scale-95
                       `}
                       style={{
@@ -1337,7 +1348,7 @@ export default function App() {
                           background: 'var(--gold-light)',
                           color: '#ffffff',
                           boxShadow: '0 4px 16px rgba(129, 140, 248, 0.2)',
-                          transform: 'translateX(2px)',
+                          transform: isSidebarCompact ? 'none' : 'translateX(2px)',
                         } : {
                           color: 'var(--text-secondary)',
                         }),
@@ -1550,7 +1561,7 @@ export default function App() {
 
         <div className="min-w-0 h-full overflow-y-auto">
           <Routes>
-            <Route path="/dashboard"                     element={<DashboardPage recentProjects={recentProjects} projectsLoading={projectsLoading} onDeleteProject={(id) => setRecentProjects((prev) => prev.filter((p) => p.project_id !== id))} />} />
+            <Route path="/dashboard"                     element={<DashboardPage recentProjects={recentProjects} projectsLoading={projectsLoading} onDeleteProject={(id) => setRecentProjects((prev) => prev.filter((p) => p.project_id !== id))} showSidebarToggle={sidebarMode === 'hidden'} onSidebarToggle={cycleSidebarMode} />} />
             <Route path="/usage"                         element={<UsagePage />} />
             <Route path="/intake"                        element={<IntakePage />} />
             <Route path="/new/literature"               element={<NewLiteraturePage />} />

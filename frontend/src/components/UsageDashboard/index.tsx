@@ -134,12 +134,6 @@ export default function UsageDashboard({ onBack }: Props) {
           )}
           <img src={logo} alt="First Quill" className="h-8 w-8 rounded-lg object-contain flex-shrink-0" />
           <div className="min-w-0 overflow-hidden">
-            <div className="flex items-center gap-1.5">
-              <span className="material-symbols-outlined text-xs text-indigo-600"
-                style={{ fontVariationSettings: '"FILL" 1' }}>edit_quill</span>
-              <span className="text-[10px] font-bold tracking-[0.2em] text-slate-400 uppercase"
-                style={{ fontFamily: 'Manrope, sans-serif' }}>Researcher</span>
-            </div>
             <h2 className="text-xl font-semibold leading-tight"
               style={{ fontFamily: 'Newsreader, Georgia, serif', color: 'var(--text-bright, #0f172a)' }}>
               First <span className="italic">Quill</span>

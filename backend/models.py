@@ -106,7 +106,7 @@ class AIProviderConfig(BaseModel):
     api_key: str = Field(default="")
     base_url: Optional[str] = Field(default=None, description="Custom base URL (Ollama only)")
     has_api_key: bool = Field(default=False, description="True when a key is stored server-side (masked in responses)")
-    auth_method: str = Field(default="api_key", description="api_key | oauth")
+    auth_method: str = Field(default="api_key", description="setup_token | api_key | oauth")
     oauth_connected: bool = Field(default=False, description="True when the active provider has a live OAuth connection")
     # ── PDF persistence settings ───────────────────────────────────────────────
     pdf_save_enabled: bool = Field(default=False, description="Save downloaded PDFs to disk")
@@ -131,7 +131,7 @@ class AIProviderConfig(BaseModel):
 
 
 class ProviderConfigEntry(BaseModel):
-    auth_method: str = Field(default="api_key", description="api_key | oauth")
+    auth_method: str = Field(default="api_key", description="setup_token | api_key | oauth")
     api_key: str = Field(default="")
     has_api_key: bool = Field(default=False)
     model: Optional[str] = Field(default=None)
