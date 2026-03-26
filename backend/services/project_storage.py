@@ -206,9 +206,24 @@ async def normalize_project_storage_for_user(user_id: str) -> dict:
             folder_updated = True
             report["projects_updated"] += 1
 
-        bib_result = write_project_bib(project["project_id"], target_folder, _summary_models(project))
+        project_slug = os.path.basename(target_folder.rstrip(os.sep)) or project["project_id"]
+        bib_result = write_project_bib(project["project_id"], target_folder, _summary_models(project), project_name=project_slug)
         if bib_result.get("changed"):
             report["bibs_rebuilt"] += 1
+
+        # Remove stale .bib files with wrong names (e.g. full_papers.bib, old slugs)
+        expected_bib = bib_result.get("path", "")
+        for bib_search_dir in [target_folder, os.path.join(target_folder, "full_papers")]:
+            if os.path.isdir(bib_search_dir):
+                for fname in os.listdir(bib_search_dir):
+                    if fname.endswith(".bib"):
+                        stale_path = os.path.join(bib_search_dir, fname)
+                        if stale_path != expected_bib:
+                            try:
+                                os.remove(stale_path)
+                                logger.info("Removed stale bib: %s", stale_path)
+                            except Exception:
+                                pass
 
         pdf_records = _expected_pdf_records(project, target_folder)
         project_expected_pdfs[project["project_id"]] = pdf_records

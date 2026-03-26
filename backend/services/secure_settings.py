@@ -15,7 +15,13 @@ from typing import Any, Optional
 
 from sqlalchemy import insert, select, update
 
-from models import AIProviderConfig, AppSettingsResponse, AppSettingsUpdateRequest, ProviderConfigEntry
+from models import (
+    AIProviderConfig,
+    AppSettingsResponse,
+    AppSettingsUpdateRequest,
+    ImageProviderConfigEntry,
+    ProviderConfigEntry,
+)
 from services.db import create_engine_async, user_settings
 
 
@@ -65,6 +71,10 @@ def _decrypt(value: Optional[str]) -> str:
 
 
 _DEFAULT_SCIHUB_MIRRORS = ["https://sci-hub.su", "https://www.sci-hub.ren"]
+_DEFAULT_IMAGE_PROVIDER_MODELS = {
+    "openai": "gpt-image-1",
+    "gemini_imagen": "imagen-3.0-generate-002",
+}
 
 
 def _masked_config(cfg: AIProviderConfig, has_api_key: bool) -> AIProviderConfig:
@@ -82,6 +92,13 @@ def _masked_config(cfg: AIProviderConfig, has_api_key: bool) -> AIProviderConfig
         http_proxy=cfg.http_proxy,
         track_changes_author=cfg.track_changes_author,
         scihub_mirrors=cfg.scihub_mirrors,
+        image_backend=cfg.image_backend,
+        image_model=cfg.image_model,
+        image_background=cfg.image_background,
+        image_quality=cfg.image_quality,
+        image_candidate_count=cfg.image_candidate_count,
+        image_asset_mode=cfg.image_asset_mode,
+        image_provider_configs=cfg.image_provider_configs,
     )
 
 
@@ -105,6 +122,13 @@ def _default_provider_profiles() -> dict[str, ProviderConfigEntry]:
     return out
 
 
+def _default_image_provider_profiles() -> dict[str, ImageProviderConfigEntry]:
+    return {
+        provider: ImageProviderConfigEntry(model=model, enabled=True)
+        for provider, model in _DEFAULT_IMAGE_PROVIDER_MODELS.items()
+    }
+
+
 def _json_loads_map(raw: Optional[str]) -> dict[str, Any]:
     if not raw:
         return {}
@@ -113,6 +137,20 @@ def _json_loads_map(raw: Optional[str]) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
+
+
+def _build_image_profiles_from_row(row: dict[str, Any]) -> dict[str, ImageProviderConfigEntry]:
+    profiles = _default_image_provider_profiles()
+    stored_profiles = _json_loads_map(row.get("image_provider_profiles_json"))
+    for provider, raw in stored_profiles.items():
+        if provider not in profiles or not isinstance(raw, dict):
+            continue
+        current = profiles[provider]
+        profiles[provider] = ImageProviderConfigEntry(
+            model=raw.get("model") or current.model,
+            enabled=bool(raw.get("enabled", current.enabled)),
+        )
+    return profiles
 
 
 def _decrypt_key_map(raw: Optional[str]) -> dict[str, str]:
@@ -202,6 +240,9 @@ def _build_active_config(row: dict[str, Any], key_map: dict[str, str], profiles:
     provider = str(row.get("provider") or "openai")
     profile = profiles.get(provider)
     api_key = key_map.get(provider, "")
+    image_profiles = _build_image_profiles_from_row(row)
+    image_backend = str(row.get("image_backend") or "openai")
+    image_profile = image_profiles.get(image_backend)
     return AIProviderConfig(
         provider=provider,
         model=(profile.model if profile and profile.model else row.get("model") or DEFAULT_PROVIDER_MODELS.get(provider, "gpt-4o")),
@@ -216,6 +257,13 @@ def _build_active_config(row: dict[str, Any], key_map: dict[str, str], profiles:
         http_proxy=row.get("http_proxy"),
         track_changes_author=row.get("track_changes_author"),
         scihub_mirrors=_load_scihub_mirrors(row.get("scihub_mirrors_json")),
+        image_backend=image_backend,
+        image_model=str(row.get("image_model") or (image_profile.model if image_profile and image_profile.model else _DEFAULT_IMAGE_PROVIDER_MODELS.get(image_backend, "gpt-image-1"))),
+        image_background=str(row.get("image_background") or "opaque"),
+        image_quality=str(row.get("image_quality") or "high"),
+        image_candidate_count=max(1, min(4, int(str(row.get("image_candidate_count") or "1") or "1"))),
+        image_asset_mode=str(row.get("image_asset_mode") or "full_figure"),
+        image_provider_configs=image_profiles,
     )
 
 
@@ -284,6 +332,7 @@ async def save_user_ai_settings(user_id: str, config: AIProviderConfig) -> AIPro
     update_req = AppSettingsUpdateRequest(
         **config.model_dump(),
         provider_configs=provider_profiles,
+        image_provider_configs=config.image_provider_configs,
     )
     return await save_user_app_settings(user_id, update_req)
 
@@ -295,6 +344,9 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
 
     incoming_profiles = _default_provider_profiles()
     incoming_profiles.update(existing_profiles)
+    existing_image_profiles = _build_image_profiles_from_row(existing_row) if existing_row else _default_image_provider_profiles()
+    incoming_image_profiles = _default_image_provider_profiles()
+    incoming_image_profiles.update(existing_image_profiles)
 
     for provider, incoming in (config.provider_configs or {}).items():
         if provider not in incoming_profiles:
@@ -312,6 +364,14 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
         elif incoming.has_api_key is False and provider in existing_keys:
             # explicit clear if frontend sends has_api_key=false and empty key
             existing_keys.pop(provider, None)
+
+    for provider, incoming in (config.image_provider_configs or {}).items():
+        if provider not in incoming_image_profiles:
+            continue
+        incoming_image_profiles[provider] = ImageProviderConfigEntry(
+            model=incoming.model or incoming_image_profiles[provider].model,
+            enabled=True if incoming.enabled is None else bool(incoming.enabled),
+        )
 
     # Sync active provider fields back into per-provider profiles and key map.
     active_provider = config.provider
@@ -343,6 +403,13 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
         for provider, entry in incoming_profiles.items()
         if provider in SUPPORTED_PROVIDERS
     })
+    image_profiles_json = json.dumps({
+        provider: {
+            "model": entry.model,
+            "enabled": entry.enabled,
+        }
+        for provider, entry in incoming_image_profiles.items()
+    })
     encrypted_key_map = _encrypt_key_map(existing_keys)
 
     active_key = existing_keys.get(active_provider, "")
@@ -366,6 +433,13 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
             "scihub_mirrors_json": json.dumps(config.scihub_mirrors) if config.scihub_mirrors else json.dumps(_DEFAULT_SCIHUB_MIRRORS),
             "provider_profiles_json": profiles_json,
             "provider_api_keys_encrypted_json": encrypted_key_map,
+            "image_backend": config.image_backend,
+            "image_model": config.image_model,
+            "image_background": config.image_background,
+            "image_quality": config.image_quality,
+            "image_candidate_count": str(config.image_candidate_count),
+            "image_asset_mode": config.image_asset_mode,
+            "image_provider_profiles_json": image_profiles_json,
         }
         upd = await conn.execute(
             update(user_settings)
@@ -389,4 +463,11 @@ async def save_user_app_settings(user_id: str, config: AppSettingsUpdateRequest)
         http_proxy=config.http_proxy,
         track_changes_author=config.track_changes_author,
         scihub_mirrors=config.scihub_mirrors or list(_DEFAULT_SCIHUB_MIRRORS),
+        image_backend=config.image_backend,
+        image_model=config.image_model,
+        image_background=config.image_background,
+        image_quality=config.image_quality,
+        image_candidate_count=config.image_candidate_count,
+        image_asset_mode=config.image_asset_mode,
+        image_provider_configs=incoming_image_profiles,
     )

@@ -2,9 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   type AISettings,
+  type ImageBackend,
+  type ImageProviderConfigEntry,
   type Provider,
   type ProviderConfigEntry,
   type ProviderModelOption,
+  IMAGE_BACKEND_DEFAULT_MODEL,
+  IMAGE_BACKEND_MODELS,
   PROVIDER_DEFAULT_MODEL,
   PROVIDER_MODELS,
   fetchProviderModels,
@@ -26,7 +30,7 @@ interface Props {
 type TestState = 'idle' | 'testing' | 'ok' | 'fail';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 // Navigation views: menu → ai (provider list) → ai:providerid (detail) → pdf → scihub
-type View = 'menu' | 'ai' | `ai:${Provider}` | 'pdf' | 'scihub' | 'trackchanges';
+type View = 'menu' | 'ai' | `ai:${Provider}` | 'pdf' | 'scihub' | 'trackchanges' | 'images';
 
 // ── Provider metadata ─────────────────────────────────────────────────────────
 
@@ -39,6 +43,10 @@ const PROVIDERS: { id: Provider; label: string; badge: string; dotColor: string;
 ];
 
 const LOCAL_IDS = new Set<Provider>(['ollama', 'llamacpp']);
+const IMAGE_BACKENDS: { id: ImageBackend; label: string; subtitle: string }[] = [
+  { id: 'openai', label: 'OpenAI Images', subtitle: 'GPT Image 1' },
+  { id: 'gemini_imagen', label: 'Gemini Imagen', subtitle: 'Imagen 3' },
+];
 
 const API_KEY_PLACEHOLDERS: Record<Provider, string> = {
   openai:   'sk-...',
@@ -87,6 +95,12 @@ function normalizeSettings(input: AISettings): AISettings {
   const provider = (input.provider as Provider) || 'openai';
   const configs  = mergeConfigs(input.provider_configs);
   const active   = configs[provider];
+  const imageBackend = (input.image_backend as ImageBackend) || 'openai';
+  const imageProviderConfigs: Partial<Record<ImageBackend, ImageProviderConfigEntry>> = {
+    openai: { model: input.image_provider_configs?.openai?.model || IMAGE_BACKEND_DEFAULT_MODEL.openai, enabled: input.image_provider_configs?.openai?.enabled ?? true },
+    gemini_imagen: { model: input.image_provider_configs?.gemini_imagen?.model || IMAGE_BACKEND_DEFAULT_MODEL.gemini_imagen, enabled: input.image_provider_configs?.gemini_imagen?.enabled ?? true },
+  };
+  const activeImageProfile = imageProviderConfigs[imageBackend];
   return {
     provider,
     model:            active?.model      || input.model || PROVIDER_DEFAULT_MODEL[provider],
@@ -100,6 +114,13 @@ function normalizeSettings(input: AISettings): AISettings {
     http_proxy:       input.http_proxy     ?? null,
     scihub_mirrors:   input.scihub_mirrors ?? ['https://sci-hub.su', 'https://www.sci-hub.ren'],
     track_changes_author: input.track_changes_author ?? null,
+    image_backend: imageBackend,
+    image_model: input.image_model || activeImageProfile?.model || IMAGE_BACKEND_DEFAULT_MODEL[imageBackend],
+    image_background: input.image_background || 'opaque',
+    image_quality: input.image_quality || 'high',
+    image_candidate_count: Math.max(1, Math.min(4, input.image_candidate_count || 1)),
+    image_asset_mode: input.image_asset_mode || 'full_figure',
+    image_provider_configs: imageProviderConfigs,
   };
 }
 
@@ -153,6 +174,16 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     has_api_key: false, provider_configs: buildDefaultConfigs(),
     pdf_save_enabled: false, pdf_save_path: null, sci_hub_enabled: false, http_proxy: null,
     scihub_mirrors: ['https://sci-hub.su', 'https://www.sci-hub.ren'],
+    image_backend: 'openai',
+    image_model: IMAGE_BACKEND_DEFAULT_MODEL.openai,
+    image_background: 'opaque',
+    image_quality: 'high',
+    image_candidate_count: 1,
+    image_asset_mode: 'full_figure',
+    image_provider_configs: {
+      openai: { model: IMAGE_BACKEND_DEFAULT_MODEL.openai, enabled: true },
+      gemini_imagen: { model: IMAGE_BACKEND_DEFAULT_MODEL.gemini_imagen, enabled: true },
+    },
   }));
 
   const [view,          setView]          = useState<View>('menu');
@@ -308,6 +339,9 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   function buildPayload(): AISettings {
     const merged = mergeConfigs(settings.provider_configs);
     const active = merged[activeProvider];
+    const imageBackend = (settings.image_backend as ImageBackend) || 'openai';
+    const imageProviderConfigs = settings.image_provider_configs || {};
+    const activeImageProfile = imageProviderConfigs[imageBackend];
     return {
       ...settings,
       provider:    activeProvider,
@@ -316,6 +350,9 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       base_url:    active.base_url ?? null,
       has_api_key: active.has_api_key ?? false,
       provider_configs: merged,
+      image_backend: imageBackend,
+      image_model: activeImageProfile?.model || settings.image_model || IMAGE_BACKEND_DEFAULT_MODEL[imageBackend],
+      image_provider_configs: imageProviderConfigs,
     };
   }
 
@@ -414,6 +451,8 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
   const activeP     = PROVIDERS.find((p) => p.id === activeProvider)!;
   const pdfSummary  = settings.pdf_save_enabled ? (settings.pdf_save_path || 'Enabled') : 'Disabled';
   const sciSummary  = settings.sci_hub_enabled  ? 'Enabled' : 'Disabled';
+  const activeImageBackend = (settings.image_backend as ImageBackend) || 'openai';
+  const imageSummary = `${IMAGE_BACKENDS.find((b) => b.id === activeImageBackend)?.label || 'OpenAI Images'} · ${settings.image_model || IMAGE_BACKEND_DEFAULT_MODEL[activeImageBackend]}`;
 
   const MENU_ITEMS = [
     {
@@ -427,6 +466,17 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
       label: 'AI Provider',
       subtitle: `${activeP.label} · ${providerConfigs[activeProvider]?.model || PROVIDER_DEFAULT_MODEL[activeProvider]}`,
       badge: 'Active',
+    },
+    {
+      key: 'images' as const,
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2 1.586-1.586a2 2 0 012.828 0L20 14m-8-9h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+      ),
+      label: 'Image Generation',
+      subtitle: imageSummary,
+      badge: 'New',
     },
     {
       key: 'pdf' as const,
@@ -939,6 +989,135 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
     );
   }
 
+  function updateImageProfile(backend: ImageBackend, patch: Partial<ImageProviderConfigEntry>) {
+    setSettings((prev) => ({
+      ...prev,
+      image_provider_configs: {
+        ...(prev.image_provider_configs || {}),
+        [backend]: {
+          ...(prev.image_provider_configs?.[backend] || { model: IMAGE_BACKEND_DEFAULT_MODEL[backend], enabled: true }),
+          ...patch,
+        },
+      },
+      ...(prev.image_backend === backend && patch.model ? { image_model: patch.model } : {}),
+    }));
+  }
+
+  function ImageGenerationView() {
+    const imageBackend = (settings.image_backend as ImageBackend) || 'openai';
+    const imageProfile = settings.image_provider_configs?.[imageBackend];
+    const imageModels = IMAGE_BACKEND_MODELS[imageBackend] || [];
+    return (
+      <>
+        <SubHeader title="Image Generation" onBack={() => setView('menu')} />
+        <div className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">Default image backend</label>
+              <p className="text-xs text-slate-500 mt-1">Used for scientific illustrations and graphical abstracts. OpenAI is the default.</p>
+            </div>
+            <div className="grid grid-cols-1 gap-2">
+              {IMAGE_BACKENDS.map((backend) => (
+                <button
+                  key={backend.id}
+                  type="button"
+                  onClick={() => setSettings((prev) => ({
+                    ...prev,
+                    image_backend: backend.id,
+                    image_model: prev.image_provider_configs?.[backend.id]?.model || IMAGE_BACKEND_DEFAULT_MODEL[backend.id],
+                  }))}
+                  className={`rounded-xl border px-3 py-3 text-left transition-colors ${imageBackend === backend.id ? 'border-brand-500 bg-brand-50' : 'border-slate-200 bg-slate-50 hover:bg-white'}`}
+                >
+                  <div className="text-sm font-semibold text-slate-800">{backend.label}</div>
+                  <div className="text-xs text-slate-500 mt-0.5">{backend.subtitle}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Default model</label>
+            <select
+              value={imageProfile?.model || settings.image_model || IMAGE_BACKEND_DEFAULT_MODEL[imageBackend]}
+              onChange={(e) => updateImageProfile(imageBackend, { model: e.target.value })}
+              className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+            >
+              {imageModels.map((model) => (
+                <option key={model.value} value={model.value}>{model.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">Background</label>
+                <select
+                  value={settings.image_background || 'opaque'}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, image_background: e.target.value }))}
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                >
+                  <option value="opaque">Opaque</option>
+                  <option value="transparent">Transparent</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">Quality</label>
+                <select
+                  value={settings.image_quality || 'high'}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, image_quality: e.target.value }))}
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                >
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">Candidate count</label>
+                <select
+                  value={String(settings.image_candidate_count || 1)}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, image_candidate_count: Number(e.target.value) }))}
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                >
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">Default mode</label>
+                <select
+                  value={settings.image_asset_mode || 'full_figure'}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, image_asset_mode: e.target.value }))}
+                  className="w-full rounded-xl border-2 border-slate-200 px-3 py-2.5 text-sm bg-slate-50 focus:outline-none focus:border-brand-500 focus:bg-white transition-colors"
+                >
+                  <option value="full_figure">Full figure</option>
+                  <option value="asset_pack">Asset pack</option>
+                  <option value="composition_reference">Composition reference</option>
+                  <option value="transparent_asset">Transparent asset</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="px-4 py-4 border-t border-slate-200 bg-white flex-shrink-0">
+          <button type="button" onClick={() => void handleSave()} disabled={saveState === 'saving'}
+            className="w-full px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-colors"
+            style={{ background: 'var(--gold)' }}>
+            {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : 'Save'}
+          </button>
+        </div>
+      </>
+    );
+  }
+
   // ── VIEW: Sci-Hub ────────────────────────────────────────────────────────────
 
   function SciHubView() {
@@ -1192,6 +1371,7 @@ export default function SettingsPanel({ open, onClose, onSaved }: Props) {
         {/* View content */}
         {view === 'menu'    && <MenuView />}
         {view === 'ai'      && <AIListView />}
+        {view === 'images'  && <ImageGenerationView />}
         {view === 'pdf'     && <PDFView />}
         {view === 'scihub'  && <SciHubView />}
         {view === 'trackchanges' && <TrackChangesView />}

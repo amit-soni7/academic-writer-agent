@@ -234,7 +234,10 @@ def test_build_prompt_includes_ref_list(sample_summaries):
     style = _make_style()
     session = _make_session({s["paper_key"]: s for s in sample_summaries})
     _, user = _call_build_prompt(session, style, "My Test Title")
-    assert "Pre-formatted reference list" in user
+    assert (
+        "Pre-formatted reference list" in user
+        or "Pre-formatted reference details" in user
+    )
     assert "Smith" in user
 
 
@@ -262,12 +265,15 @@ def test_build_prompt_title_not_changed(sample_summaries):
 
 def test_article_sections_dict_has_new_types():
     required_types = [
-        "original_research", "review", "meta_analysis",
-        "case_report", "short_communication", "brief_report",
-        "editorial", "letter",
+        "original_research", "systematic_review", "scoping_review",
+        "narrative_review", "review", "meta_analysis", "case_report",
+        "short_communication", "brief_report", "editorial",
+        "letter", "opinion", "study_protocol",
     ]
     for atype in required_types:
         assert atype in _ARTICLE_SECTIONS, \
             f"_ARTICLE_SECTIONS missing '{atype}'"
         assert len(_ARTICLE_SECTIONS[atype]) > 0, \
             f"_ARTICLE_SECTIONS['{atype}'] is empty"
+        assert any(section.startswith("Abstract") for section in _ARTICLE_SECTIONS[atype]), \
+            f"_ARTICLE_SECTIONS['{atype}'] should include an abstract"

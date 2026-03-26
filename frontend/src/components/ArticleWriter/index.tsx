@@ -19,8 +19,8 @@
  *   - Decision badge: accept / minor_revision / major_revision / reject
  */
 import { useState, useEffect, type ReactNode } from 'react';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
-import type { DeepSynthesisResult, DeepSynthesisSSEEvent, JournalStyle, PeerReviewReport, RevisionResult, SynthesisResult } from '../../types/paper';
+import { AlignmentType, Document, ImageRun, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } from 'docx';
+import type { DeepSynthesisResult, DeepSynthesisSSEEvent, JournalStyle, PeerReviewReport, RevisionResult, SynthesisResult, VisualItem, VisualRecommendations } from '../../types/paper';
 import {
   getSynthesisResult,
   streamDeepSynthesis,
@@ -31,10 +31,19 @@ import {
   approveTitle,
   loadProject as loadSession,
   getJournalStyle,
+  getVisualRecommendations,
+  planVisuals,
+  acceptVisual,
+  dismissVisual,
+  finalizeVisual,
+  selectVisualCandidate,
 } from '../../api/projects';
 import type { TitleSuggestions } from '../../api/projects';
 import DeepSynthesisPanel from './DeepSynthesisPanel';
 import LoadingLottie from '../LoadingLottie';
+import IllustrationPromptModal from './IllustrationPromptModal';
+import VisualBlock from './VisualBlock';
+import VisualEditModal from './VisualEditModal';
 
 interface Props {
   sessionId: string;
@@ -49,11 +58,16 @@ interface Props {
 
 const ARTICLE_TYPES: { value: string; label: string; description?: string }[] = [
   { value: 'original_research',   label: 'Original Research',      description: 'Empirical study with new data' },
-  { value: 'review',              label: 'Systematic Review',       description: 'Comprehensive literature review' },
+  { value: 'systematic_review',   label: 'Systematic Review',       description: 'Structured evidence synthesis with protocol-driven methods' },
+  { value: 'scoping_review',      label: 'Scoping Review',          description: 'Evidence mapping across concepts, contexts, or gaps' },
+  { value: 'narrative_review',    label: 'Narrative Review',        description: 'Focused interpretive review of the literature' },
+  { value: 'review',              label: 'General Review',          description: 'Comprehensive literature review' },
   { value: 'meta_analysis',       label: 'Meta-Analysis',           description: 'Statistical synthesis of studies' },
   { value: 'case_report',         label: 'Case Report',             description: 'Detailed patient/event case' },
   { value: 'brief_report',        label: 'Brief Report',            description: 'Short original findings' },
   { value: 'short_communication', label: 'Short Communication',     description: 'Concise preliminary findings' },
+  { value: 'study_protocol',      label: 'Study Protocol',          description: 'Prospective protocol for a planned study or trial' },
+  { value: 'opinion',             label: 'Opinion',                 description: 'Evidence-based position or perspective piece' },
   { value: 'editorial',           label: 'Editorial',               description: 'Invited expert commentary' },
   { value: 'letter',              label: 'Letter to the Editor',    description: 'Brief correspondence' },
 ];
@@ -242,6 +256,138 @@ function renderCeilsArticle(text: string): ReactNode[] {
   return nodes;
 }
 
+// ── Visual inline splice ───────────────────────────────────────────────────────
+
+interface VisualHandlers {
+  onAccept: (item: VisualItem) => void;
+  onDismiss: (item: VisualItem) => void;
+  onEdit: (item: VisualItem) => void;
+  onFinalize: (item: VisualItem) => void;
+  onRegenerate: (item: VisualItem) => void;
+  onSelectCandidate?: (item: VisualItem, candidateId: string) => void;
+}
+
+/**
+ * spliceVisuals — post-process the ReactNode array from renderCeilsArticle
+ * to inject VisualBlock components at the positions indicated by insert_after.
+ *
+ * Supports two formats:
+ *   "after_paragraph:N"   — insert after the Nth <p> node (0-indexed)
+ *   "after_heading:name"  — insert after the first heading whose text contains `name`
+ */
+function spliceVisuals(
+  nodes: ReactNode[],
+  items: VisualItem[],
+  projectId: string,
+  handlers: VisualHandlers,
+): ReactNode[] {
+  const activeItems = items.filter(i => i.status !== 'dismissed');
+  if (activeItems.length === 0) return nodes;
+
+  // Track paragraph indices in the nodes array
+  let pCount = 0;
+  // Map: nodeIndex → list of VisualItem to insert AFTER that node
+  const insertAfterNode: Map<number, VisualItem[]> = new Map();
+
+  for (const item of activeItems) {
+    const spec = item.insert_after;
+    if (!spec) continue;
+
+    if (spec.startsWith('after_paragraph:')) {
+      const targetP = parseInt(spec.replace('after_paragraph:', ''), 10);
+      // Find the node index of the targetP-th paragraph
+      let pIdx = 0;
+      for (let ni = 0; ni < nodes.length; ni++) {
+        const node = nodes[ni];
+        if (node && typeof node === 'object' && 'type' in (node as object)) {
+          const r = node as React.ReactElement;
+          if (r.type === 'p') {
+            if (pIdx === targetP) {
+              const existing = insertAfterNode.get(ni) || [];
+              existing.push(item);
+              insertAfterNode.set(ni, existing);
+              break;
+            }
+            pIdx++;
+          }
+        }
+      }
+    } else if (spec.startsWith('after_heading:')) {
+      const headingText = spec.replace('after_heading:', '').toLowerCase().trim();
+      // Find the first h2 or h3 whose text content contains headingText
+      for (let ni = 0; ni < nodes.length; ni++) {
+        const node = nodes[ni];
+        if (node && typeof node === 'object' && 'type' in (node as object)) {
+          const r = node as React.ReactElement<{ children?: ReactNode }>;
+          if ((r.type === 'h2' || r.type === 'h3') && r.props?.children) {
+            const text = String(r.props.children).toLowerCase();
+            if (text.includes(headingText)) {
+              const existing = insertAfterNode.get(ni) || [];
+              existing.push(item);
+              insertAfterNode.set(ni, existing);
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  void pCount; // suppress unused warning
+
+  if (insertAfterNode.size === 0) {
+    // Fallback: append all at end
+    const result = [...nodes];
+    for (const item of activeItems) {
+      result.push(
+        <VisualBlock
+          key={`visual-${item.id}`}
+          item={item}
+          projectId={projectId}
+          {...handlers}
+        />
+      );
+    }
+    return result;
+  }
+
+  // Splice visual blocks at computed positions
+  const result: ReactNode[] = [];
+  for (let ni = 0; ni < nodes.length; ni++) {
+    result.push(nodes[ni]);
+    const toInsert = insertAfterNode.get(ni);
+    if (toInsert) {
+      for (const item of toInsert) {
+        result.push(
+          <VisualBlock
+            key={`visual-${item.id}`}
+            item={item}
+            projectId={projectId}
+            {...handlers}
+          />
+        );
+      }
+    }
+  }
+
+  // Items with no valid position fallback to end
+  const placed = new Set<string>();
+  insertAfterNode.forEach(items => items.forEach(i => placed.add(i.id)));
+  for (const item of activeItems) {
+    if (!placed.has(item.id)) {
+      result.push(
+        <VisualBlock
+          key={`visual-${item.id}`}
+          item={item}
+          projectId={projectId}
+          {...handlers}
+        />
+      );
+    }
+  }
+
+  return result;
+}
+
 function downloadTextFile(filename: string, content: string) {
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -252,39 +398,212 @@ function downloadTextFile(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-async function downloadDocxFile(filename: string, title: string, content: string) {
+function sanitizeFilenameBase(value: string): string {
+  const cleaned = Array.from(
+    value.replace(/[<>:"/\\|?*]/g, ''),
+  )
+    .filter(ch => (ch.codePointAt(0) ?? 0) >= 32)
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || 'Manuscript';
+}
+
+// Base paragraph style: Times New Roman 12pt, 1.5 line spacing, justified
+function bodyPara(text: string, opts?: { bold?: boolean; size?: number; spaceAfter?: number; spaceBefore?: number; center?: boolean }): Paragraph {
+  return new Paragraph({
+    alignment: opts?.center ? AlignmentType.CENTER : AlignmentType.JUSTIFIED,
+    spacing: { line: 360, after: opts?.spaceAfter ?? 160, before: opts?.spaceBefore ?? 0 },
+    children: [new TextRun({
+      text,
+      font: 'Times New Roman',
+      size: opts?.size ?? 24,        // half-points: 24 = 12pt
+      bold: opts?.bold ?? false,
+    })],
+  });
+}
+
+async function fetchImageAsBuffer(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    return await resp.arrayBuffer();
+  } catch {
+    return null;
+  }
+}
+
+function htmlTableToDocx(html: string, caption?: string): (Paragraph | Table)[] {
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  const tbl = wrapper.querySelector('table');
+  if (!tbl) return [];
+
+  const rows: TableRow[] = [];
+  tbl.querySelectorAll('tr').forEach(tr => {
+    const cells: TableCell[] = [];
+    tr.querySelectorAll('th, td').forEach(td => {
+      cells.push(new TableCell({
+        children: [new Paragraph({
+          alignment: AlignmentType.LEFT,
+          spacing: { line: 360 },
+          children: [new TextRun({ text: td.textContent?.trim() ?? '', font: 'Times New Roman', size: 22, bold: td.tagName === 'TH' })],
+        })],
+        width: { size: 100 / Math.max(1, tr.children.length), type: WidthType.PERCENTAGE },
+      }));
+    });
+    if (cells.length) rows.push(new TableRow({ children: cells }));
+  });
+
+  const out: (Paragraph | Table)[] = [];
+  if (caption) out.push(bodyPara(caption, { bold: true, spaceAfter: 80 }));
+  if (rows.length) out.push(new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }));
+  out.push(bodyPara(''));
+  return out;
+}
+
+// ── Visual inline positioning helpers ────────────────────────────────────────
+
+type InsertSpec =
+  | { kind: 'paragraph'; index: number }
+  | { kind: 'heading'; name: string }
+  | { kind: 'end' };
+
+function parseInsertAfter(insertAfter?: string | null): InsertSpec {
+  if (!insertAfter) return { kind: 'end' };
+  if (insertAfter.startsWith('after_paragraph:')) {
+    const n = parseInt(insertAfter.slice(16), 10);
+    return isNaN(n) ? { kind: 'end' } : { kind: 'paragraph', index: n };
+  }
+  if (insertAfter.startsWith('after_heading:')) {
+    return { kind: 'heading', name: insertAfter.slice(14).trim().toLowerCase() };
+  }
+  return { kind: 'end' };
+}
+
+async function renderVisualForDocx(
+  item: VisualItem,
+  projectId: string,
+): Promise<(Paragraph | Table)[]> {
+  const gen = item.generated;
+  if (!gen) return [];
+  const nodes: (Paragraph | Table)[] = [];
+
+  if (item.type === 'table' && gen.table_html) {
+    nodes.push(bodyPara(item.title, { bold: true, spaceBefore: 240, spaceAfter: 80 }));
+    nodes.push(...htmlTableToDocx(gen.table_html, gen.caption ?? undefined));
+  } else if (item.type === 'figure' && gen.image_url && projectId) {
+    nodes.push(bodyPara(item.title, { bold: true, spaceBefore: 240, spaceAfter: 80 }));
+    const imageUrl = `${gen.image_url}?cid=${gen.candidate_id ?? 'default'}`;
+    const buf = await fetchImageAsBuffer(imageUrl);
+    if (buf) {
+      nodes.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { line: 360, after: 80 },
+        children: [new ImageRun({ data: buf, transformation: { width: 480, height: 320 }, type: 'png' })],
+      }));
+    }
+    if (gen.caption) nodes.push(bodyPara(gen.caption, { spaceAfter: 240 }));
+  }
+  return nodes;
+}
+
+async function downloadDocxFile(
+  filename: string,
+  title: string,
+  content: string,
+  visuals?: VisualItem[],
+  projectId?: string,
+) {
+  // Build placement map keyed by "p:N", "h:name", or "end"
+  const placements = new Map<string, VisualItem[]>();
+  const activeVisuals = (visuals ?? []).filter(
+    v => v.status === 'finalized' || v.status === 'generated',
+  );
+  for (const item of activeVisuals) {
+    const spec = parseInsertAfter(item.insert_after);
+    const key =
+      spec.kind === 'paragraph' ? `p:${spec.index}` :
+      spec.kind === 'heading'   ? `h:${spec.name}` :
+      'end';
+    if (!placements.has(key)) placements.set(key, []);
+    placements.get(key)!.push(item);
+  }
+  const placed = new Set<string>();
+
   const lines = content.replace(/\r\n/g, '\n').split('\n');
-  const children: Paragraph[] = [
-    new Paragraph({
-      children: [new TextRun({ text: title, bold: true, size: 28 })],
-      spacing: { after: 240 },
-    }),
-  ];
+  const children: (Paragraph | Table)[] = [];
+  let paragraphIndex = 0;
 
   for (const line of lines) {
     const text = line.replace(/\[CK\]|\[INF\]|\[CITE:[^\]]+\]/g, '').trimEnd();
+
     if (!text.trim()) {
-      children.push(new Paragraph({ text: '' }));
+      children.push(bodyPara(''));
       continue;
     }
-    if (text.startsWith('## ')) {
-      children.push(new Paragraph({
-        children: [new TextRun({ text: text.slice(3), bold: true, size: 24 })],
-        spacing: { before: 200, after: 120 },
-      }));
-      continue;
-    }
+
     if (text.startsWith('# ')) {
-      children.push(new Paragraph({
-        children: [new TextRun({ text: text.slice(2), bold: true, size: 28 })],
-        spacing: { before: 240, after: 160 },
-      }));
+      children.push(bodyPara(text.slice(2), { bold: true, size: 28, spaceAfter: 200, center: true }));
       continue;
     }
-    children.push(new Paragraph({ text }));
+
+    if (text.startsWith('### ')) {
+      const headingText = text.slice(4);
+      children.push(bodyPara(headingText, { bold: true, size: 24, spaceBefore: 160, spaceAfter: 80 }));
+      const lower = headingText.toLowerCase();
+      for (const [key, items] of placements) {
+        if (key.startsWith('h:') && lower.includes(key.slice(2)) && !placed.has(key)) {
+          placed.add(key);
+          for (const item of items) children.push(...await renderVisualForDocx(item, projectId ?? ''));
+        }
+      }
+      continue;
+    }
+
+    if (text.startsWith('## ')) {
+      const headingText = text.slice(3);
+      children.push(bodyPara(headingText, { bold: true, size: 26, spaceBefore: 240, spaceAfter: 120 }));
+      const lower = headingText.toLowerCase();
+      for (const [key, items] of placements) {
+        if (key.startsWith('h:') && lower.includes(key.slice(2)) && !placed.has(key)) {
+          placed.add(key);
+          for (const item of items) children.push(...await renderVisualForDocx(item, projectId ?? ''));
+        }
+      }
+      continue;
+    }
+
+    // Regular body paragraph
+    children.push(bodyPara(text));
+    const pKey = `p:${paragraphIndex}`;
+    paragraphIndex++;
+    if (placements.has(pKey) && !placed.has(pKey)) {
+      placed.add(pKey);
+      for (const item of placements.get(pKey)!) {
+        children.push(...await renderVisualForDocx(item, projectId ?? ''));
+      }
+    }
   }
 
-  const doc = new Document({ sections: [{ children }] });
+  // Fallback: visuals that didn't match any position go at the end
+  for (const [key, items] of placements) {
+    if (!placed.has(key)) {
+      for (const item of items) children.push(...await renderVisualForDocx(item, projectId ?? ''));
+    }
+  }
+
+  const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: { font: 'Times New Roman', size: 24 },
+          paragraph: { alignment: AlignmentType.JUSTIFIED, spacing: { line: 360 } },
+        },
+      },
+    },
+    sections: [{ children }],
+  });
   const blob = await Packer.toBlob(doc);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -514,6 +833,7 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
 
   // ── Title Quality Policy state ─────────────────────────────────────────────
   const [approvedTitle, setApprovedTitle]   = useState<string>(initialTitle ?? '');
+  const [projectName, setProjectName]       = useState('');
   const [titleSuggestions, setTitleSuggestions] = useState<TitleSuggestions | null>(null);
   const [titleState, setTitleState]         = useState<'idle' | 'generating' | 'approving' | 'done'>(
     initialTitle ? 'done' : 'idle'
@@ -521,9 +841,12 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   const [titleError, setTitleError]         = useState<string | null>(null);
   const [showTitlePanel, setShowTitlePanel] = useState(false);
 
-  // Load existing manuscript_title and article_type from session on mount (for resumed sessions)
+  // Load existing manuscript_title, article_type, and article draft from session on mount
   useEffect(() => {
     loadSession(sessionId).then(data => {
+      if (data.project_name) {
+        setProjectName(data.project_name);
+      }
       if (!initialTitle) {
         const t = data.manuscript_title;
         if (t) {
@@ -534,6 +857,14 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       // Load persisted article type for resumed sessions (only if not provided by parent)
       if (!initialArticleType && data.article_type) {
         setArticleType(data.article_type);
+      }
+      // Restore persisted draft — no need to regenerate on every load
+      if (data.article) {
+        setArticleText(data.article);
+        setWritingState('done');
+      }
+      if (data.visual_recommendations?.items?.length) {
+        setVisualRecs(data.visual_recommendations);
       }
     }).catch(() => { /* silently ignore */ });
   }, [sessionId]);
@@ -557,6 +888,12 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       if (result) {
         setDeepSynthesis(result);
         setDeepSynthState('done');
+      }
+    }).catch(() => {});
+
+    getVisualRecommendations(sessionId).then(recs => {
+      if (recs && recs.items.length > 0) {
+        setVisualRecs(recs);
       }
     }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -613,6 +950,12 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
   const [deepSynthState, setDeepSynthState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [deepSynthError, setDeepSynthError] = useState<string | null>(null);
 
+  // Visual recommendations state
+  const [visualRecs, setVisualRecs] = useState<VisualRecommendations | null>(null);
+  const [editingVisual, setEditingVisual] = useState<VisualItem | null>(null);
+  const [promptEditingVisual, setPromptEditingVisual] = useState<VisualItem | null>(null);
+  const [visualPlanningState, setVisualPlanningState] = useState<'idle' | 'running'>('idle');
+
   async function handleGenerateTitle() {
     setTitleState('generating');
     setTitleError(null);
@@ -634,26 +977,31 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       setApprovedTitle(title);
       setShowTitlePanel(false);
       setTitleState('done');
-      // Auto-proceed to drafting after approval
-      await _draftArticle();
+      // Auto-draft only if no article exists yet (don't overwrite a persisted draft)
+      if (!articleText) {
+        await _draftArticle();
+      }
     } catch (err) {
       setTitleError(err instanceof Error ? err.message : 'Failed to save title.');
       setTitleState('idle');
     }
   }
 
-  async function _draftArticle() {
+  async function _draftArticle(force = false) {
     setWritingState('running');
     setWriteError(null);
     setArticleText('');
     try {
       const parsedMaxRefs = maxRefs.trim() !== '' ? parseInt(maxRefs, 10) : undefined;
-      const result = await writeArticle(sessionId, selectedJournal, articleType, wordLimit, parsedMaxRefs);
+      const result = await writeArticle(sessionId, selectedJournal, articleType, wordLimit, parsedMaxRefs, force);
       setArticleText(result.article ?? '');
       setWordCount(result.word_count ?? 0);
       setRefCount(result.ref_count ?? 0);
       setRefLimit(result.ref_limit ?? null);
       setRevision(null);
+      if (result.visual_recommendations) {
+        setVisualRecs(result.visual_recommendations);
+      }
       setWritingState('done');
       changeTab('draft');
     } catch (err) {
@@ -675,7 +1023,8 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
       await handleGenerateTitle();
       return;  // handleApproveTitle will trigger drafting after approval
     }
-    await _draftArticle();
+    // force=true when re-drafting an existing manuscript
+    await _draftArticle(!!articleText);
   }
 
   function handleDeepSynthesize() {
@@ -701,22 +1050,97 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
     return () => controller.abort();
   }
 
+  // ── Visual recommendation handlers ────────────────────────────────────────
+
+  async function handleReplanVisuals() {
+    setVisualPlanningState('running');
+    try {
+      const recs = await planVisuals(sessionId);
+      setVisualRecs(recs);
+    } catch { /* silently ignore */ }
+    finally { setVisualPlanningState('idle'); }
+  }
+
+  async function handleAcceptVisual(item: VisualItem) {
+    if (item.render_mode === 'ai_illustration') {
+      setPromptEditingVisual(item);
+      return;
+    }
+    // Optimistic status update
+    setVisualRecs(prev => prev ? {
+      ...prev,
+      items: prev.items.map(i => i.id === item.id ? { ...i, status: 'generating' } : i),
+    } : prev);
+    try {
+      const updated = await acceptVisual(sessionId, item.id);
+      setVisualRecs(updated);
+    } catch {
+      // Revert status
+      setVisualRecs(prev => prev ? {
+        ...prev,
+        items: prev.items.map(i => i.id === item.id ? { ...i, status: 'recommended' } : i),
+      } : prev);
+    }
+  }
+
+  function handleEditVisual(item: VisualItem) {
+    if (item.render_mode === 'ai_illustration') {
+      setPromptEditingVisual(item);
+      return;
+    }
+    setEditingVisual(item);
+  }
+
+  async function handleDismissVisual(item: VisualItem) {
+    try {
+      const updated = await dismissVisual(sessionId, item.id);
+      setVisualRecs(updated);
+    } catch { /* silently ignore */ }
+  }
+
+  async function handleFinalizeVisual(item: VisualItem) {
+    try {
+      const updated = await finalizeVisual(sessionId, item.id);
+      setVisualRecs(updated);
+    } catch { /* silently ignore */ }
+  }
+
+  async function handleSelectCandidate(item: VisualItem, candidateId: string) {
+    try {
+      const updated = await selectVisualCandidate(sessionId, item.id, candidateId);
+      setVisualRecs(updated);
+    } catch { /* silently ignore */ }
+  }
+
+  function getDraftFilenameBase() {
+    return sanitizeFilenameBase(
+      approvedTitle.trim()
+      || projectName.trim()
+      || initialTitle?.trim()
+      || 'Manuscript',
+    );
+  }
+
   function downloadArticle(mode: 'markdown' | 'plain') {
     const content = mode === 'plain'
       ? articleText.replace(/\[CK\]|\[INF\]|\[CITE:[^\]]+\]/g, '').replace(/#{1,3} /g, '')
       : articleText;
+    const filenameBase = getDraftFilenameBase();
     downloadTextFile(
-      `article_${selectedJournal.replace(/\s+/g, '_').slice(0, 30)}.${mode === 'markdown' ? 'md' : 'txt'}`,
+      `${filenameBase}.${mode === 'markdown' ? 'md' : 'txt'}`,
       content,
     );
   }
 
   async function downloadArticleDocx() {
-    const docxTitle = approvedTitle || `Manuscript – ${selectedJournal}`;
+    const filenameBase = getDraftFilenameBase();
+    const docxTitle = approvedTitle || projectName || 'Manuscript';
     await downloadDocxFile(
-      `article_${selectedJournal.replace(/\s+/g, '_').slice(0, 30)}.docx`,
+      `${filenameBase}.docx`,
       docxTitle,
       articleText,
+      visualRecs?.items ?? [],
+      sessionId,
     );
   }
 
@@ -1096,6 +1520,19 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-slate-400">{wordCount.toLocaleString()} words</span>
+                    <button
+                      onClick={handleReplanVisuals}
+                      disabled={visualPlanningState === 'running'}
+                      title="Suggest tables and figures for this manuscript"
+                      className="px-3 py-1.5 rounded-lg border border-violet-200 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50 transition-colors"
+                    >
+                      {visualPlanningState === 'running' ? '⟳ Planning…' : '◎ Suggest Visuals'}
+                    </button>
+                    {visualRecs && visualRecs.items.length > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-semibold">
+                        {visualRecs.items.filter(i => i.status !== 'dismissed').length} visuals
+                      </span>
+                    )}
                     <button onClick={() => downloadArticle('markdown')}
                       className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50 transition-colors">
                       ↓ Markdown
@@ -1118,7 +1555,19 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
                   </pre>
                 ) : (
                   <div className="p-6 sm:p-8 prose prose-slate max-w-none text-sm leading-relaxed">
-                    {renderCeilsArticle(articleText)}
+                    {spliceVisuals(
+                      renderCeilsArticle(articleText),
+                      visualRecs?.items ?? [],
+                      sessionId,
+                      {
+                        onAccept: handleAcceptVisual,
+                        onDismiss: handleDismissVisual,
+                        onEdit: handleEditVisual,
+                        onFinalize: handleFinalizeVisual,
+                        onRegenerate: handleEditVisual,
+                        onSelectCandidate: handleSelectCandidate,
+                      }
+                    )}
                   </div>
                 )}
               </>
@@ -1374,6 +1823,32 @@ export default function ArticleWriter({ sessionId, selectedJournal, initialTitle
           </section>{/* end Tabbed Interface */}
         </div>{/* end max-w-4xl */}
       </div>{/* end workspace canvas */}
+
+      {/* Visual Edit Modal */}
+      {editingVisual && (
+        <VisualEditModal
+          item={editingVisual}
+          projectId={sessionId}
+          onClose={() => setEditingVisual(null)}
+          onUpdated={(recs) => {
+            setVisualRecs(recs);
+            const updated = recs.items.find(i => i.id === editingVisual.id);
+            if (updated) setEditingVisual(updated);
+          }}
+        />
+      )}
+      {promptEditingVisual && (
+        <IllustrationPromptModal
+          item={promptEditingVisual}
+          projectId={sessionId}
+          onClose={() => setPromptEditingVisual(null)}
+          onUpdated={(recs) => {
+            setVisualRecs(recs);
+            const updated = recs.items.find(i => i.id === promptEditingVisual.id);
+            if (updated) setPromptEditingVisual(updated);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -95,6 +95,7 @@ projects = Table(
     Column("sr_current_stage", String(50), nullable=True, server_default="protocol"),
     # PRISMA-P 2015 structured data (all 17 items)
     Column("prisma_p_data", _json_type, nullable=True),
+    Column("visual_recommendations", _json_type, nullable=True),
 )
 
 papers = Table(
@@ -138,6 +139,13 @@ user_settings = Table(
     Column("provider_oauth_tokens_encrypted_json", Text, nullable=True),  # encrypted JSON: {provider: {access_token, refresh_token, expires_at}}
     Column("track_changes_author", Text, nullable=True),
     Column("scihub_mirrors_json", Text, nullable=True),  # JSON list of mirror URLs
+    Column("image_backend", Text, nullable=True),
+    Column("image_model", Text, nullable=True),
+    Column("image_background", Text, nullable=True),
+    Column("image_quality", Text, nullable=True),
+    Column("image_candidate_count", Text, nullable=True),
+    Column("image_asset_mode", Text, nullable=True),
+    Column("image_provider_profiles_json", Text, nullable=True),
 )
 
 journal_style_cache = Table(
@@ -360,6 +368,8 @@ async def init_db(engine: Optional[AsyncEngine] = None) -> None:
     await _migrate_wip_to_comment_work(eng)
     await _migrate_add_deep_synthesis_result(eng)
     await _migrate_add_token_usage_table(eng)
+    await _migrate_add_image_settings(eng)
+    await _migrate_add_visual_recommendations(eng)
 
 
 async def _migrate_sessions_to_projects(eng: AsyncEngine) -> None:
@@ -961,6 +971,46 @@ async def _migrate_add_token_usage_table(eng: AsyncEngine) -> None:
             ))
             await conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage(created_at)"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_visual_recommendations(eng: AsyncEngine) -> None:
+    """Add visual_recommendations JSONB column to projects if missing (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS visual_recommendations JSONB"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_image_settings(eng: AsyncEngine) -> None:
+    """Add image generation settings columns to user_settings if missing."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_backend TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_model TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_background TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_quality TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_candidate_count TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_asset_mode TEXT;"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_provider_profiles_json TEXT;"
             ))
     except Exception:
         pass

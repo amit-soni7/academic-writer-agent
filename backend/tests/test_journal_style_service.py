@@ -41,8 +41,8 @@ Unit tests for JournalStyleService and JournalStyle:
   Abstract instructions
   24. test_abstract_instructions_structured
   25. test_abstract_instructions_unstructured
-  26. test_abstract_instructions_editorial_empty
-  27. test_abstract_instructions_letter_empty
+  26. test_abstract_instructions_editorial_present
+  27. test_abstract_instructions_letter_present
   28. test_abstract_instructions_structured_with_limit
 
   Word limit resolution
@@ -411,20 +411,22 @@ def test_abstract_instructions_unstructured():
     assert "150" in hint
 
 
-# ── 26. Abstract instructions — editorial returns empty ──────────────────────
+# ── 26. Abstract instructions — editorial includes abstract guidance ─────────
 
-def test_abstract_instructions_editorial_empty():
+def test_abstract_instructions_editorial_present():
     style = _make_style(abstract_structure="structured")
     hint = style.get_abstract_instructions("editorial")
-    assert hint == ""
+    assert "abstract" in hint.lower()
+    assert "background" in hint.lower()
 
 
-# ── 27. Abstract instructions — letter returns empty ─────────────────────────
+# ── 27. Abstract instructions — letter includes abstract guidance ────────────
 
-def test_abstract_instructions_letter_empty():
+def test_abstract_instructions_letter_present():
     style = _make_style(abstract_structure="unstructured")
     hint = style.get_abstract_instructions("letter")
-    assert hint == ""
+    assert "abstract" in hint.lower()
+    assert "unstructured" in hint.lower() or "single-paragraph" in hint.lower()
 
 
 # ── 28. Abstract instructions — structured with word limit ───────────────────
@@ -434,6 +436,15 @@ def test_abstract_instructions_structured_with_limit():
     hint = style.get_abstract_instructions("review")
     assert "200" in hint
     assert any(h in hint for h in ("Background", "Purpose", "Methods", "Findings"))
+
+
+# ── 28b. get_sections — journal-specific sections still get abstract ─────────
+
+def test_get_sections_prepends_abstract_when_missing_from_specific_sections():
+    style = _make_style(sections_by_type={"editorial": ["Introduction", "Discussion", "References"]})
+    secs = style.get_sections("editorial")
+    assert secs[0] == "Abstract"
+    assert "References" in secs
 
 
 # ── 29. get_effective_word_limit — journal overrides user ────────────────────

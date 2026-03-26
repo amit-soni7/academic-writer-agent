@@ -154,6 +154,57 @@ async def recommend_journals(
     return recs
 
 
+async def recommend_single_journal(
+    provider: Optional[AIProvider],
+    query: str,
+    journal_name: str,
+) -> JournalRecommendation:
+    """Return enriched metadata and scope-match analysis for one explicit journal name."""
+    name = (journal_name or "").strip()
+    if not name:
+        raise ValueError("journal_name is required")
+
+    onos_set = await _load_onos_issns()
+    meta = await _fetch_openalex(name)
+    issns = meta.get("issns", []) if meta else []
+    issn = meta.get("issn") if meta else None
+
+    pubmed = await _check_pubmed_local(name, issns)
+    onos = _check_onos(issns, onos_set)
+
+    apc_usd = meta.get("apc_usd") if meta else None
+    apc_note: Optional[str] = None
+    if onos:
+        apc_note = "Waived via ONOS"
+    elif apc_usd is not None and apc_usd == 0:
+        apc_note = "Free"
+
+    rec = JournalRecommendation(
+        name=name,
+        publisher=meta.get("publisher") if meta else None,
+        issn=issn,
+        frequency_in_results=0,
+        open_access=meta.get("open_access") if meta else None,
+        h_index=meta.get("h_index") if meta else None,
+        avg_citations=meta.get("avg_citations") if meta else None,
+        scope_match=None,
+        openalex_url=meta.get("url") if meta else None,
+        website_url=meta.get("homepage") if meta else None,
+        indexed_pubmed=pubmed,
+        indexed_scopus=None,
+        apc_usd=apc_usd,
+        apc_note=apc_note,
+        onos_supported=onos,
+    )
+
+    if provider:
+        annotated = await _llm_annotate(provider, query, [rec])
+        if annotated:
+            rec = annotated[0]
+
+    return rec
+
+
 # ── OpenAlex fetch ────────────────────────────────────────────────────────────
 
 async def _fetch_openalex(name: str) -> Optional[dict]:

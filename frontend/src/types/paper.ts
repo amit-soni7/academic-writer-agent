@@ -553,3 +553,186 @@ export interface PaperSummary {
   sentence_bank?: SentenceCitation[];
   writing_evidence_meta?: WritingEvidenceMeta;
 }
+
+// ── Visual recommendations ──────────────────────────────────────────────────
+
+export interface GeneratedVisual {
+  image_url: string | null;
+  pdf_url: string | null;
+  table_html: string | null;
+  table_data: { headers: string[]; rows: string[][]; footnotes: string[] } | null;
+  caption: string;
+  source_code: string;
+  style_preset: string;
+  candidate_id?: string | null;
+  score?: CandidateScore | null;
+}
+
+export interface IllustrationStyleControls {
+  palette?: string | null;
+  background: string;
+  transparent_background: boolean;
+}
+
+export type VisualStatus =
+  | 'recommended'
+  | 'generating'
+  | 'generated'
+  | 'editing'
+  | 'finalized'
+  | 'dismissed';
+
+export type VisualPriority = 'essential' | 'recommended' | 'optional';
+
+export interface VisualItem {
+  id: string;                          // "T1", "T2", "F1", "F2"
+  type: 'table' | 'figure';
+  title: string;
+  target_section: string;
+  insert_after: string;                // "after_paragraph:12" | "after_heading:results"
+  purpose: string;
+  data_to_include: string[];
+  suggested_structure: string[];
+  priority: VisualPriority;
+  supplementary: boolean;
+  alternative_format: 'table' | 'figure' | null;
+  reporting_guideline: string | null;
+  render_mode: 'table' | 'matplotlib' | 'ai_illustration';
+  image_backend?: 'openai' | 'gemini_imagen' | null;
+  output_mode?: 'full_figure' | 'asset_pack' | 'composition_reference' | 'transparent_asset';
+  category?: 'psychology' | 'neuroscience' | 'medical' | 'cell_bio' | 'technical' | 'generic' | null;
+  status: VisualStatus;
+  citation_text: string;
+  insert_citation_after: string;
+  generated: GeneratedVisual | null;
+  figure_brief?: FigureBrief | null;
+  prompt_package?: PromptPackage | null;
+  editable_prompt?: string | null;
+  style_controls?: IllustrationStyleControls | null;
+  candidates?: IllustrationCandidate[];
+}
+
+export interface VisualRecommendations {
+  summary: string;
+  empty_reason: string | null;
+  items: VisualItem[];
+}
+
+export interface VisualEditMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  rendered_output?: {
+    image_url?: string;
+    table_html?: string;
+  } | null;
+  timestamp: string;
+}
+
+export interface PanelPlan {
+  id: string;
+  title?: string | null;
+  goal: string;
+  main_subjects: string[];
+  secondary_subjects?: string[];
+  arrows?: Array<Record<string, unknown>>;
+  inset?: Record<string, unknown> | null;
+  layout_notes: string[];
+  draw_instructions?: string[];
+}
+
+export interface FigureBrief {
+  title: string;
+  figure_type: string;
+  category: 'psychology' | 'neuroscience' | 'medical' | 'cell_bio' | 'technical' | 'generic';
+  purpose: string;
+  key_message: string;
+  panel_count: number;
+  panel_plan: PanelPlan[];
+  must_include: string[];
+  must_avoid: string[];
+  output_context: 'graphical_abstract' | 'visual_abstract' | 'journal_figure' | 'cover_art' | 'supplementary' | string;
+  labels_needed: boolean;
+  text_in_image_allowed: boolean;
+  accessibility_mode: boolean;
+  transparent_background: boolean;
+  discipline: string;
+  audience: string;
+  output_mode: 'full_figure' | 'asset_pack' | 'composition_reference' | 'transparent_asset' | string;
+  aspect_ratio: string;
+  target_journal_style: string;
+  reference_images: string[];
+  category_override?: string | null;
+}
+
+export interface PromptPackage {
+  system_intent: string;
+  layer1_content: string;
+  layer2_style: string;
+  layer3_composition: string;
+  layer4_negative: string;
+  layer5_output_purpose: string;
+  final_prompt: string;
+}
+
+export interface CandidateScore {
+  message_clarity: 1 | 2 | 3 | 4 | 5;
+  hierarchy: 1 | 2 | 3 | 4 | 5;
+  plausibility: 1 | 2 | 3 | 4 | 5;
+  composition: 1 | 2 | 3 | 4 | 5;
+  accessibility: 1 | 2 | 3 | 4 | 5;
+  publication_fit: 1 | 2 | 3 | 4 | 5;
+  text_risk: 1 | 2 | 3 | 4 | 5;
+  category_style_fit: 1 | 2 | 3 | 4 | 5;
+  overall: number;
+  notes: string[];
+  rejected: boolean;
+}
+
+export interface IllustrationCandidate {
+  id: string;
+  image_url: string | null;
+  file_path?: string | null;
+  prompt: string;
+  backend: 'openai' | 'gemini_imagen' | string;
+  model: string;
+  output_format: string;
+  background: string;
+  quality: string;
+  output_mode: string;
+  prompt_package?: PromptPackage | null;
+  score?: CandidateScore | null;
+  notes?: string[];
+}
+
+export interface FigureBuilderRequest {
+  title: string;
+  article_type?: string;
+  discipline: string;
+  figure_type: string;
+  purpose: string;
+  target_journal_style?: string;
+  audience?: string;
+  key_message: string;
+  panel_count: number;
+  panels: Array<Record<string, unknown>>;
+  must_include: string[];
+  must_avoid: string[];
+  labels_needed: boolean;
+  text_in_image_allowed: boolean;
+  background: string;
+  transparent_background: boolean;
+  aspect_ratio: string;
+  output_context: string;
+  accessibility_mode: boolean;
+  reference_images: string[];
+  category_override?: string | null;
+  image_backend?: 'openai' | 'gemini_imagen' | string;
+  candidate_count?: number;
+  output_mode?: string;
+}
+
+export interface FigureBuilderGenerateResponse {
+  brief: FigureBrief;
+  prompt_package: PromptPackage;
+  candidates: IllustrationCandidate[];
+}

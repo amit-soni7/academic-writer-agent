@@ -35,6 +35,10 @@ from models import (
     ApproveTitleRequest,
     CreateProjectRequest,
     DiscussCommentRequest,
+    FigureBuilderExportRequest,
+    FigureBuilderGenerateResponse,
+    FigureBuilderRefineRequest,
+    FigureBuilderRequest,
     FinalizeCommentRequest,
     GenerateAllDocsRequest,
     GenerateFromPlansRequest,
@@ -60,6 +64,11 @@ from models import (
     TitleSuggestions,
     UpdateCommentWorkRequest,
     WriteArticleRequest,
+    AcceptVisualRequest,
+    EditVisualRequest,
+    FinalizeVisualRequest,
+    PromptPackage,
+    VisualRecommendations,
 )
 from services.journal_style_service import (
     JournalStyleService,
@@ -111,6 +120,9 @@ from services.project_repo import (
     update_project_phase,
     upsert_comment_work_batch,
     upsert_comment_suggestions_batch,
+    save_visual_recommendations,
+    load_visual_recommendations,
+    update_visual_item,
 )
 from services.title_generator import (
     TitleSuggestions as _TitleSuggestions,
@@ -122,8 +134,9 @@ from services.article_builder import (
     build_summary_block as _build_summary_block_svc,
     build_article_prompt as _build_article_prompt_svc,
 )
+from services.manuscript_citation_formatter import normalize_numbered_citation_order
 from services.cross_paper_synthesizer import synthesize
-from services.journal_recommender import recommend_journals
+from services.journal_recommender import recommend_journals, recommend_single_journal
 from services.paper_fetcher import FetchSettings
 from services.provider_resolver import build_provider_for_user_config
 from services.paper_fetcher import ensure_saved_pdf
@@ -138,6 +151,24 @@ from services.query_expander import (
 )
 from services.project_storage import normalize_project_storage_for_user
 from services.revision_writer import generate_revision_package
+from services.secure_settings import get_user_provider_api_key
+from services.visual_planner import plan_visuals, renumber_visuals
+from services.figure_renderer import (
+    build_figure_brief,
+    build_editable_prompt,
+    build_prompt_package,
+    build_refined_prompt_package,
+    generated_visual_from_candidate,
+    generate_illustration_candidates,
+    generate_figure_code,
+    generate_table_data,
+    edit_visual_code,
+    execute_figure_code,
+    generate_caption,
+    hydrate_visual_prompt_state,
+    public_candidate_payload,
+    render_table_html,
+)
 from services.token_context import TokenContext
 
 logger = logging.getLogger(__name__)
@@ -890,6 +921,31 @@ async def recommend_journals_endpoint(project_id: str, user=Depends(get_current_
     return recs
 
 
+class CustomJournalLookupRequest(BaseModel):
+    journal_name: str
+
+
+@router.post("/projects/{project_id}/journal_lookup", response_model=JournalRecommendation)
+async def journal_lookup_endpoint(
+    project_id: str,
+    payload: CustomJournalLookupRequest,
+    user=Depends(get_current_user),
+) -> JournalRecommendation:
+    """Enrich a user-typed journal with the same metadata used in recommendations."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    journal_name = (payload.journal_name or "").strip()
+    if not journal_name:
+        raise HTTPException(status_code=400, detail="journal_name is required.")
+
+    provider = await _get_provider_for_user(user["id"])
+    query = project.get("query", "")
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="journal_recommendation"):
+        return await recommend_single_journal(provider, query, journal_name)
+
+
 # ── Title quality policy ──────────────────────────────────────────────────────
 
 _TITLE_REQUIRED_MSG = (
@@ -1162,6 +1218,11 @@ async def write_article(project_id: str, payload: WriteArticleRequest, user=Depe
 
             if manuscript_title and not article_text.lstrip().startswith(f"# {manuscript_title}"):
                 article_text = f"# {manuscript_title}\n\n{article_text}"
+            article_text = normalize_numbered_citation_order(
+                article_text,
+                journal_style,
+                project_summaries,
+            )
             await save_article(project_id, article_text, payload.selected_journal)
             await update_project_phase(project_id, 'article')
             cited_keys = set(re.findall(r'\[CITE:([^\]]+)\]', article_text))
@@ -1204,6 +1265,21 @@ async def write_article_sync(project_id: str, payload: WriteArticleRequest, user
         raise HTTPException(status_code=400, detail="No summaries found. Run summarize_all first.")
 
     effective_article_type_sync = payload.article_type or project.get("article_type") or "review"
+
+    # ── Return cached article if it exists and force=False ──────────────────────
+    if not payload.force:
+        existing_article = (project.get("article") or "").strip()
+        if existing_article:
+            existing_recs = await load_visual_recommendations(project_id)
+            return {
+                "article": existing_article,
+                "word_count": len(existing_article.split()),
+                "ref_count": 0,
+                "ref_limit": payload.max_references,
+                "word_limit": payload.word_limit,
+                "visual_recommendations": existing_recs,
+            }
+
     await save_article_type(project_id, effective_article_type_sync)
 
     provider = await _get_provider_for_user(user["id"])
@@ -1258,16 +1334,756 @@ async def write_article_sync(project_id: str, payload: WriteArticleRequest, user
 
     if manuscript_title_sync and not article_text.lstrip().startswith(f"# {manuscript_title_sync}"):
         article_text = f"# {manuscript_title_sync}\n\n{article_text}"
+    article_text = normalize_numbered_citation_order(
+        article_text,
+        journal_style,
+        project_summaries,
+    )
     await save_article(project_id, article_text, payload.selected_journal)
     await update_project_phase(project_id, 'article')
     cited_keys_sync = set(re.findall(r'\[CITE:([^\]]+)\]', article_text))
+
+    # ── Auto-run visual planner after article generation (non-fatal) ──────────
+    # Skip if recommendations already exist and this is not a forced regeneration
+    visual_recommendations_data = None
+    try:
+        existing_recs_check = await load_visual_recommendations(project_id)
+        if existing_recs_check and not payload.force:
+            visual_recommendations_data = _hydrate_visual_recommendations_payload(
+                existing_recs_check,
+                article_text=article_text,
+                article_type=str(effective_article_type_sync or ""),
+                selected_journal=str(payload.selected_journal or ""),
+            )
+        else:
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_planner"):
+                vis_recs = await plan_visuals(
+                    provider,
+                    article_text,
+                    effective_article_type_sync,
+                    project.get("query", ""),
+                )
+            vis_dict = vis_recs.model_dump()
+            vis_dict = _hydrate_visual_recommendations_payload(
+                vis_dict,
+                article_text=article_text,
+                article_type=str(effective_article_type_sync or ""),
+                selected_journal=str(payload.selected_journal or ""),
+            )
+            await save_visual_recommendations(project_id, vis_dict)
+            visual_recommendations_data = vis_dict
+    except Exception as _vp_err:
+        logger.warning("Visual planner failed for project %s: %s", project_id, _vp_err)
+
     return {
-        "article":    article_text,
-        "word_count": len(article_text.split()),
-        "ref_count":  len(cited_keys_sync),
-        "ref_limit":  payload.max_references,
-        "word_limit": payload.word_limit,
+        "article":                 article_text,
+        "word_count":              len(article_text.split()),
+        "ref_count":               len(cited_keys_sync),
+        "ref_limit":               payload.max_references,
+        "word_limit":              payload.word_limit,
+        "visual_recommendations":  visual_recommendations_data,
     }
+
+
+# ── Visual recommendations ────────────────────────────────────────────────────
+
+
+def _visuals_storage_dir(project: dict) -> str:
+    """Return (and create) the images/ sub-directory inside the project folder."""
+    folder = project.get("project_folder") or ""
+    if folder:
+        img_dir = os.path.join(folder, "images")
+    else:
+        img_dir = os.path.join(
+            os.path.expanduser("~"),
+            "Documents", "AcademicWriter", "_figures", project.get("project_id", "unknown"),
+        )
+    os.makedirs(img_dir, exist_ok=True)
+    return img_dir
+
+
+def _figure_builder_storage_dir(project: dict) -> str:
+    storage_dir = os.path.join(_visuals_storage_dir(project), "figure_builder")
+    os.makedirs(storage_dir, exist_ok=True)
+    return storage_dir
+
+
+def _resolve_active_image_settings(user_settings, payload: AcceptVisualRequest | None = None) -> tuple[str, str, str, str, int]:
+    backend = str((payload.image_backend if payload and payload.image_backend else user_settings.image_backend) or "openai")
+    provider_entry = (user_settings.image_provider_configs or {}).get(backend)
+    model = str((provider_entry.model if provider_entry and provider_entry.model else user_settings.image_model) or ("gpt-image-1" if backend == "openai" else "imagen-3.0-generate-002"))
+    background = str(user_settings.image_background or "opaque")
+    quality = str(user_settings.image_quality or "high")
+    candidate_count = payload.candidate_count if payload and payload.candidate_count else user_settings.image_candidate_count
+    candidate_count = max(1, min(4, int(candidate_count or 1)))
+    return backend, model, background, quality, candidate_count
+
+
+async def _resolve_image_backend_api_key(user_id: str, backend: str) -> str:
+    provider_name = "gemini" if backend == "gemini_imagen" else backend
+    return await get_user_provider_api_key(user_id, provider_name)
+
+
+def _hydrate_visual_recommendations_payload(
+    recs: dict | None,
+    *,
+    article_text: str = "",
+    article_type: str = "",
+    selected_journal: str = "",
+) -> dict | None:
+    if not recs:
+        return recs
+    items = []
+    changed = False
+    for raw_item in recs.get("items", []):
+        try:
+            from models import VisualItem as _VisualItem
+            item = _VisualItem(**raw_item)
+            hydrated = hydrate_visual_prompt_state(
+                item,
+                article_context=article_text[:3000],
+                article_type=article_type,
+                selected_journal=selected_journal,
+            )
+            item_dict = hydrated.model_dump()
+            changed = changed or item_dict != raw_item
+            items.append(item_dict)
+        except Exception:
+            items.append(raw_item)
+    if changed:
+        recs = {**recs, "items": items}
+    return recs
+
+
+@router.get("/projects/{project_id}/visuals")
+async def get_visual_recommendations(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Return the current visual_recommendations for this project."""
+    project = await load_project(user["id"], project_id)
+    if not project or project.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    recs = await load_visual_recommendations(project_id)
+    if recs is None:
+        return {"summary": "", "empty_reason": "No visual planning run yet.", "items": []}
+    recs = _hydrate_visual_recommendations_payload(
+        recs,
+        article_text=str(project.get("article") or ""),
+        article_type=str(project.get("article_type") or ""),
+        selected_journal=str(project.get("selected_journal") or ""),
+    )
+    await save_visual_recommendations(project_id, recs)
+    return recs
+
+
+@router.post("/projects/{project_id}/visuals/plan")
+async def run_visual_planner(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """(Re-)run the visual planner for this project's current article text."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    article_text = (project.get("article") or "").strip()
+    if not article_text:
+        raise HTTPException(status_code=400, detail="No article draft found. Generate the manuscript first.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured.")
+
+    article_type = project.get("article_type") or "review"
+
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_planner"):
+        vis_recs = await plan_visuals(
+            provider,
+            article_text,
+            article_type,
+            project.get("query", ""),
+        )
+
+    vis_dict = vis_recs.model_dump()
+    vis_dict = _hydrate_visual_recommendations_payload(
+        vis_dict,
+        article_text=article_text,
+        article_type=str(article_type or ""),
+        selected_journal=str(project.get("selected_journal") or ""),
+    )
+    await save_visual_recommendations(project_id, vis_dict)
+    return vis_dict
+
+
+@router.post("/projects/{project_id}/visuals/{item_id}/accept")
+async def accept_visual(
+    project_id: str,
+    item_id: str,
+    payload: AcceptVisualRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Accept a recommended visual item and trigger generation."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    recs = await load_visual_recommendations(project_id)
+    if not recs:
+        raise HTTPException(status_code=404, detail="No visual recommendations found.")
+
+    item_data = next((i for i in recs.get("items", []) if i.get("id") == item_id), None)
+    if not item_data:
+        raise HTTPException(status_code=404, detail=f"Visual item {item_id!r} not found.")
+
+    if item_data.get("status") not in ("recommended", "generated"):
+        raise HTTPException(status_code=400, detail=f"Item {item_id} is in status {item_data.get('status')!r} and cannot be accepted.")
+
+    from models import VisualItem as _VisualItem
+    item = _VisualItem(**item_data)
+    render_mode = getattr(item, "render_mode", None) or ("table" if item.type == "table" else "matplotlib")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured.")
+
+    # Mark as generating
+    await update_visual_item(project_id, item_id, {"status": "generating"})
+
+    storage_dir = _visuals_storage_dir(project)
+    article_text = (project.get("article") or "")[:3000]
+
+    try:
+        if render_mode == "table":
+            # Generate structured table data
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_generate"):
+                table_data = await generate_table_data(provider, item, article_text)
+
+            # Count finalized/generated tables for numbering
+            all_items = recs.get("items", [])
+            table_number = sum(
+                1 for i in all_items
+                if i.get("type") == "table"
+                and i.get("status") in ("generated", "finalized")
+                and i.get("id") != item_id
+            ) + 1
+
+            table_html = render_table_html(table_data, table_number, item.title)
+
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_caption"):
+                caption = await generate_caption(provider, item, table_number)
+
+            generated = {
+                "image_url": None,
+                "pdf_url": None,
+                "table_html": table_html,
+                "table_data": table_data,
+                "caption": caption,
+                "source_code": "",
+                "style_preset": payload.style_preset,
+            }
+            updated = await update_visual_item(project_id, item_id, {
+                "status": "generated",
+                "generated": generated,
+            })
+        elif render_mode == "ai_illustration":
+            user_settings = await load_settings_for_user(user["id"])
+            backend, model, background, quality, candidate_count = _resolve_active_image_settings(user_settings, payload)
+            backend_api_key = await _resolve_image_backend_api_key(user["id"], backend)
+            if not backend_api_key:
+                raise HTTPException(status_code=400, detail=f"No API key configured for image backend {backend!r}.")
+
+            default_hydrated = hydrate_visual_prompt_state(
+                item,
+                article_context=article_text,
+                article_type=str(project.get("article_type") or ""),
+                selected_journal=str(project.get("selected_journal") or ""),
+            )
+            brief = payload.figure_brief or default_hydrated.figure_brief or build_figure_brief(
+                item=item,
+                article_context=article_text,
+                article_type=str(project.get("article_type") or ""),
+                selected_journal=str(project.get("selected_journal") or ""),
+            )
+            prompt_package = payload.prompt_package or (
+                build_prompt_package(brief)
+                if payload.figure_brief
+                else (PromptPackage(**default_hydrated.prompt_package) if default_hydrated.prompt_package else build_prompt_package(brief))
+            )
+            palette = payload.palette or (default_hydrated.style_controls.palette if default_hydrated.style_controls else None)
+            background = payload.image_background or (default_hydrated.style_controls.background if default_hydrated.style_controls else background)
+            transparent_background = payload.transparent_background if payload.transparent_background is not None else (
+                default_hydrated.style_controls.transparent_background if default_hydrated.style_controls else False
+            )
+            if transparent_background:
+                background = "transparent"
+            # Use explicit user prompt if provided; otherwise LLM will generate one
+            user_prompt = payload.editable_prompt or None
+            candidate_storage_dir = _figure_builder_storage_dir(project)
+            candidates = await generate_illustration_candidates(
+                api_key=backend_api_key,
+                backend=backend,
+                model=model,
+                brief=brief,
+                prompt_package=prompt_package,
+                storage_dir=candidate_storage_dir,
+                candidate_count=candidate_count,
+                background=background,
+                quality=quality,
+                custom_prompt=user_prompt,
+                provider=provider,
+                article_context=article_text,
+            )
+            if not candidates:
+                raise HTTPException(status_code=500, detail="Image generation returned no candidates.")
+            primary = candidates[0]
+            public_candidates = [public_candidate_payload(project_id, candidate).model_dump() for candidate in candidates]
+
+            all_items = recs.get("items", [])
+            figure_number = sum(
+                1 for i in all_items
+                if i.get("type") == "figure"
+                and i.get("status") in ("generated", "finalized")
+                and i.get("id") != item_id
+            ) + 1
+            try:
+                async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_caption"):
+                    caption = await generate_caption(provider, item, figure_number)
+            except Exception as cap_err:
+                logger.warning("Caption generation failed (non-fatal): %s", cap_err)
+                caption = item.title or f"Figure {figure_number}."
+
+            generated = generated_visual_from_candidate(
+                project_id,
+                primary,
+                caption=caption,
+                style_preset=payload.style_preset,
+            ).model_dump()
+            generated["image_url"] = f"/api/projects/{project_id}/visuals/{item_id}/image"
+
+            updated = await update_visual_item(project_id, item_id, {
+                "status": "generated",
+                "image_backend": backend,
+                "figure_brief": brief.model_dump(),
+                "prompt_package": prompt_package.model_dump(),
+                "editable_prompt": primary.prompt or user_prompt,
+                "style_controls": {
+                    "palette": palette,
+                    "background": background,
+                    "transparent_background": transparent_background,
+                },
+                "candidates": public_candidates,
+                "generated": generated,
+            })
+        else:
+            # Generate matplotlib figure code
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_generate"):
+                source_code = await generate_figure_code(provider, item, article_text)
+
+            render_result = execute_figure_code(source_code, item_id, storage_dir)
+
+            if render_result["error"]:
+                await update_visual_item(project_id, item_id, {"status": "recommended"})
+                raise HTTPException(status_code=500, detail=f"Figure generation failed: {render_result['error']}")
+
+            # Count finalized/generated figures for numbering
+            all_items = recs.get("items", [])
+            figure_number = sum(
+                1 for i in all_items
+                if i.get("type") == "figure"
+                and i.get("status") in ("generated", "finalized")
+                and i.get("id") != item_id
+            ) + 1
+
+            async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_caption"):
+                caption = await generate_caption(provider, item, figure_number)
+
+            # Build URL for the image (served via the /image endpoint below)
+            image_url = f"/api/projects/{project_id}/visuals/{item_id}/image"
+
+            generated = {
+                "image_url": image_url,
+                "pdf_url": None,
+                "table_html": None,
+                "table_data": None,
+                "caption": caption,
+                "source_code": source_code,
+                "style_preset": payload.style_preset,
+            }
+            updated = await update_visual_item(project_id, item_id, {
+                "status": "generated",
+                "generated": generated,
+            })
+
+        return updated or recs
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await update_visual_item(project_id, item_id, {"status": "recommended"})
+        logger.exception("Visual accept failed for %s/%s", project_id, item_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/projects/{project_id}/visuals/{item_id}/image")
+async def get_visual_image(
+    project_id: str,
+    item_id: str,
+    user=Depends(get_current_user),
+) -> FileResponse:
+    """Serve the generated PNG for a figure item."""
+    project = await load_project_minimal(project_id)
+    if not project or project.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    storage_dir = _visuals_storage_dir(project)
+    png_path = os.path.join(storage_dir, f"{item_id}.png")
+    recs = await load_visual_recommendations(project_id)
+    candidate_path = None
+    if recs:
+        item_data = next((i for i in recs.get("items", []) if i.get("id") == item_id), None)
+        candidate_id = ((item_data or {}).get("generated") or {}).get("candidate_id") if item_data else None
+        if candidate_id:
+            maybe_path = os.path.join(_figure_builder_storage_dir(project), f"{candidate_id}.png")
+            if os.path.exists(maybe_path):
+                candidate_path = maybe_path
+    if candidate_path:
+        png_path = candidate_path
+    if not os.path.exists(png_path):
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(png_path, media_type="image/png")
+
+
+@router.post("/projects/{project_id}/visuals/{item_id}/dismiss")
+async def dismiss_visual(
+    project_id: str,
+    item_id: str,
+    user=Depends(get_current_user),
+) -> dict:
+    """Mark a visual item as dismissed."""
+    project = await load_project_minimal(project_id)
+    if not project or project.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    updated = await update_visual_item(project_id, item_id, {"status": "dismissed"})
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Visual recommendations not found.")
+
+    renumbered = renumber_visuals(updated)
+    await save_visual_recommendations(project_id, renumbered)
+    return renumbered
+
+
+@router.post("/projects/{project_id}/visuals/{item_id}/select_candidate")
+async def select_visual_candidate(
+    project_id: str,
+    item_id: str,
+    payload: dict,
+    user=Depends(get_current_user),
+) -> dict:
+    """Swap the active candidate shown for a visual item without finalizing it."""
+    candidate_id = payload.get("candidate_id")
+    if not candidate_id:
+        raise HTTPException(status_code=422, detail="candidate_id is required.")
+    project = await load_project_minimal(project_id)
+    if not project or project.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    recs = await load_visual_recommendations(project_id)
+    if not recs:
+        raise HTTPException(status_code=404, detail="No visual recommendations found.")
+    item_data = next((i for i in recs.get("items", []) if i.get("id") == item_id), None)
+    if not item_data:
+        raise HTTPException(status_code=404, detail=f"Visual item {item_id!r} not found.")
+    generated = dict(item_data.get("generated") or {})
+    generated["candidate_id"] = candidate_id
+    updated = await update_visual_item(project_id, item_id, {"generated": generated})
+    return updated or recs
+
+
+@router.post("/projects/{project_id}/visuals/{item_id}/finalize")
+async def finalize_visual(
+    project_id: str,
+    item_id: str,
+    payload: FinalizeVisualRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Lock a visual item as finalized (publication-ready)."""
+    project = await load_project_minimal(project_id)
+    if not project or project.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    recs = await load_visual_recommendations(project_id)
+    if not recs:
+        raise HTTPException(status_code=404, detail="No visual recommendations found.")
+
+    item_data = next((i for i in recs.get("items", []) if i.get("id") == item_id), None)
+    if not item_data:
+        raise HTTPException(status_code=404, detail=f"Visual item {item_id!r} not found.")
+
+    updates: dict = {"status": "finalized"}
+    if payload.caption and item_data.get("generated"):
+        generated = dict(item_data["generated"])
+        generated["caption"] = payload.caption
+        updates["generated"] = generated
+
+    updated = await update_visual_item(project_id, item_id, updates)
+    return updated or recs
+
+
+@router.post("/projects/{project_id}/visuals/{item_id}/edit")
+async def edit_visual(
+    project_id: str,
+    item_id: str,
+    payload: EditVisualRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """One turn of iterative AI editing for a generated visual."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    recs = await load_visual_recommendations(project_id)
+    if not recs:
+        raise HTTPException(status_code=404, detail="No visual recommendations found.")
+
+    item_data = next((i for i in recs.get("items", []) if i.get("id") == item_id), None)
+    if not item_data:
+        raise HTTPException(status_code=404, detail=f"Visual item {item_id!r} not found.")
+
+    if item_data.get("status") not in ("generated", "editing", "finalized"):
+        raise HTTPException(status_code=400, detail="Item must be in generated/editing state to edit.")
+
+    from models import VisualItem as _VisualItem
+    item = _VisualItem(**item_data)
+    render_mode = getattr(item, "render_mode", None) or ("table" if item.type == "table" else "matplotlib")
+
+    await update_visual_item(project_id, item_id, {"status": "editing"})
+
+    try:
+        generated = dict(item_data.get("generated") or {})
+        if render_mode == "ai_illustration":
+            user_settings = await load_settings_for_user(user["id"])
+            backend, model, background, quality, _ = _resolve_active_image_settings(user_settings, None)
+            current_candidate_id = payload.candidate_id or generated.get("candidate_id")
+            current_candidates = item_data.get("candidates") or []
+            current_candidate = next((c for c in current_candidates if c.get("id") == current_candidate_id), None)
+            prompt_payload = item_data.get("prompt_package") or (current_candidate or {}).get("prompt_package") or {}
+            hydrated = hydrate_visual_prompt_state(
+                item,
+                article_context=(project.get("article") or "")[:3000],
+                article_type=str(project.get("article_type") or ""),
+                selected_journal=str(project.get("selected_journal") or ""),
+            )
+            brief = payload.figure_brief or item.figure_brief or hydrated.figure_brief or build_figure_brief(
+                item=item,
+                article_context=(project.get("article") or "")[:3000],
+                article_type=str(project.get("article_type") or ""),
+                selected_journal=str(project.get("selected_journal") or ""),
+            )
+            original_prompt = payload.prompt_package or (
+                build_prompt_package(brief)
+                if payload.figure_brief
+                else (PromptPackage(**prompt_payload) if prompt_payload else build_prompt_package(brief))
+            )
+            palette = payload.palette or (item_data.get("style_controls") or {}).get("palette")
+            background = payload.image_background or (item_data.get("style_controls") or {}).get("background") or background
+            transparent_background = payload.transparent_background if payload.transparent_background is not None else (
+                (item_data.get("style_controls") or {}).get("transparent_background") or False
+            )
+            if transparent_background:
+                background = "transparent"
+            editable_prompt = payload.editable_prompt or item_data.get("editable_prompt")
+            if editable_prompt:
+                refined_prompt = original_prompt.model_copy(update={"final_prompt": editable_prompt})
+            else:
+                refined_prompt = build_refined_prompt_package(brief, original_prompt, payload.message)
+                editable_prompt = refined_prompt.final_prompt
+            backend_api_key = await _resolve_image_backend_api_key(user["id"], backend)
+            if not backend_api_key:
+                raise HTTPException(status_code=400, detail=f"No API key configured for image backend {backend!r}.")
+            candidate_storage_dir = _figure_builder_storage_dir(project)
+            candidates = await generate_illustration_candidates(
+                api_key=backend_api_key,
+                backend=backend,
+                model=model,
+                brief=brief,
+                prompt_package=refined_prompt,
+                storage_dir=candidate_storage_dir,
+                candidate_count=1,
+                background=background,
+                quality=quality,
+                custom_prompt=editable_prompt,
+            )
+            primary = candidates[0]
+            public_candidates = [public_candidate_payload(project_id, primary).model_dump()]
+            updated_generated = generated_visual_from_candidate(
+                project_id,
+                primary,
+                caption=generated.get("caption") or item.title,
+                style_preset=generated.get("style_preset") or "academic",
+            ).model_dump()
+            updated_generated["image_url"] = f"/api/projects/{project_id}/visuals/{item_id}/image"
+            updated = await update_visual_item(project_id, item_id, {
+                "status": "generated",
+                "figure_brief": brief.model_dump(),
+                "prompt_package": refined_prompt.model_dump(),
+                "editable_prompt": editable_prompt,
+                "style_controls": {
+                    "palette": palette,
+                    "background": background,
+                    "transparent_background": transparent_background,
+                },
+                "candidates": public_candidates,
+                "generated": updated_generated,
+            })
+            return {"recs": updated or recs, "explanation": "Updated the illustration brief/prompt and regenerated the image."}
+
+        provider = await _get_provider_for_user(user["id"])
+        if not provider:
+            raise HTTPException(status_code=400, detail="No AI provider configured.")
+        async with TokenContext(project_id=project_id, user_id=user["id"], stage="visual_edit"):
+            edit_result = await edit_visual_code(
+                provider,
+                item,
+                payload.message,
+                payload.context,
+                payload.current_code,
+            )
+
+        new_code = edit_result["new_code"]
+        explanation = edit_result.get("explanation", "")
+
+        if render_mode == "table":
+            # Re-parse and re-render the table
+            try:
+                import json as _json
+                new_table_data = _json.loads(new_code)
+                table_number = 1  # simplified — full renumber not needed here
+                new_html = render_table_html(new_table_data, table_number, item.title)
+                generated["table_data"] = new_table_data
+                generated["table_html"] = new_html
+                generated["source_code"] = new_code
+            except Exception as parse_err:
+                raise HTTPException(status_code=500, detail=f"Table edit parse error: {parse_err}")
+        else:
+            storage_dir = _visuals_storage_dir(project)
+            render_result = execute_figure_code(new_code, item_id, storage_dir)
+            if render_result["error"]:
+                raise HTTPException(status_code=500, detail=f"Figure re-render failed: {render_result['error']}")
+            generated["source_code"] = new_code
+            generated["image_url"] = f"/api/projects/{project_id}/visuals/{item_id}/image"
+
+        updated = await update_visual_item(project_id, item_id, {
+            "status": "generated",
+            "generated": generated,
+        })
+        return {"recs": updated or recs, "explanation": explanation}
+
+    except HTTPException:
+        await update_visual_item(project_id, item_id, {"status": "generated"})
+        raise
+    except Exception as e:
+        await update_visual_item(project_id, item_id, {"status": "generated"})
+        logger.exception("Visual edit failed for %s/%s", project_id, item_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/figure_builder/generate", response_model=FigureBuilderGenerateResponse)
+async def generate_figure_builder_candidates(
+    project_id: str,
+    payload: FigureBuilderRequest,
+    user=Depends(get_current_user),
+) -> FigureBuilderGenerateResponse:
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    user_settings = await load_settings_for_user(user["id"])
+    backend = str(payload.image_backend or user_settings.image_backend or "openai")
+    model = str(
+        payload.image_backend
+        and (user_settings.image_provider_configs.get(backend).model if user_settings.image_provider_configs.get(backend) else None)
+        or user_settings.image_model
+        or ("gpt-image-1" if backend == "openai" else "imagen-3.0-generate-002")
+    )
+    api_key = await _resolve_image_backend_api_key(user["id"], backend)
+    if not api_key:
+        raise HTTPException(status_code=400, detail=f"No API key configured for image backend {backend!r}.")
+
+    brief = build_figure_brief(
+        request=payload,
+        article_context=(project.get("article") or "")[:3000],
+        article_type=str(project.get("article_type") or payload.article_type or ""),
+        selected_journal=str(project.get("selected_journal") or ""),
+    )
+    prompt_package = build_prompt_package(brief)
+    candidates = await generate_illustration_candidates(
+        api_key=api_key,
+        backend=backend,
+        model=model,
+        brief=brief,
+        prompt_package=prompt_package,
+        storage_dir=_figure_builder_storage_dir(project),
+        candidate_count=max(1, min(4, int(payload.candidate_count or user_settings.image_candidate_count or 1))),
+        background="transparent" if payload.transparent_background else str(user_settings.image_background or "opaque"),
+        quality=str(user_settings.image_quality or "high"),
+    )
+    return FigureBuilderGenerateResponse(
+        brief=brief,
+        prompt_package=prompt_package,
+        candidates=[public_candidate_payload(project_id, candidate) for candidate in candidates],
+    )
+
+
+@router.post("/projects/{project_id}/figure_builder/refine", response_model=FigureBuilderGenerateResponse)
+async def refine_figure_builder_candidate(
+    project_id: str,
+    payload: FigureBuilderRefineRequest,
+    user=Depends(get_current_user),
+) -> FigureBuilderGenerateResponse:
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    user_settings = await load_settings_for_user(user["id"])
+    backend = str(payload.image_backend or payload.candidate.backend or user_settings.image_backend or "openai")
+    api_key = await _resolve_image_backend_api_key(user["id"], backend)
+    if not api_key:
+        raise HTTPException(status_code=400, detail=f"No API key configured for image backend {backend!r}.")
+
+    brief = payload.brief
+    prompt_package = build_refined_prompt_package(brief, payload.prompt_package, payload.instruction)
+    candidates = await generate_illustration_candidates(
+        api_key=api_key,
+        backend=backend,
+        model=str(payload.candidate.model or user_settings.image_model or ("gpt-image-1" if backend == "openai" else "imagen-3.0-generate-002")),
+        brief=brief,
+        prompt_package=prompt_package,
+        storage_dir=_figure_builder_storage_dir(project),
+        candidate_count=1,
+        background=str(payload.candidate.background or user_settings.image_background or "opaque"),
+        quality=str(payload.candidate.quality or user_settings.image_quality or "high"),
+    )
+    return FigureBuilderGenerateResponse(
+        brief=brief,
+        prompt_package=prompt_package,
+        candidates=[public_candidate_payload(project_id, candidate) for candidate in candidates],
+    )
+
+
+@router.get("/projects/{project_id}/figure_builder/candidates/{candidate_id}/image")
+async def get_figure_builder_candidate_image(
+    project_id: str,
+    candidate_id: str,
+    user=Depends(get_current_user),
+) -> FileResponse:
+    project = await load_project_minimal(project_id)
+    if not project or project.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    png_path = os.path.join(_figure_builder_storage_dir(project), f"{candidate_id}.png")
+    if not os.path.exists(png_path):
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(png_path, media_type="image/png")
 
 
 # ── Saved synthesis / peer-review results (for resume) ────────────────────────
@@ -1591,7 +2407,23 @@ async def revise_after_review(
             journal=payload.selected_journal or (project.get("selected_journal") or ""),
         )
     if result.revised_article.strip():
-        await save_article(project_id, result.revised_article, payload.selected_journal or (project.get("selected_journal") or ""))
+        publisher = _get_publisher_from_project(project)
+        journal_style = await _journal_style_service.get_style(
+            journal_name=payload.selected_journal or (project.get("selected_journal") or ""),
+            provider=provider,
+            publisher=publisher,
+        )
+        normalized_revised_article = normalize_numbered_citation_order(
+            result.revised_article,
+            journal_style,
+            list(summaries_raw.values()),
+        )
+        result.revised_article = normalized_revised_article
+        await save_article(
+            project_id,
+            normalized_revised_article,
+            payload.selected_journal or (project.get("selected_journal") or ""),
+        )
     return result
 
 

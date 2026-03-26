@@ -191,6 +191,7 @@ async def load_project(user_id: str, project_id: str) -> Optional[dict]:
             'papers': papers_list,
             'summaries': summaries_map,
             'journal_recs': journal_list,
+            'visual_recommendations': _coerce(row_dict.get("visual_recommendations")),
         }
 
 
@@ -971,6 +972,53 @@ async def get_comment_work_rows(
             d["ambiguity_flag"] = d.get("ambiguity_flag") == "true"
             rows.append(d)
         return rows
+
+
+# ── Visual recommendations ─────────────────────────────────────────────────────
+
+async def save_visual_recommendations(project_id: str, recs: dict) -> None:
+    """Persist VisualRecommendations payload to projects.visual_recommendations (JSONB)."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(visual_recommendations=recs, updated_at=_now())
+        )
+
+
+async def load_visual_recommendations(project_id: str) -> Optional[dict]:
+    """Load current visual_recommendations from DB, or None if not set."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        row = await conn.execute(
+            select(projects.c.visual_recommendations)
+            .where(projects.c.project_id == project_id)
+        )
+        result = row.first()
+        if result is None:
+            return None
+        val = result[0]
+        if val is None:
+            return None
+        if isinstance(val, str):
+            return json.loads(val)
+        return val
+
+
+async def update_visual_item(project_id: str, item_id: str, updates: dict) -> Optional[dict]:
+    """Patch a single VisualItem by id inside the JSONB payload. Returns updated recommendations."""
+    recs = await load_visual_recommendations(project_id)
+    if recs is None:
+        return None
+    items = recs.get("items", [])
+    for i, item in enumerate(items):
+        if item.get("id") == item_id:
+            items[i] = {**item, **updates}
+            break
+    recs["items"] = items
+    await save_visual_recommendations(project_id, recs)
+    return recs
 
 
 # ── Backward-compat aliases (used by tests and other services) ─────────────────

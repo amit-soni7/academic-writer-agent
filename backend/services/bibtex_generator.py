@@ -102,13 +102,21 @@ def make_bibtex_entry(summary: PaperSummary, key: Optional[str] = None) -> str:
     return f"@article{{{cite_key},\n  {field_lines}\n}}"
 
 
-def project_bib_path(project_id: str, project_folder: str) -> str:
-    """Return the canonical per-project BibTeX filepath."""
-    project_name = os.path.basename(project_folder.rstrip("/")) or project_id
-    return os.path.join(project_folder, f"{project_name}.bib")
+def project_bib_path(project_id: str, project_folder: str, project_name: Optional[str] = None) -> str:
+    """Return the canonical per-project BibTeX filepath.
+
+    Uses project_name if provided, otherwise derives it from the folder basename.
+    """
+    name = project_name or os.path.basename(project_folder.rstrip("/")) or project_id
+    return os.path.join(project_folder, f"{name}.bib")
 
 
-def write_project_bib(project_id: str, project_folder: str, summaries: list[PaperSummary]) -> dict:
+def write_project_bib(
+    project_id: str,
+    project_folder: str,
+    summaries: list[PaperSummary],
+    project_name: Optional[str] = None,
+) -> dict:
     """
     Rewrite a project's BibTeX file from summary metadata.
 
@@ -116,7 +124,7 @@ def write_project_bib(project_id: str, project_folder: str, summaries: list[Pape
     the on-disk file changed.
     """
     os.makedirs(project_folder, exist_ok=True)
-    bib_path = project_bib_path(project_id, project_folder)
+    bib_path = project_bib_path(project_id, project_folder, project_name)
 
     entries_by_key: dict[str, str] = {}
     for summary in summaries:
@@ -153,16 +161,21 @@ def write_project_bib(project_id: str, project_folder: str, summaries: list[Pape
     }
 
 
-def append_to_project_bib(project_id: str, project_folder: str, summary: PaperSummary) -> None:
+def append_to_project_bib(
+    project_id: str,
+    project_folder: str,
+    summary: PaperSummary,
+    project_name: Optional[str] = None,
+) -> None:
     """
     Append a BibTeX entry to {project_folder}/{project_name}.bib.
-    The project_name is derived from the folder basename.
+    The project_name is derived from the folder basename if not explicitly provided.
     Skips if an entry with the same cite key is already present.
     Creates the file and directory if they do not exist.
     """
     try:
         os.makedirs(project_folder, exist_ok=True)
-        bib_path = project_bib_path(project_id, project_folder)
+        bib_path = project_bib_path(project_id, project_folder, project_name)
         key = make_bibtex_key(summary)
 
         # Read existing entries to avoid duplicates

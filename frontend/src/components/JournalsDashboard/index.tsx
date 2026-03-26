@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from 'react';
 import type { JournalRecommendation, JournalStyle } from '../../types/paper';
-import { recommendJournals, getJournalStyle } from '../../api/projects';
+import { recommendJournals, getJournalStyle, loadProject, lookupJournal } from '../../api/projects';
 import LoadingLottie from '../LoadingLottie';
 
 interface Props {
@@ -45,14 +45,75 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
   const [error, setError]                 = useState<string | null>(null);
   const [selected, setSelected]           = useState<string | null>(null);
   const [customJournal, setCustomJournal] = useState('');
+  const [customJournalRec, setCustomJournalRec] = useState<JournalRecommendation | null>(null);
+  const [customLoading, setCustomLoading] = useState(false);
+  const [customError, setCustomError]     = useState<string | null>(null);
   const [journalStyle, setJournalStyle]   = useState<JournalStyle | null>(null);
 
-  async function loadRecommendations() {
+  const selectedStorageKey = `project:${sessionId}:selectedJournal`;
+  const customStorageKey = `project:${sessionId}:customJournal`;
+  const customRecommendationStorageKey = `project:${sessionId}:customJournalRecommendation`;
+
+  function restoreSelection(savedJournal: string | null, recs: JournalRecommendation[]) {
+    const savedCustom = sessionStorage.getItem(customStorageKey)?.trim() || '';
+    const preferred = (sessionStorage.getItem(selectedStorageKey)?.trim() || savedJournal || '').trim();
+    const savedCustomRecommendation = sessionStorage.getItem(customRecommendationStorageKey);
+
+    if (savedCustomRecommendation) {
+      try {
+        const parsed = JSON.parse(savedCustomRecommendation) as JournalRecommendation;
+        if (parsed?.name) setCustomJournalRec(parsed);
+      } catch {
+        sessionStorage.removeItem(customRecommendationStorageKey);
+      }
+    }
+
+    if (!preferred) return;
+    if (recs.some(j => j.name === preferred)) {
+      setSelected(preferred);
+      return;
+    }
+
+    setSelected('__custom__');
+    setCustomJournal(savedCustom || preferred);
+  }
+
+  async function analyzeCustomJournal(name: string) {
+    const journalName = name.trim();
+    if (!journalName) return;
+    setCustomLoading(true);
+    setCustomError(null);
+    try {
+      const rec = await lookupJournal(sessionId, journalName);
+      setCustomJournalRec(rec);
+      sessionStorage.setItem(customRecommendationStorageKey, JSON.stringify(rec));
+      setSelected('__custom__');
+      setCustomJournal(journalName);
+    } catch (err) {
+      setCustomError(err instanceof Error ? err.message : 'Failed to analyze journal.');
+      setCustomJournalRec(null);
+      sessionStorage.removeItem(customRecommendationStorageKey);
+    } finally {
+      setCustomLoading(false);
+    }
+  }
+
+  async function loadRecommendations(forceRefresh = false) {
     setLoading(true);
     setError(null);
     try {
+      const project = await loadProject(sessionId);
+      const savedRecs = Array.isArray(project.journal_recs) ? project.journal_recs : [];
+
+      if (!forceRefresh && savedRecs.length > 0) {
+        setJournals(savedRecs);
+        restoreSelection(project.selected_journal, savedRecs);
+        return;
+      }
+
       const recs = await recommendJournals(sessionId);
       setJournals(recs);
+      restoreSelection(project.selected_journal, recs);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load recommendations.');
     } finally {
@@ -69,6 +130,8 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
     }
   }
 
+  // Intentionally keyed only to sessionId: reloading function identity should not re-trigger ranking.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadRecommendations(); }, [sessionId]);
 
   useEffect(() => {
@@ -82,6 +145,37 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, customJournal]);
+
+  useEffect(() => {
+    if (selected === '__custom__') {
+      const value = customJournal.trim();
+      if (value) {
+        sessionStorage.setItem(selectedStorageKey, value);
+        sessionStorage.setItem(customStorageKey, value);
+      } else {
+        sessionStorage.removeItem(selectedStorageKey);
+        sessionStorage.removeItem(customStorageKey);
+      }
+      return;
+    }
+
+    if (selected) {
+      sessionStorage.setItem(selectedStorageKey, selected);
+      sessionStorage.removeItem(customStorageKey);
+      return;
+    }
+
+    sessionStorage.removeItem(selectedStorageKey);
+    sessionStorage.removeItem(customStorageKey);
+  }, [customJournal, customStorageKey, selected, selectedStorageKey]);
+
+  useEffect(() => {
+    if (!customJournalRec) {
+      sessionStorage.removeItem(customRecommendationStorageKey);
+      return;
+    }
+    sessionStorage.setItem(customRecommendationStorageKey, JSON.stringify(customJournalRec));
+  }, [customJournalRec, customRecommendationStorageKey]);
 
   const chosenJournal = selected === '__custom__' ? customJournal.trim() : selected;
 
@@ -148,7 +242,7 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexShrink: 0 }}>
               <button
-                onClick={loadRecommendations}
+                onClick={() => loadRecommendations(true)}
                 disabled={loading}
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.5rem',
@@ -160,7 +254,7 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
                 }}
               >
                 <span className="material-symbols-outlined" style={{ fontSize: '1.125rem' }}>refresh</span>
-                {loading ? 'Loading…' : 'Refresh Rankings'}
+                {loading ? 'Loading…' : 'Refresh Ranking'}
               </button>
               <button
                 onClick={() => chosenJournal && onGoToWrite(sessionId, chosenJournal)}
@@ -251,7 +345,12 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
                     type="text"
                     value={customJournal}
                     onChange={(e) => {
+                      setCustomError(null);
                       setCustomJournal(e.target.value);
+                      if (customJournalRec && e.target.value.trim() !== customJournalRec.name) {
+                        setCustomJournalRec(null);
+                        sessionStorage.removeItem(customRecommendationStorageKey);
+                      }
                       if (e.target.value.trim()) setSelected('__custom__');
                       else if (selected === '__custom__') setSelected(null);
                     }}
@@ -264,19 +363,37 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
                     }}
                   />
                   <button
-                    onClick={() => { if (customJournal.trim()) setSelected('__custom__'); }}
-                    disabled={!customJournal.trim()}
+                    onClick={() => { if (customJournal.trim()) void analyzeCustomJournal(customJournal); }}
+                    disabled={!customJournal.trim() || customLoading}
                     style={{
                       padding: '0.625rem 1.25rem', borderRadius: '999px',
                       fontFamily: 'Manrope, sans-serif', fontSize: '0.875rem', fontWeight: 600,
                       background: M3.onBg, color: '#fff', border: 'none',
-                      cursor: customJournal.trim() ? 'pointer' : 'not-allowed',
-                      opacity: customJournal.trim() ? 1 : 0.4, transition: 'opacity 0.15s',
+                      cursor: customJournal.trim() && !customLoading ? 'pointer' : 'not-allowed',
+                      opacity: customJournal.trim() && !customLoading ? 1 : 0.4, transition: 'opacity 0.15s',
                     }}
                   >
-                    Use
+                    {customLoading ? 'Analyzing…' : 'Analyze'}
                   </button>
                 </div>
+                {customError && (
+                  <p style={{
+                    margin: '0.75rem 0 0', color: '#991b1b',
+                    fontFamily: 'Manrope, sans-serif', fontSize: '0.8125rem',
+                  }}>
+                    {customError}
+                  </p>
+                )}
+                {customJournalRec && customJournalRec.name === customJournal.trim() && (
+                  <div style={{ marginTop: '1rem' }}>
+                    <JournalCard
+                      journal={customJournalRec}
+                      rank="Custom"
+                      isSelected={selected === '__custom__'}
+                      onSelect={() => setSelected(selected === '__custom__' ? null : '__custom__')}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -389,7 +506,7 @@ export default function JournalsDashboard({ sessionId, onBack, onGoToWrite, onOp
 // ── JournalCard ─────────────────────────────────────────────────────────────
 
 function JournalCard({ journal: j, rank, isSelected, onSelect }: {
-  journal: JournalRecommendation; rank: number; isSelected: boolean; onSelect: () => void;
+  journal: JournalRecommendation; rank: number | string; isSelected: boolean; onSelect: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const isTop = rank === 1;
@@ -433,9 +550,11 @@ function JournalCard({ journal: j, rank, isSelected, onSelect }: {
           }}>
             <span style={{
               fontFamily: 'Manrope, sans-serif', fontWeight: 700,
-              fontSize: '1.5rem', color: rankColor,
+              fontSize: typeof rank === 'number' ? '1.5rem' : '0.875rem', color: rankColor,
+              textTransform: typeof rank === 'number' ? 'none' : 'uppercase',
+              letterSpacing: typeof rank === 'number' ? 'normal' : '0.08em',
             }}>
-              #{rank}
+              {typeof rank === 'number' ? `#${rank}` : rank}
             </span>
           </div>
         </div>

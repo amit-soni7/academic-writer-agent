@@ -1,5 +1,5 @@
 import api from './client';
-import type { CommentChangeSuggestion, CommentPlan, DeepSynthesisResult, DeepSynthesisSSEEvent, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, RealReviewerComment, RevisionResult, RevisionRound, SynthesisResult } from '../types/paper';
+import type { CommentChangeSuggestion, CommentPlan, DeepSynthesisResult, DeepSynthesisSSEEvent, FigureBrief, FigureBuilderGenerateResponse, FigureBuilderRequest, IllustrationCandidate, IllustrationStyleControls, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, PromptPackage, RealReviewerComment, RevisionResult, RevisionRound, SynthesisResult, VisualRecommendations } from '../types/paper';
 
 export async function createProject(
   query: string,
@@ -113,19 +113,29 @@ export async function recommendJournals(projectId: string): Promise<JournalRecom
   return data;
 }
 
+export async function lookupJournal(projectId: string, journalName: string): Promise<JournalRecommendation> {
+  const { data } = await api.post<JournalRecommendation>(
+    `/api/projects/${projectId}/journal_lookup`,
+    { journal_name: journalName },
+  );
+  return data;
+}
+
 export async function writeArticle(
   projectId: string,
   selectedJournal: string,
   articleType: string,
   wordLimit: number,
   maxReferences?: number,
-): Promise<{ article: string; word_count: number; ref_count: number; ref_limit?: number | null; word_limit: number }> {
+  force = false,
+): Promise<{ article: string; word_count: number; ref_count: number; ref_limit?: number | null; word_limit: number; visual_recommendations?: VisualRecommendations | null }> {
   const { data } = await api.post(`/api/projects/${projectId}/write_article_sync`, {
     session_id: projectId,
     project_id: projectId,
     selected_journal: selectedJournal,
     article_type: articleType,
     word_limit: wordLimit,
+    force,
     ...(maxReferences != null ? { max_references: maxReferences } : {}),
   });
   return data;
@@ -423,6 +433,7 @@ export interface ProjectData {
   current_phase: string | null;
   project_type: 'write' | 'revision' | null;
   base_manuscript: string | null;
+  visual_recommendations?: VisualRecommendations | null;
   literature_search_state?: LiteratureSearchState | null;
 }
 
@@ -795,6 +806,153 @@ export async function loadScreenings(
 ): Promise<Record<string, { decision: string; reason: string; overridden: boolean }>> {
   const { data } = await api.get(`/api/projects/${projectId}/screenings`);
   return data;
+}
+
+// ── Visual recommendations ────────────────────────────────────────────────────
+
+export async function getVisualRecommendations(projectId: string): Promise<VisualRecommendations | null> {
+  try {
+    const { data } = await api.get<VisualRecommendations>(`/api/projects/${projectId}/visuals`);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function planVisuals(projectId: string): Promise<VisualRecommendations> {
+  const { data } = await api.post<VisualRecommendations>(`/api/projects/${projectId}/visuals/plan`);
+  return data;
+}
+
+export async function acceptVisual(
+  projectId: string,
+  itemId: string,
+  stylePreset = 'academic',
+  options?: {
+    candidate_count?: number;
+    image_backend?: 'openai' | 'gemini_imagen' | string;
+    figure_brief?: FigureBrief | null;
+    prompt_package?: PromptPackage | null;
+    editable_prompt?: string | null;
+    style_controls?: Partial<IllustrationStyleControls> | null;
+  },
+): Promise<VisualRecommendations> {
+  const { data } = await api.post<VisualRecommendations>(
+    `/api/projects/${projectId}/visuals/${itemId}/accept`,
+    {
+      style_preset: stylePreset,
+      ...(options ?? {}),
+      ...(options?.style_controls ? {
+        palette: options.style_controls.palette ?? null,
+        image_background: options.style_controls.background ?? null,
+        transparent_background: options.style_controls.transparent_background ?? null,
+      } : {}),
+    },
+  );
+  return data;
+}
+
+export async function dismissVisual(
+  projectId: string,
+  itemId: string,
+): Promise<VisualRecommendations> {
+  const { data } = await api.post<VisualRecommendations>(
+    `/api/projects/${projectId}/visuals/${itemId}/dismiss`,
+  );
+  return data;
+}
+
+export async function selectVisualCandidate(
+  projectId: string,
+  itemId: string,
+  candidateId: string,
+): Promise<VisualRecommendations> {
+  const { data } = await api.post<VisualRecommendations>(
+    `/api/projects/${projectId}/visuals/${itemId}/select_candidate`,
+    { candidate_id: candidateId },
+  );
+  return data;
+}
+
+export async function finalizeVisual(
+  projectId: string,
+  itemId: string,
+  caption?: string,
+  candidateId?: string,
+): Promise<VisualRecommendations> {
+  const { data } = await api.post<VisualRecommendations>(
+    `/api/projects/${projectId}/visuals/${itemId}/finalize`,
+    { caption: caption ?? null, candidate_id: candidateId ?? null },
+  );
+  return data;
+}
+
+export async function editVisual(
+  projectId: string,
+  itemId: string,
+  message: string,
+  context: Array<{ role: string; content: string }>,
+  currentCode?: string,
+  candidateId?: string,
+  options?: {
+    figure_brief?: FigureBrief | null;
+    prompt_package?: PromptPackage | null;
+    editable_prompt?: string | null;
+    style_controls?: Partial<IllustrationStyleControls> | null;
+  },
+): Promise<{ recs: VisualRecommendations; explanation: string }> {
+  const { data } = await api.post<{ recs: VisualRecommendations; explanation: string }>(
+    `/api/projects/${projectId}/visuals/${itemId}/edit`,
+    {
+      message,
+      context,
+      current_code: currentCode ?? null,
+      candidate_id: candidateId ?? null,
+      figure_brief: options?.figure_brief ?? null,
+      prompt_package: options?.prompt_package ?? null,
+      editable_prompt: options?.editable_prompt ?? null,
+      palette: options?.style_controls?.palette ?? null,
+      image_background: options?.style_controls?.background ?? null,
+      transparent_background: options?.style_controls?.transparent_background ?? null,
+    },
+  );
+  return data;
+}
+
+export function visualImageUrl(projectId: string, itemId: string): string {
+  return `/api/projects/${projectId}/visuals/${itemId}/image`;
+}
+
+export async function generateFigureBuilderCandidates(
+  projectId: string,
+  payload: FigureBuilderRequest,
+): Promise<FigureBuilderGenerateResponse> {
+  const { data } = await api.post<FigureBuilderGenerateResponse>(
+    `/api/projects/${projectId}/figure_builder/generate`,
+    payload,
+  );
+  return data;
+}
+
+export async function refineFigureBuilderCandidate(
+  projectId: string,
+  payload: {
+    brief: FigureBrief;
+    prompt_package: PromptPackage;
+    candidate: IllustrationCandidate;
+    instruction: string;
+    image_backend?: 'openai' | 'gemini_imagen' | string;
+  },
+): Promise<FigureBuilderGenerateResponse> {
+  const { data } = await api.post<FigureBuilderGenerateResponse>(
+    `/api/projects/${projectId}/figure_builder/refine`,
+    payload,
+  );
+  return data;
+}
+
+export function figureBuilderImageUrl(projectId: string, candidateId: string): string {
+  return `/api/projects/${projectId}/figure_builder/candidates/${candidateId}/image`;
 }
 
 // ── Backward-compat re-exports (so existing imports from api/sessions still work) ──

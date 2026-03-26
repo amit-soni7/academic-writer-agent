@@ -1345,9 +1345,13 @@ async def summarize_paper(
     )
 
     # Write BibTeX entry to the project .bib file whenever a save folder is configured.
+    # Always use project_folder root so the file is named after the project slug,
+    # not after the full_papers subfolder.
     if fetch_settings:
-        from services.paper_fetcher import _effective_save_path
-        _bib_folder = _effective_save_path(fetch_settings)
+        _bib_folder = fetch_settings.project_folder or None
+        if not _bib_folder:
+            from services.paper_fetcher import _effective_save_path
+            _bib_folder = _effective_save_path(fetch_settings)
         if _bib_folder and session_id:
             try:
                 from services.bibtex_generator import append_to_project_bib

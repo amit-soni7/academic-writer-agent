@@ -2,6 +2,7 @@ import api from './client';
 
 export type Provider = 'openai' | 'gemini' | 'claude' | 'ollama' | 'llamacpp';
 export type ProviderAuthMethod = 'api_key' | 'oauth';
+export type ImageBackend = 'openai' | 'gemini_imagen';
 
 export interface ProviderConfigEntry {
   auth_method: ProviderAuthMethod | string;
@@ -10,6 +11,11 @@ export interface ProviderConfigEntry {
   model?: string | null;
   base_url?: string | null;
   oauth_connected?: boolean;
+}
+
+export interface ImageProviderConfigEntry {
+  model?: string | null;
+  enabled?: boolean;
 }
 
 export interface AISettings {
@@ -28,6 +34,14 @@ export interface AISettings {
   scihub_mirrors?: string[];
   // Track Changes
   track_changes_author?: string | null;
+  // Image generation
+  image_backend?: ImageBackend | string;
+  image_model?: string;
+  image_background?: 'opaque' | 'transparent' | 'auto' | string;
+  image_quality?: 'low' | 'medium' | 'high' | 'auto' | string;
+  image_candidate_count?: number;
+  image_asset_mode?: 'full_figure' | 'asset_pack' | 'composition_reference' | 'transparent_asset' | string;
+  image_provider_configs?: Partial<Record<ImageBackend, ImageProviderConfigEntry>>;
 }
 
 export interface ProviderModelOption {
@@ -109,6 +123,20 @@ export const PROVIDER_DEFAULT_MODEL: Record<Provider, string> = {
   claude:   'claude-sonnet-4-6',
   ollama:   'qwen2.5:7b',
   llamacpp: 'qwen2.5-3b-instruct-q4_k_m.gguf',
+};
+
+export const IMAGE_BACKEND_MODELS: Record<ImageBackend, { value: string; label: string }[]> = {
+  openai: [
+    { value: 'gpt-image-1', label: 'GPT Image 1  (best default · scientific illustrations)' },
+  ],
+  gemini_imagen: [
+    { value: 'imagen-3.0-generate-002', label: 'Imagen 3  (Gemini image generation)' },
+  ],
+};
+
+export const IMAGE_BACKEND_DEFAULT_MODEL: Record<ImageBackend, string> = {
+  openai: 'gpt-image-1',
+  gemini_imagen: 'imagen-3.0-generate-002',
 };
 
 export async function fetchSettings(): Promise<AISettings> {

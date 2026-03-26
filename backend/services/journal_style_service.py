@@ -112,7 +112,7 @@ class JournalStyle:
                 f"CITATION STYLE — {name} ({style.value.upper()}):\n"
                 f"- Use {in_text} alongside [CITE:key] grounding markers.\n"
                 f"- Example: {example}\n"
-                f"- Numbers correspond to the paper numbers in the summary list (same order as provided).\n"
+                f"- Number citations by first appearance in the manuscript and reuse the same number for repeat citations.\n"
                 f"- Reference list: numbered, {self.reference_sort_order.replace('_', ' ')} order.\n"
                 f"- Do NOT use Author-Year format.\n"
             )
@@ -180,10 +180,14 @@ class JournalStyle:
         Returns journal-specific sections for the given article type.
         Falls back to universal defaults when journal-specific sections are absent.
         """
-        specific = self.sections_by_type.get(article_type, [])
-        if specific:
-            return specific
-        return _DEFAULT_SECTIONS_BY_TYPE.get(article_type, [])
+        sections = self.sections_by_type.get(article_type, [])
+        if not sections:
+            sections = _DEFAULT_SECTIONS_BY_TYPE.get(article_type, [])
+        if not sections:
+            return []
+        if any(section.strip().lower().startswith("abstract") for section in sections):
+            return sections
+        return ["Abstract", *sections]
 
     # ── Abstract structure instructions ────────────────────────────────────────
 
@@ -191,11 +195,7 @@ class JournalStyle:
         """
         Returns a natural-language instruction block for the abstract section.
         Distinguishes structured (with required subheadings) vs. unstructured.
-        Empty string if no abstract expected (e.g. editorial, letter).
         """
-        if article_type in ("editorial", "letter"):
-            return ""  # No formal abstract for these types
-
         if self.abstract_structure == "structured":
             headings = _STRUCTURED_ABSTRACT_HEADINGS.get(
                 article_type,
@@ -468,24 +468,92 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
 
 _DEFAULT_SECTIONS_BY_TYPE: dict[str, list[str]] = {
     "original_research":   ["Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusions", "References"],
+    "systematic_review":   [
+        "Abstract",
+        "Introduction",
+        "Methods — Protocol and Registration",
+        "Methods — Eligibility Criteria",
+        "Methods — Information Sources and Search Strategy",
+        "Methods — Study Selection",
+        "Methods — Data Extraction",
+        "Methods — Risk of Bias Assessment",
+        "Methods — Statistical Synthesis / Meta-analysis",
+        "Results — Study Selection",
+        "Results — Characteristics of Included Studies",
+        "Results — Risk of Bias Across Studies",
+        "Results — Synthesis of Results",
+        "Discussion",
+        "Conclusions",
+        "References",
+    ],
+    "scoping_review":      [
+        "Abstract",
+        "Introduction",
+        "Methods — Protocol",
+        "Methods — Eligibility Criteria",
+        "Methods — Information Sources and Search Strategy",
+        "Methods — Study Selection Process",
+        "Methods — Data Charting",
+        "Results — Study Selection",
+        "Results — Characteristics of Included Sources",
+        "Results — Summary of Evidence",
+        "Discussion",
+        "Conclusions",
+        "References",
+    ],
+    "narrative_review":    [
+        "Abstract",
+        "Introduction",
+        "Methods",
+        "Results and Discussion",
+        "Conclusions and Future Directions",
+        "References",
+    ],
     "review":              ["Abstract", "Introduction", "Methods (Literature Search)", "Results and Discussion", "Conclusion", "References"],
     "meta_analysis":       ["Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusions", "References"],
     "case_report":         ["Abstract", "Introduction", "Case Presentation", "Discussion", "Conclusions", "References"],
     "short_communication": ["Abstract", "Introduction", "Methods", "Results", "Discussion", "References"],
     "brief_report":        ["Abstract", "Introduction", "Methods", "Results", "Discussion", "References"],
-    "editorial":           ["Introduction", "Discussion", "Conclusions", "References"],
-    "letter":              ["Text", "References"],
-    "opinion":             ["Introduction", "Discussion", "Conclusions", "References"],
+    "editorial":           ["Abstract", "Introduction", "Discussion", "Conclusions", "References"],
+    "letter":              ["Abstract", "Text", "References"],
+    "opinion":             ["Abstract", "Introduction", "Discussion", "Conclusions", "References"],
+    "study_protocol":      [
+        "Abstract",
+        "Administrative Information",
+        "Introduction — Background and Rationale",
+        "Introduction — Objectives",
+        "Trial Design",
+        "Methods — Study Setting",
+        "Methods — Eligibility Criteria",
+        "Methods — Interventions",
+        "Methods — Outcomes",
+        "Methods — Participant Timeline",
+        "Methods — Sample Size",
+        "Methods — Recruitment",
+        "Methods — Assignment of Interventions: Allocation",
+        "Methods — Blinding",
+        "Methods — Data Collection and Management",
+        "Methods — Statistical Methods",
+        "Methods — Oversight and Monitoring",
+        "Ethics and Dissemination",
+        "Discussion",
+        "Trial Status",
+        "References",
+    ],
 }
 
 # Structured abstract heading templates by article type
 _STRUCTURED_ABSTRACT_HEADINGS: dict[str, list[str]] = {
     "original_research":   ["Background", "Objective", "Methods", "Results", "Conclusions"],
+    "systematic_review":   ["Background", "Objectives", "Methods", "Results", "Conclusions"],
+    "scoping_review":      ["Background", "Objectives", "Methods", "Results", "Conclusions"],
+    "narrative_review":    ["Background", "Objective", "Sources", "Content", "Conclusions"],
     "review":              ["Background", "Purpose", "Methods", "Findings", "Conclusions"],
     "meta_analysis":       ["Background", "Purpose", "Data Sources", "Study Selection", "Data Extraction", "Results", "Conclusions"],
     "case_report":         ["Background", "Case Presentation", "Discussion", "Conclusions"],
     "short_communication": ["Background", "Methods", "Results", "Conclusions"],
     "brief_report":        ["Background", "Methods", "Results", "Conclusions"],
+    "study_protocol":      ["Background", "Methods", "Discussion", "Trial Registration"],
 }
 
 

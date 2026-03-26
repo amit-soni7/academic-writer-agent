@@ -142,6 +142,7 @@ ARTICLE_SECTIONS: dict[str, list[str]] = {
 
     # ── Editorial ────────────────────────────────────────────────────────────
     "editorial": [
+        "Abstract",
         "Introduction (issue addressed and its significance)",
         "Discussion (current state, challenges, perspectives)",
         "Conclusions (recommendations or forward-looking statements)",
@@ -150,6 +151,7 @@ ARTICLE_SECTIONS: dict[str, list[str]] = {
 
     # ── Letter to the editor ─────────────────────────────────────────────────
     "letter": [
+        "Abstract",
         "Text (concise, structured argument: context → specific point → implication)",
         "References",
     ],
@@ -698,11 +700,18 @@ async def build_article_prompt(
         )
     user_msg += f"Paper summaries ({tier_note} papers):\n{summary_block}\n\n"
     if ref_list:
-        user_msg += (
-            "Pre-formatted reference list — copy this VERBATIM into your References section "
-            "(do NOT alter author names, journal names, or any bibliographic detail):\n"
-            f"{ref_list}\n\n"
-        )
+        if journal_style.reference_sort_order == "order_of_appearance" and journal_style.in_text_format != "author_year":
+            user_msg += (
+                "Pre-formatted reference details — keep the bibliographic content verbatim, "
+                "but let the final numbering and order follow first citation appearance in the manuscript:\n"
+                f"{ref_list}\n\n"
+            )
+        else:
+            user_msg += (
+                "Pre-formatted reference list — copy this VERBATIM into your References section "
+                "(do NOT alter author names, journal names, or any bibliographic detail):\n"
+                f"{ref_list}\n\n"
+            )
     user_msg += (
         f"TASK — Write the COMPLETE, FULLY EXPANDED academic manuscript now. "
         f"Write EVERY section in full scholarly prose from start to finish. "

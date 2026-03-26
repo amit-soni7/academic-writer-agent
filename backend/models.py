@@ -117,6 +117,14 @@ class AIProviderConfig(BaseModel):
     scihub_mirrors: list[str] = Field(default_factory=lambda: ["https://sci-hub.su", "https://www.sci-hub.ren"], description="Ordered list of Sci-Hub mirror URLs to try")
     # ── Track changes settings ─────────────────────────────────────────────────
     track_changes_author: Optional[str] = Field(default=None, description="Default author name for track changes in revision .docx exports")
+    # ── Image generation settings ──────────────────────────────────────────────
+    image_backend: str = Field(default="openai", description="openai | gemini_imagen")
+    image_model: str = Field(default="gpt-image-1")
+    image_background: str = Field(default="opaque", description="opaque | transparent | auto")
+    image_quality: str = Field(default="high", description="low | medium | high | auto")
+    image_candidate_count: int = Field(default=1, ge=1, le=4)
+    image_asset_mode: str = Field(default="full_figure", description="full_figure | asset_pack | composition_reference | transparent_asset")
+    image_provider_configs: dict[str, "ImageProviderConfigEntry"] = Field(default_factory=dict)
     # ── OAuth (not persisted; populated at runtime for OAuth-connected providers) ──
     gemini_oauth_access_token: Optional[str] = Field(default=None, exclude=True, description="Runtime-only: valid OAuth access token for Gemini (not stored in DB)")
     gemini_cloud_project_id: Optional[str] = Field(default=None, exclude=True, description="Runtime-only: Google Cloud project id used for Gemini OAuth calls")
@@ -131,12 +139,31 @@ class ProviderConfigEntry(BaseModel):
     oauth_connected: bool = Field(default=False)
 
 
+class ImageProviderConfigEntry(BaseModel):
+    model: Optional[str] = Field(default=None)
+    enabled: bool = Field(default=True)
+
+
 class AppSettingsResponse(AIProviderConfig):
     provider_configs: dict[str, ProviderConfigEntry] = Field(default_factory=dict)
+    image_backend: str = Field(default="openai", description="openai | gemini_imagen")
+    image_model: str = Field(default="gpt-image-1")
+    image_background: str = Field(default="opaque", description="opaque | transparent | auto")
+    image_quality: str = Field(default="high", description="low | medium | high | auto")
+    image_candidate_count: int = Field(default=1, ge=1, le=4)
+    image_asset_mode: str = Field(default="full_figure", description="full_figure | asset_pack | composition_reference | transparent_asset")
+    image_provider_configs: dict[str, ImageProviderConfigEntry] = Field(default_factory=dict)
 
 
 class AppSettingsUpdateRequest(AIProviderConfig):
     provider_configs: dict[str, ProviderConfigEntry] = Field(default_factory=dict)
+    image_backend: str = Field(default="openai", description="openai | gemini_imagen")
+    image_model: str = Field(default="gpt-image-1")
+    image_background: str = Field(default="opaque", description="opaque | transparent | auto")
+    image_quality: str = Field(default="high", description="low | medium | high | auto")
+    image_candidate_count: int = Field(default=1, ge=1, le=4)
+    image_asset_mode: str = Field(default="full_figure", description="full_figure | asset_pack | composition_reference | transparent_asset")
+    image_provider_configs: dict[str, ImageProviderConfigEntry] = Field(default_factory=dict)
 
 
 class RevealApiKeyRequest(BaseModel):
@@ -324,6 +351,7 @@ class WriteArticleRequest(BaseModel):
     article_type: str = Field(default="review", description="review | original_research | meta_analysis")
     word_limit: int   = Field(default=4000, ge=500, le=15000)
     max_references: Optional[int] = Field(default=None, ge=5, le=300)
+    force: bool = Field(default=False, description="If True, regenerate even if an article already exists")
 
 
 # ── Per-paper evidence extraction ─────────────────────────────────────────────
@@ -966,3 +994,209 @@ class OSFRegistrationRequest(BaseModel):
 
 class SRProtocolExportRequest(BaseModel):
     format: str = "docx"   # docx | pdf | markdown
+
+
+# ── Visual recommendations ──────────────────────────────────────────────────────
+
+class GeneratedVisual(BaseModel):
+    image_url: Optional[str] = None
+    pdf_url: Optional[str] = None
+    table_html: Optional[str] = None
+    table_data: Optional[dict] = None  # {headers: [...], rows: [[...]], footnotes: [...]}
+    caption: str = ""
+    source_code: str = ""
+    style_preset: str = "academic"
+    candidate_id: Optional[str] = None
+    score: Optional[dict] = None
+
+
+class IllustrationStyleControls(BaseModel):
+    palette: Optional[str] = None
+    background: str = "opaque"
+    transparent_background: bool = False
+
+
+class VisualItem(BaseModel):
+    id: str                              # "T1", "T2", "F1", "F2"
+    type: str                            # "table" | "figure"
+    title: str
+    target_section: str = ""
+    insert_after: str = ""               # "after_paragraph:12" | "after_heading:results"
+    purpose: str = ""
+    data_to_include: list[str] = []
+    suggested_structure: list[str] = []
+    priority: str = "recommended"        # "essential" | "recommended" | "optional"
+    supplementary: bool = False
+    alternative_format: Optional[str] = None
+    reporting_guideline: Optional[str] = None
+    render_mode: str = "matplotlib"      # "table" | "matplotlib" | "ai_illustration"
+    image_backend: Optional[str] = None  # "openai" | "gemini_imagen" | null
+    output_mode: str = "full_figure"     # "full_figure" | "asset_pack" | "composition_reference" | "transparent_asset"
+    category: Optional[str] = None       # psychology | neuroscience | medical | cell_bio | technical | generic
+    status: str = "recommended"          # recommended | generating | generated | editing | finalized | dismissed
+    citation_text: str = ""
+    insert_citation_after: str = ""
+    generated: Optional[GeneratedVisual] = None
+    figure_brief: Optional["FigureBrief"] = None
+    prompt_package: Optional[dict] = None
+    editable_prompt: Optional[str] = None
+    style_controls: Optional[IllustrationStyleControls] = None
+    candidates: list[dict] = []
+
+
+class VisualRecommendations(BaseModel):
+    summary: str = ""
+    empty_reason: Optional[str] = None
+    items: list[VisualItem] = []
+
+
+class AcceptVisualRequest(BaseModel):
+    style_preset: str = "academic"
+    candidate_count: Optional[int] = Field(default=None, ge=1, le=4)
+    image_backend: Optional[str] = None
+    figure_brief: Optional["FigureBrief"] = None
+    prompt_package: Optional["PromptPackage"] = None
+    editable_prompt: Optional[str] = None
+    palette: Optional[str] = None
+    image_background: Optional[str] = None
+    transparent_background: Optional[bool] = None
+
+
+class EditVisualRequest(BaseModel):
+    message: str = ""
+    context: list[dict] = []            # Prior chat turns [{role, content}]
+    current_code: Optional[str] = None
+    candidate_id: Optional[str] = None
+    figure_brief: Optional["FigureBrief"] = None
+    prompt_package: Optional["PromptPackage"] = None
+    editable_prompt: Optional[str] = None
+    palette: Optional[str] = None
+    image_background: Optional[str] = None
+    transparent_background: Optional[bool] = None
+
+
+class FinalizeVisualRequest(BaseModel):
+    caption: Optional[str] = None
+    candidate_id: Optional[str] = None
+
+
+class PanelPlan(BaseModel):
+    id: str
+    title: Optional[str] = None
+    goal: str = ""
+    main_subjects: list[str] = []
+    secondary_subjects: list[str] = []
+    arrows: list[dict] = []
+    inset: Optional[dict] = None
+    layout_notes: list[str] = []
+    draw_instructions: list[str] = []
+
+
+class FigureBrief(BaseModel):
+    title: str = ""
+    figure_type: str = ""
+    category: str = "generic"
+    purpose: str = ""
+    key_message: str = ""
+    panel_count: int = 1
+    panel_plan: list[PanelPlan] = []
+    must_include: list[str] = []
+    must_avoid: list[str] = []
+    output_context: str = "graphical_abstract"
+    labels_needed: bool = False
+    text_in_image_allowed: bool = False
+    accessibility_mode: bool = True
+    transparent_background: bool = False
+    discipline: str = ""
+    audience: str = ""
+    output_mode: str = "full_figure"
+    aspect_ratio: str = "landscape"
+    target_journal_style: str = ""
+    reference_images: list[str] = []
+    category_override: Optional[str] = None
+
+
+class PromptPackage(BaseModel):
+    system_intent: str = ""
+    layer1_content: str = ""
+    layer2_style: str = ""
+    layer3_composition: str = ""
+    layer4_negative: str = ""
+    layer5_output_purpose: str = ""
+    final_prompt: str = ""
+
+
+class CandidateScore(BaseModel):
+    message_clarity: int = Field(default=3, ge=1, le=5)
+    hierarchy: int = Field(default=3, ge=1, le=5)
+    plausibility: int = Field(default=3, ge=1, le=5)
+    composition: int = Field(default=3, ge=1, le=5)
+    accessibility: int = Field(default=3, ge=1, le=5)
+    publication_fit: int = Field(default=3, ge=1, le=5)
+    text_risk: int = Field(default=3, ge=1, le=5)
+    category_style_fit: int = Field(default=3, ge=1, le=5)
+    overall: float = 3.0
+    notes: list[str] = []
+    rejected: bool = False
+
+
+class IllustrationCandidate(BaseModel):
+    id: str
+    image_url: Optional[str] = None
+    file_path: Optional[str] = None
+    prompt: str = ""
+    backend: str = "openai"
+    model: str = ""
+    output_format: str = "png"
+    background: str = "opaque"
+    quality: str = "high"
+    output_mode: str = "full_figure"
+    prompt_package: Optional[PromptPackage] = None
+    score: Optional[CandidateScore] = None
+    notes: list[str] = []
+
+
+class FigureBuilderRequest(BaseModel):
+    title: str = ""
+    article_type: str = ""
+    discipline: str = ""
+    figure_type: str = ""
+    purpose: str = ""
+    target_journal_style: str = ""
+    audience: str = ""
+    key_message: str = ""
+    panel_count: int = Field(default=1, ge=1, le=4)
+    panels: list[dict] = []
+    must_include: list[str] = []
+    must_avoid: list[str] = []
+    labels_needed: bool = False
+    text_in_image_allowed: bool = False
+    background: str = "white"
+    transparent_background: bool = False
+    aspect_ratio: str = "landscape"
+    output_context: str = "graphical_abstract"
+    accessibility_mode: bool = True
+    reference_images: list[str] = []
+    category_override: Optional[str] = None
+    image_backend: Optional[str] = None
+    candidate_count: int = Field(default=1, ge=1, le=4)
+    output_mode: str = "full_figure"
+
+
+class FigureBuilderGenerateResponse(BaseModel):
+    brief: FigureBrief
+    prompt_package: PromptPackage
+    candidates: list[IllustrationCandidate] = []
+
+
+class FigureBuilderRefineRequest(BaseModel):
+    brief: FigureBrief
+    prompt_package: PromptPackage
+    candidate: IllustrationCandidate
+    instruction: str
+    image_backend: Optional[str] = None
+
+
+class FigureBuilderExportRequest(BaseModel):
+    candidate: IllustrationCandidate
+    format: str = "png"
