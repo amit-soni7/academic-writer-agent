@@ -1,16 +1,14 @@
 """
 auth.py
 
-Minimal Google Sign-In verification and JWT issuance.
+Server-side Google OAuth 2.0 authorization code flow + JWT issuance.
 
 Env vars:
-  GOOGLE_CLIENT_ID – OAuth client id used by the frontend
-  JWT_SECRET       – HMAC secret for signing API tokens
-
-The frontend obtains a Google ID token via Google Identity Services and
-POSTs it to /api/auth/google. We verify it via Google's tokeninfo endpoint,
-create/update the user, and return a signed JWT. Sessions endpoints require
-Authorization: Bearer <token>.
+  GOOGLE_CLIENT_ID            – OAuth client id
+  GOOGLE_CLIENT_SECRET        – OAuth client secret
+  GOOGLE_OAUTH_REDIRECT_URI   – Callback URL registered in Google Cloud Console
+  FRONTEND_BASE_URL           – Where to redirect after login
+  JWT_SECRET                  – HMAC secret for signing API tokens
 """
 
 from __future__ import annotations
@@ -19,6 +17,7 @@ import os
 import time
 from datetime import datetime
 from typing import Optional, Tuple
+from urllib.parse import urlencode
 
 import httpx
 import jwt
@@ -30,21 +29,62 @@ from sqlalchemy import select, insert, update
 
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-prod")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
+    "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8010/api/auth/google/callback"
+)
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
 AUTH_DISABLED = os.getenv("AUTH_DISABLED", "0") == "1"
 DEV_USER_ID = os.getenv("DEV_USER_ID", "dev-user")
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "awa_session")
 
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+OAUTH_SCOPES = "openid email profile"
 
-async def verify_google_id_token(id_token: str) -> dict:
-    """Verify Google ID token using Google's tokeninfo endpoint."""
+
+# ── Server-side OAuth 2.0 ────────────────────────────────────────────────────
+
+def build_google_login_url(state: str) -> str:
+    """Build Google OAuth consent URL for authorization code flow."""
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "response_type": "code",
+        "scope": OAUTH_SCOPES,
+        "access_type": "online",
+        "prompt": "select_account",
+        "state": state,
+    }
+    return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+
+
+async def exchange_google_code(code: str) -> dict:
+    """Exchange authorization code for tokens."""
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token})
+        r = await client.post(GOOGLE_TOKEN_URL, data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        })
         if r.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid Google token")
-        data = r.json()
-        if GOOGLE_CLIENT_ID and data.get("aud") != GOOGLE_CLIENT_ID:
-            raise HTTPException(status_code=401, detail="Wrong Google client id")
-        return data
+            raise HTTPException(status_code=401, detail=f"Token exchange failed: {r.text}")
+        return r.json()
+
+
+async def fetch_google_userinfo(access_token: str) -> dict:
+    """Fetch user profile from Google userinfo endpoint."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=401, detail="Failed to fetch user info")
+        return r.json()
 
 
 def _encode_jwt(payload: dict, ttl_sec: int = 60 * 60 * 24 * 7) -> str:
@@ -58,11 +98,16 @@ def decode_jwt(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])  # type: ignore
 
 
-async def login_with_google(id_token: str) -> Tuple[str, dict]:
-    info = await verify_google_id_token(id_token)
+async def login_with_google_code(code: str) -> Tuple[str, dict]:
+    """Exchange authorization code for tokens, fetch user info, upsert user, return JWT."""
+    tokens = await exchange_google_code(code)
+    access_token = tokens.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="No access token in response")
+    info = await fetch_google_userinfo(access_token)
     email = info.get("email")
     if not email:
-        raise HTTPException(status_code=400, detail="Google token missing email")
+        raise HTTPException(status_code=400, detail="Google account missing email")
     name = info.get("name")
     picture = info.get("picture")
 

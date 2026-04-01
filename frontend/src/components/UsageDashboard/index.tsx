@@ -94,7 +94,6 @@ export default function UsageDashboard({ onBack }: Props) {
   const totalIn    = totals?.total_input_tokens ?? 0;
   const totalOut   = totals?.total_output_tokens ?? 0;
   const totalTok   = totalIn + totalOut;
-  const totalCost  = totals?.total_cost_usd ?? 0;
   const callCount  = totals?.call_count ?? 0;
   const topProv    = providers[0];
   const stageMax   = Math.max(...stages.map(s => s.input_tokens + s.output_tokens), 1);

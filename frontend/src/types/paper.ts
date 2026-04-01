@@ -84,6 +84,19 @@ export interface RevisionRound {
   created_at: string;
 }
 
+export interface RevisionRoundSummary {
+  round_number: number;
+  journal_name: string;
+  comment_count: number;
+  created_at: string;
+  has_revised_article: boolean;
+  has_point_by_point_docx: boolean;
+  has_revised_manuscript_docx: boolean;
+  has_track_changes_docx: boolean;
+  has_revised_pdf: boolean;
+  docs_ready: boolean;
+}
+
 export interface ImportManuscriptResult {
   word_count: number;
   sections_found: string[];
@@ -92,6 +105,91 @@ export interface ImportManuscriptResult {
   prepared_docx?: boolean;
   reference_pdf_ready?: boolean;
   reference_pdf_warning?: string;
+}
+
+// ── Editorial review types ────────────────────────────────────────────────────
+
+export interface EditorialSuggestion {
+  category: string;   // completeness | quality | consistency | over_edit | under_edit | language | structure | references
+  severity: string;   // critical | important | minor
+  location: string;
+  finding: string;
+  suggestion: string;
+}
+
+export interface EditorialReviewResult {
+  editor_decision: string;   // accept | minor_revision | major_revision
+  overall_assessment: string;
+  suggestions: EditorialSuggestion[];
+  praise: string[];
+  remaining_concerns: string[];
+  blocking_issues: string[];
+  advisory_issues: string[];
+}
+
+export interface EditorialReviewRequest {
+  round_number?: number;
+  journal_name?: string;
+  revised_manuscript?: string;
+  reviewer_comments?: RealReviewerComment[];
+  author_responses?: ReviewCommentResponse[];
+  finalized_plans?: CommentPlan[];
+}
+
+export interface RevisionAgentLedgerItem {
+  item_id: string;
+  source: string;
+  severity: string;
+  message: string;
+  round_number: number;
+  resolved: boolean;
+  justification: string;
+}
+
+export interface RevisionAgentExportReadiness {
+  manuscript_markdown_ready: boolean;
+  manuscript_docx_ready: boolean;
+  manuscript_pdf_ready?: boolean | null;
+  response_markdown_ready: boolean;
+  response_docx_ready: boolean;
+  all_required_ready: boolean;
+}
+
+export interface RevisionAgentQaMetrics {
+  invalid_qa_findings: number;
+  discarded_blockers: number;
+  merged_repair_groups: number;
+  structural_repair_invocations: number;
+}
+
+export interface RevisionRepairTelemetry {
+  invalid_qa_findings: number;
+  discarded_blockers: number;
+  merged_repair_groups: number;
+  structural_repair_invocations: number;
+}
+
+export interface RevisionAgentStatus {
+  status: string;
+  stage: string;
+  current_round: number;
+  blocking_issue_count: number;
+  advisory_issue_count: number;
+  final_response_ready: boolean;
+  export_readiness: RevisionAgentExportReadiness;
+  completed_reason: string;
+  ledger_entries: RevisionAgentLedgerItem[];
+  stop_requested: boolean;
+  last_error: string;
+  action_map?: RevisionActionMap | null;
+  revision?: RevisionResult | null;
+  consistency_audit?: ConsistencyAuditResult | null;
+  re_review?: ReReviewResult | null;
+  editorial_review?: EditorialReviewResult | null;
+  baseline_article?: string;
+  last_known_good_article?: string;
+  qa_metrics: RevisionAgentQaMetrics;
+  user_guidance?: string;
 }
 
 // Backward-compat alias
@@ -493,24 +591,144 @@ export interface DeepSynthesisSSEEvent {
 
 export interface ReviewConcern {
   concern: string;
+  basis?: 'manuscript_only' | 'evidence_only' | 'both';
+  location?: string;
+  confidence?: 'high' | 'medium' | 'low';
   evidence_ids: string[];
   paper_ids: string[];
   scientific_importance: string;
   revision_request: string;
+  severity?: 'high' | 'medium';
+  problem_type?: 'conceptual' | 'evidentiary' | 'methodological' | 'structural' | 'rhetorical' | 'journal_fit';
+  resolvable?: boolean;
+  satisfaction_criterion?: string;
+}
+
+export interface SectionAssessment {
+  section: string;
+  rating: 'strong' | 'adequate' | 'weak' | 'missing';
+  strengths: string[];
+  weaknesses: string[];
+  suggestions: string[];
+  revision_advice?: string;
+}
+
+export interface RubricScore {
+  dimension: string;
+  score: number; // 1-5
+  rationale: string;
+}
+
+export interface ClaimAuditItem {
+  claim: string;
+  location: string;
+  problem: 'overgeneralized' | 'under-supported' | 'imprecise' | 'historically under-specified' | 'overclaimed';
+  fix: 'supported' | 'narrowed' | 'rephrased' | 'defined' | 'removed';
+  explanation: string;
 }
 
 export interface PeerReviewReport {
   manuscript_summary: string;
+  reviewer_expertise?: string[];
+  strengths?: string[];
+  section_assessments?: SectionAssessment[];
   major_concerns: ReviewConcern[];
   minor_concerns: ReviewConcern[];
+  claims_audit?: ClaimAuditItem[];
+  rubric_scores?: RubricScore[];
+  revision_priorities?: string[];
   required_revisions: string[];
   decision: 'accept' | 'minor_revision' | 'major_revision' | 'reject';
   decision_rationale: string;
+  editor_note?: string;
+}
+
+// ── Revision Action Map ─────────────────────────────────────────────────────
+
+export interface RevisionAction {
+  reviewer_comment_id: string;
+  disposition: 'accept' | 'partially_accept' | 'decline' | 'already_addressed' | 'editorial_optional' | string;
+  concern_title: string;
+  severity: 'high' | 'medium' | 'low';
+  manuscript_location: string;
+  action_type: string;
+  revision_instruction: string;
+  target_section: string;
+  estimated_edit_size: 'sentence' | 'paragraph' | 'multi_paragraph';
+  has_dependency: boolean;
+  verification_criterion: string;
+}
+
+export interface RevisionActionMap {
+  actions: RevisionAction[];
+  total_actions: number;
+  accepted_count: number;
+  declined_count: number;
+  partially_accepted: number;
 }
 
 export interface RevisionResult {
   revised_article: string;
   point_by_point_reply: string;
+  response_data?: Record<string, unknown>;  // structured per-comment response data for docx generation
+  action_map?: RevisionActionMap;
+  audit?: {
+    warnings: string[];
+    stats: Record<string, unknown>;
+    passed: boolean;
+  };
+  applied_changes?: number;
+  failed_changes?: number;
+  change_justifications?: string[];
+  response_qc?: ResponseQCResult;
+  repair_telemetry?: RevisionRepairTelemetry;
+}
+
+// ── Consistency Audit ───────────────────────────────────────────────────────
+
+export interface AuditCheck {
+  check: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface ConsistencyAuditResult {
+  checks: AuditCheck[];
+  all_passed: boolean;
+  unresolved_concerns: string[];
+  new_issues: string[];
+  blocking_issues: string[];
+  advisory_issues: string[];
+  summary: string;
+}
+
+// ── Re-review ───────────────────────────────────────────────────────────────
+
+export interface ConcernResolution {
+  concern_id: string;
+  original_concern: string;
+  status: 'resolved' | 'partially_resolved' | 'unresolved';
+  explanation: string;
+  response_accurate: boolean;
+  overstatements: string[];
+}
+
+export interface ReReviewResult {
+  concern_resolutions: ConcernResolution[];
+  new_issues: string[];
+  updated_recommendation: 'accept' | 'minor_revision' | 'major_revision' | 'reject';
+  remaining_issues: string[];
+  needs_another_round: boolean;
+  blocking_issues: string[];
+  advisory_issues: string[];
+  summary: string;
+}
+
+export interface ResponseQCResult {
+  checked: boolean;
+  blocking_issues: string[];
+  advisory_issues: string[];
+  summary: string;
 }
 
 export interface PaperSummary {
@@ -735,4 +953,31 @@ export interface FigureBuilderGenerateResponse {
   brief: FigureBrief;
   prompt_package: PromptPackage;
   candidates: IllustrationCandidate[];
+}
+
+// ── Citation status (reference sidebar) ─────────────────────────────────────
+
+export interface CitationEntry {
+  cited_key: string;
+  resolved_key: string | null;
+  ref_number: number | null;
+  status: 'resolved' | 'fuzzy_matched' | 'unresolved';
+  match_method: string | null;
+  occurrences: number;
+  first_section: string;
+  bibliography: PaperBibliography | null;
+}
+
+export interface CitationStatusSummary {
+  total: number;
+  resolved: number;
+  fuzzy_matched: number;
+  unresolved: number;
+  uncited_count: number;
+  uncited_keys: string[];
+}
+
+export interface CitationStatusResponse {
+  citations: CitationEntry[];
+  summary: CitationStatusSummary;
 }

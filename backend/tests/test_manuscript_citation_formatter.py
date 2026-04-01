@@ -1,4 +1,8 @@
-from services.manuscript_citation_formatter import normalize_numbered_citation_order
+from services.manuscript_citation_formatter import (
+    analyze_citation_status,
+    normalize_numbered_citation_order,
+    reinject_citation_markers,
+)
 
 
 class _FakeStyle:
@@ -14,11 +18,21 @@ class _FakeStyle:
         return "\n".join(lines)
 
 
-def _summary(paper_key: str, title: str) -> dict:
+def _summary(
+    paper_key: str,
+    title: str,
+    *,
+    authors: list[str] | None = None,
+    year: int | None = None,
+    doi: str | None = None,
+) -> dict:
     return {
         "paper_key": paper_key,
         "bibliography": {
             "title": title,
+            "authors": authors or [],
+            "year": year,
+            "doi": doi,
         },
     }
 
@@ -43,9 +57,10 @@ Repeat claim [CITE:beta] [9] [SUP].
         [_summary("alpha", "Alpha Study"), _summary("beta", "Beta Study")],
     )
 
-    assert "First claim [CITE:beta] [1] [BKG]." in normalized
-    assert "Second claim [CITE:alpha] [2] [EMP]." in normalized
-    assert "Repeat claim [CITE:beta] [1] [SUP]." in normalized
+    # [CITE:key] tags are preserved; only numeric citations are renumbered
+    assert "First claim [CITE:beta] [1]" in normalized
+    assert "Second claim [CITE:alpha] [2]" in normalized
+    assert "Repeat claim [CITE:beta] [1]" in normalized
     assert "## References\n\n1. Beta Study\n2. Alpha Study" in normalized
 
 
@@ -76,10 +91,120 @@ First claim [CITE:missing] [9] [BKG].
 
 9. Missing Study
 """
+    # Evidence purpose tags like [BKG] are stripped, duplicate numbers deduplicated
+    expected = """# Title
+
+## Introduction
+
+First claim [CITE:missing] [9].
+
+## References
+
+9. Missing Study
+"""
     normalized = normalize_numbered_citation_order(
         article,
         _FakeStyle(),
         [_summary("alpha", "Alpha Study")],
     )
 
-    assert normalized == article
+    assert normalized == expected
+
+
+def test_analyze_citation_status_numeric_fallback_matches_doi_and_author_year():
+    article = """# Title
+
+## Introduction
+
+First claim [1].
+Second claim [2].
+
+## References
+
+1. Smith AB. Alpha Study. J Test. 2020;1(1):1-2. https://doi.org/10.1146/annurev-clinpsy-032816-045244.
+2. Jones CD. Another beta finding. J Test. 2021;2(1):3-4.
+"""
+    status = analyze_citation_status(
+        article,
+        [
+            _summary(
+                "10.1146/annurev-clinpsy-032816-045244",
+                "Alpha Study",
+                authors=["Smith, A. B."],
+                year=2020,
+                doi="10.1146/annurev-clinpsy-032816-045244",
+            ),
+            _summary(
+                "10.1000/beta",
+                "Beta Result",
+                authors=["Jones, C. D."],
+                year=2021,
+                doi="10.1000/beta",
+            ),
+        ],
+    )
+
+    assert status["summary"]["resolved"] == 2
+    assert status["summary"]["unresolved"] == 0
+    assert [c["resolved_key"] for c in status["citations"]] == [
+        "10.1146/annurev-clinpsy-032816-045244",
+        "10.1000/beta",
+    ]
+
+
+def test_analyze_citation_status_uses_stored_citation_map_for_numeric_only_manuscript():
+    article = """# Title
+
+## Introduction
+
+First claim [1].
+Second claim [2].
+
+## References
+
+1. Legacy Ref One.
+2. Legacy Ref Two.
+"""
+    stored_map = {
+        "alpha2020": "alpha",
+        "beta2021": "beta",
+    }
+    status = analyze_citation_status(
+        article,
+        [
+            _summary("alpha", "Alpha Study", authors=["Alpha, A."], year=2020),
+            _summary("beta", "Beta Study", authors=["Beta, B."], year=2021),
+        ],
+        stored_citation_map=stored_map,
+    )
+
+    assert status["summary"]["resolved"] == 2
+    assert [c["resolved_key"] for c in status["citations"]] == ["alpha", "beta"]
+
+
+def test_reinject_citation_markers_restores_numeric_only_manuscript_from_saved_map():
+    article = """# Title
+
+## Introduction
+
+First claim [1, 2].
+Second claim [2-3].
+
+## References
+
+1. Alpha Study.
+2. Beta Study.
+3. Gamma Study.
+"""
+    restored = reinject_citation_markers(
+        article,
+        {
+            "alpha2020": "alpha",
+            "beta2021": "beta",
+            "gamma2022": "gamma",
+        },
+    )
+
+    assert "First claim [CITE:alpha] [CITE:beta] [1, 2]." in restored
+    assert "Second claim [CITE:beta] [CITE:gamma] [2-3]." in restored
+    assert "## References\n\n1. Alpha Study." in restored

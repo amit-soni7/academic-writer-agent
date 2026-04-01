@@ -74,11 +74,12 @@ export const OPENAI_MODELS = [
 ];
 
 export const GEMINI_MODELS = [
+  { value: 'gemini-3.1-pro',         label: 'Gemini 3.1 Pro  (most capable · agentic)' },
+  { value: 'gemini-3.0-flash',       label: 'Gemini 3 Flash  (frontier-class · fast)' },
+  { value: 'gemini-3.1-flash-lite',  label: 'Gemini 3.1 Flash-Lite  (cost-efficient)' },
   { value: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash  (best price-performance · recommended)' },
-  { value: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro  (most capable)' },
+  { value: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro  (advanced reasoning)' },
   { value: 'gemini-2.0-flash',       label: 'Gemini 2.0 Flash  (fast · stable)' },
-  { value: 'gemini-1.5-pro',         label: 'Gemini 1.5 Pro  (long context)' },
-  { value: 'gemini-1.5-flash',       label: 'Gemini 1.5 Flash  (lightweight · fast)' },
 ];
 
 export const CLAUDE_MODELS = [

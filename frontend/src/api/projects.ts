@@ -1,5 +1,5 @@
 import api from './client';
-import type { CommentChangeSuggestion, CommentPlan, DeepSynthesisResult, DeepSynthesisSSEEvent, FigureBrief, FigureBuilderGenerateResponse, FigureBuilderRequest, IllustrationCandidate, IllustrationStyleControls, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, PromptPackage, RealReviewerComment, RevisionResult, RevisionRound, SynthesisResult, VisualRecommendations } from '../types/paper';
+import type { CommentChangeSuggestion, CommentPlan, ConsistencyAuditResult, DeepSynthesisResult, DeepSynthesisSSEEvent, EditorialReviewRequest, EditorialReviewResult, FigureBrief, FigureBuilderGenerateResponse, FigureBuilderRequest, IllustrationCandidate, IllustrationStyleControls, ImportManuscriptResult, JournalRecommendation, JournalStyle, Paper, PaperSummary, PeerReviewReport, ProjectMeta, PromptPackage, RealReviewerComment, ReReviewResult, RevisionActionMap, RevisionAgentStatus, RevisionResult, RevisionRound, RevisionRoundSummary, SynthesisResult, VisualRecommendations } from '../types/paper';
 
 export async function createProject(
   query: string,
@@ -233,12 +233,135 @@ export async function reviseAfterReview(
   article: string,
   review: PeerReviewReport,
   selectedJournal: string,
+  actionMap?: RevisionActionMap,
+  generateResponseLetter = true,
 ): Promise<RevisionResult> {
   const { data } = await api.post<RevisionResult>(`/api/projects/${projectId}/revise_after_review`, {
     article,
     review,
     selected_journal: selectedJournal,
+    ...(actionMap ? { action_map: actionMap } : {}),
+    generate_response_letter: generateResponseLetter,
   });
+  return data;
+}
+
+export async function generateRevisionActionMap(projectId: string): Promise<RevisionActionMap> {
+  const { data } = await api.post<RevisionActionMap>(`/api/projects/${projectId}/revision_action_map`);
+  return data;
+}
+
+export async function runConsistencyAudit(
+  projectId: string,
+  opts?: { revised_article?: string; response_letter?: string; action_map?: RevisionActionMap },
+): Promise<ConsistencyAuditResult> {
+  const { data } = await api.post<ConsistencyAuditResult>(`/api/projects/${projectId}/consistency_audit`, opts ?? {});
+  return data;
+}
+
+export async function generateReReview(
+  projectId: string,
+  opts?: { revised_article?: string; response_letter?: string },
+): Promise<ReReviewResult> {
+  const { data } = await api.post<ReReviewResult>(`/api/projects/${projectId}/re_review`, opts ?? {});
+  return data;
+}
+
+export async function applyFollowupRevision(
+  projectId: string,
+  req: {
+    article: string;
+    review: PeerReviewReport;
+    selected_journal: string;
+    action_map?: RevisionActionMap;
+    consistency_audit?: ConsistencyAuditResult | null;
+    re_review?: ReReviewResult | null;
+    editorial_review?: import('../types/paper').EditorialReviewResult | null;
+  },
+): Promise<RevisionResult> {
+  const { data } = await api.post<RevisionResult>(`/api/projects/${projectId}/followup_revision`, req);
+  return data;
+}
+
+export async function finalizeRevisionResponse(
+  projectId: string,
+  req: {
+    revised_article: string;
+    review: PeerReviewReport;
+    selected_journal: string;
+    manuscript_title: string;
+    action_map?: RevisionActionMap;
+    change_justifications?: string[];
+  },
+): Promise<RevisionResult> {
+  const { data } = await api.post<RevisionResult>(`/api/projects/${projectId}/finalize_revision_response`, req);
+  return data;
+}
+
+export async function getRevisionAgentStatus(projectId: string): Promise<RevisionAgentStatus> {
+  const { data } = await api.get<RevisionAgentStatus>(`/api/projects/${projectId}/revision_agent/status`);
+  return data;
+}
+
+export async function runRevisionAgent(projectId: string): Promise<RevisionAgentStatus> {
+  const { data } = await api.post<RevisionAgentStatus>(`/api/projects/${projectId}/revision_agent/run`);
+  return data;
+}
+
+export async function stopRevisionAgent(projectId: string): Promise<RevisionAgentStatus> {
+  const { data } = await api.post<RevisionAgentStatus>(`/api/projects/${projectId}/revision_agent/stop`);
+  return data;
+}
+
+export async function resumeRevisionAgent(
+  projectId: string,
+  userGuidance = '',
+): Promise<RevisionAgentStatus> {
+  const { data } = await api.post<RevisionAgentStatus>(`/api/projects/${projectId}/revision_agent/resume`, {
+    user_guidance: userGuidance,
+  });
+  return data;
+}
+
+export async function downloadResponseLetterDocx(
+  projectId: string,
+  responseData: Record<string, unknown>,
+  journal: string,
+  manuscriptTitle: string,
+): Promise<Blob> {
+  const { data } = await api.post(
+    `/api/projects/${projectId}/response_letter_docx`,
+    { response_data: responseData, journal, manuscript_title: manuscriptTitle },
+    { responseType: 'blob' },
+  );
+  return data;
+}
+
+export async function getManuscriptExportText(
+  projectId: string,
+  articleText: string,
+  journalName = '',
+): Promise<{ article_text: string }> {
+  const { data } = await api.post<{ article_text: string }>(
+    `/api/projects/${projectId}/manuscript_export_text`,
+    { article_text: articleText, journal_name: journalName },
+  );
+  return data;
+}
+
+// ── Citation status (reference sidebar) ──────────────────────────────────────
+
+import type { CitationStatusResponse } from '../types/paper';
+
+export async function getCitationStatus(
+  projectId: string,
+  articleText: string,
+  journalName = '',
+): Promise<CitationStatusResponse> {
+  const { data } = await api.post<CitationStatusResponse>(
+    `/api/projects/${projectId}/citation_status`,
+    { article_text: articleText, journal_name: journalName },
+  );
   return data;
 }
 
@@ -604,8 +727,8 @@ export async function generateFromPlans(
   return data;
 }
 
-export async function getRevisionRounds(projectId: string): Promise<RevisionRound[]> {
-  const { data } = await api.get<RevisionRound[]>(`/api/projects/${projectId}/revision_rounds`);
+export async function getRevisionRounds(projectId: string): Promise<RevisionRoundSummary[]> {
+  const { data } = await api.get<RevisionRoundSummary[]>(`/api/projects/${projectId}/revision_rounds`);
   return data;
 }
 
@@ -737,6 +860,18 @@ export async function generateAllDocs(
   const { data } = await api.post<{ status: string; round_number: number; revised_pdf_ready?: boolean }>(
     `/api/projects/${projectId}/revision_rounds/generate_all_docs`,
     req,
+  );
+  return data;
+}
+
+/** Generate an editorial review of a revision round. */
+export async function generateEditorialReview(
+  projectId: string,
+  opts: EditorialReviewRequest,
+): Promise<EditorialReviewResult> {
+  const { data } = await api.post(
+    `/api/projects/${projectId}/revision_rounds/editorial_review`,
+    opts,
   );
   return data;
 }

@@ -4,9 +4,10 @@ export interface AuthResponse {
   user: { id: string; email: string; name?: string; picture?: string };
 }
 
-export async function loginWithGoogle(idToken: string): Promise<AuthResponse> {
-  const { data } = await api.post<AuthResponse>('/api/auth/google', { id_token: idToken });
-  return data;
+/** Redirect the browser to the backend's Google OAuth login endpoint. */
+export function redirectToGoogleLogin(): void {
+  const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8010';
+  window.location.href = `${base}/api/auth/google/login`;
 }
 
 export async function getMe(): Promise<{ id: string; email: string; name?: string; picture?: string }> {

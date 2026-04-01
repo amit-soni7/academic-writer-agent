@@ -14,45 +14,14 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from services.manuscript_utils import (
+    number_lines as _number_lines,
+    build_section_index_header as _build_section_index_header,
+    build_full_manuscript_context as _build_full_context,
+)
+
 if TYPE_CHECKING:
     from services.ai_provider import AIProvider
-
-
-# ── Line numbering helper ──────────────────────────────────────────────────────
-
-def _number_lines(text: str) -> str:
-    """Prepend 4-digit line numbers so the AI can cite 'Lines 45–52'."""
-    return "\n".join(f"{i+1:4d}  {line}" for i, line in enumerate(text.splitlines()))
-
-
-def _build_section_index_header(section_index: list[dict] | None) -> str:
-    """Build a compact section-to-line-range map for AI structural awareness."""
-    if not section_index:
-        return ""
-    lines = ["MANUSCRIPT STRUCTURE:"]
-    for s in section_index:
-        lines.append(f"  {s['name']}: Lines {s['start_line']}–{s['end_line']}")
-    return "\n".join(lines)
-
-
-def _build_full_context(
-    manuscript_text: str,
-    manuscript_summary: str = "",
-    section_index: list[dict] | None = None,
-) -> str:
-    """Build the full manuscript context: summary + section index + line-numbered text.
-
-    No truncation — the full manuscript is included.
-    """
-    parts: list[str] = []
-    if manuscript_summary:
-        parts.append(f"MANUSCRIPT SUMMARY:\n{manuscript_summary}")
-    idx_header = _build_section_index_header(section_index)
-    if idx_header:
-        parts.append(idx_header)
-    numbered = _number_lines(manuscript_text)
-    parts.append(f"FULL LINE-NUMBERED MANUSCRIPT:\n---\n{numbered}\n---")
-    return "\n\n".join(parts)
 
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
@@ -60,6 +29,23 @@ def _build_full_context(
 _RESPONSE_SYSTEM = """You are an expert scientific author responding to peer-review comments from a journal.
 
 Your task is to write a detailed, scholarly point-by-point response to each reviewer comment.
+
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY PRESERVATION RULES — violating ANY of these is a critical error:
+═══════════════════════════════════════════════════════════════════════════════
+1. TITLE: Do NOT change the manuscript title unless the reviewer explicitly requests it.
+2. HEADINGS: Keep ALL section/subsection headings identical unless reviewer asks to rename/add/remove.
+3. FIGURES & ILLUSTRATIONS: Do NOT add, remove, or modify figure/illustration references, captions,
+   image markdown, illustration placeholders, or any figure/illustration block unless reviewer asks.
+4. TABLES: Do NOT add, remove, or modify table references, table captions, or the actual table
+   content/block unless reviewer asks.
+5. CITATIONS & REFERENCES: Do NOT add, remove, rewrite, or renumber citations or reference entries
+   unless reviewer explicitly asks. Preserve the full References section unless a requested change requires it.
+6. WORD COUNT: Keep changes minimal — total word count must stay within ±5% of original.
+7. SCOPE: Only propose changes that directly address a reviewer comment. Nothing else.
+8. NO UNSOLICITED IMPROVEMENTS: Do NOT fix grammar, rephrase for "clarity", or "improve" any text
+   outside the targeted region. If the reviewer didn't flag it, don't touch it.
+═══════════════════════════════════════════════════════════════════════════════
 
 For each comment you will produce:
 1. "author_response" — a thorough, respectful response that:
@@ -109,10 +95,27 @@ Generate the point-by-point response array. Return ONLY the JSON array."""
 _REVISED_SYSTEM = """You are an expert scientific author. You have received peer-review responses
 and must now produce the full revised manuscript incorporating all described changes.
 
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY PRESERVATION RULES — violating ANY of these is a critical error:
+═══════════════════════════════════════════════════════════════════════════════
+1. TITLE: Keep the EXACT same title unless a reviewer change explicitly modifies it.
+2. HEADINGS: Keep ALL section/subsection headings IDENTICAL to the original.
+3. FIGURES & ILLUSTRATIONS: Keep ALL figure/illustration references, captions, image markdown,
+   illustration placeholders, and figure/illustration blocks exactly as-is.
+4. TABLES: Keep ALL table references, captions, legends, and full table blocks exactly as-is.
+5. CITATIONS & REFERENCES: Keep ALL citations, reference entries, and the full References section.
+   Do NOT add, remove, rewrite, or renumber any unless explicitly described in the changes below.
+6. WORD COUNT: The revised manuscript must be within ±5% word count of the original.
+   Do NOT pad, expand, or shorten text beyond what the changes require.
+7. SCOPE: Apply ONLY the changes described below. Do NOT make any other modifications.
+   If text is not mentioned in the changes, copy it VERBATIM from the original.
+8. NO UNSOLICITED IMPROVEMENTS: Do NOT fix grammar, rephrase, or "improve" ANY text
+   that is not part of an explicit change. Leave untouched text character-for-character identical.
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 - Apply every change described in the "action_taken" and "manuscript_diff" fields.
-- Maintain the original manuscript structure, headings, and style.
-- Preserve all citations and references from the original.
+- For all text NOT targeted by a change, copy it EXACTLY from the original — word for word.
 - Output the complete revised manuscript in markdown format (# for title, ## for sections).
 - Do NOT include the point-by-point response — only the revised manuscript text."""
 
@@ -370,6 +373,19 @@ async def discuss_comment(
 
 _FINALIZE_SYSTEM = """You are an expert scientific author. The author has agreed on a final change plan for a peer-review comment.
 
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY PRESERVATION RULES — violating ANY of these is a critical error:
+═══════════════════════════════════════════════════════════════════════════════
+1. TITLE: Do NOT change the manuscript title unless the change plan explicitly says to.
+2. HEADINGS: Do NOT rename, add, or remove any section/subsection headings.
+3. FIGURES & TABLES: Do NOT add, remove, or modify figure/table references, captions, image blocks,
+   illustration blocks, or table blocks.
+4. CITATIONS & REFERENCES: Do NOT add, remove, rewrite, or renumber citations/references unless the
+   plan explicitly says to. Preserve the References section exactly otherwise.
+5. SCOPE: Only produce manuscript_changes that implement the agreed plan. Nothing extra.
+6. NO UNSOLICITED IMPROVEMENTS: Do NOT fix grammar, rephrase, or "improve" anything outside the plan scope.
+═══════════════════════════════════════════════════════════════════════════════
+
 Write:
 1. A formal, respectful author response letter paragraph (scholarly, professional tone)
 2. A precise action-taken location string
@@ -390,7 +406,8 @@ Rules:
 - author_response: 2-4 paragraphs. Acknowledge the comment, explain the change, cite the plan.
 - action_taken: be precise. If no text change, write "No change required: [reason]".
 - manuscript_changes: JSON array of edit operations. CRITICAL RULES:
-  1. "find" and "anchor" values MUST be copied character-for-character from the manuscript. Do NOT paraphrase.
+  1. "find" and "anchor" values MUST be copied character-for-character from the manuscript TEXT. Do NOT paraphrase.
+     IMPORTANT: Do NOT include line numbers in "find" or "anchor" — line numbers are reference only, not part of the text.
   2. "find"/"anchor" text must be at least 50 characters long to ensure uniqueness in the document.
   3. For REPLACE (changing existing text): {"type": "replace", "find": "exact old text", "replace_with": "new text"}
   4. For INSERT (adding new text after an existing paragraph): {"type": "insert_after", "anchor": "exact text of the paragraph to insert after (50+ chars)", "text": "new content"}
@@ -466,10 +483,26 @@ _PLANS_REVISED_SYSTEM = """You are an expert scientific author applying agreed-u
 
 You have a list of finalized reviewer-response plans. Each plan specifies exactly what to change and where.
 
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY PRESERVATION RULES — violating ANY of these is a critical error:
+═══════════════════════════════════════════════════════════════════════════════
+1. TITLE: Keep the EXACT same title unless a finalized plan explicitly changes it.
+2. HEADINGS: Keep ALL section/subsection headings IDENTICAL to the original.
+3. FIGURES & ILLUSTRATIONS: Keep ALL figure/illustration references, captions, image markdown,
+   illustration placeholders, and full figure/illustration blocks exactly as-is.
+4. TABLES: Keep ALL table references, captions, legends, and full table blocks exactly as-is.
+5. CITATIONS & REFERENCES: Keep ALL citations, reference entries, and the full References section.
+   Do NOT add, remove, rewrite, or renumber any unless explicitly described in the finalized plans below.
+6. WORD COUNT: The revised manuscript must be within ±5% word count of the original.
+7. SCOPE: Apply ONLY the changes from the finalized plans. NOTHING else.
+   If text is not mentioned in any plan, copy it VERBATIM from the original.
+8. NO UNSOLICITED IMPROVEMENTS: Do NOT fix grammar, rephrase, or "improve" ANY text
+   that is not part of a finalized plan. Leave untouched text character-for-character identical.
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 - Apply ONLY the changes described in the finalized plans. Do not improvise.
-- Maintain the original manuscript structure, headings, and style.
-- Preserve all citations and references.
+- For all text NOT targeted by a change, copy it EXACTLY from the original — word for word.
 - Output the complete revised manuscript in markdown format (# for title, ## for sections)."""
 
 _PLANS_REVISED_USER_TMPL = """ORIGINAL MANUSCRIPT:
@@ -617,10 +650,19 @@ def _build_point_by_point_md(
 _SUGGEST_SYSTEM = """You are an expert academic revision strategist.
 Generate comment-wise change suggestions for authors after peer review.
 
+═══════════════════════════════════════════════════════════════════════════════
+PRESERVATION BIAS — keep the manuscript as close to the original as possible:
+═══════════════════════════════════════════════════════════════════════════════
+- Do NOT suggest changing the title, headings, figure/table references, figure/illustration blocks,
+  table blocks, or citation/reference numbering/content unless the reviewer EXPLICITLY asks for it.
+- Prefer NO change over any change. The original manuscript is the baseline.
+- Suggest MINIMAL edits — the smallest text change that addresses the concern.
+═══════════════════════════════════════════════════════════════════════════════
+
 Return ONLY JSON array. For each comment include:
 - reviewer_number, comment_number, original_comment
 - interpretation (what reviewer actually asks)
-- action_type: clarify|add_citation|add_analysis|reframe_claim|rewrite_text|rebuttal|no_change|other
+- action_type: no_change|clarify|reframe_claim|add_limitation|add_citation|add_analysis|rewrite_text|rebuttal|other
 - target_section
 - target_line_hint
 - copy_paste_text (clear rewritten sentence/paragraph authors can paste)
@@ -632,6 +674,12 @@ Return ONLY JSON array. For each comment include:
 - ambiguity_question (empty when not ambiguous)
 
 Rules:
+- PREFER conservative actions. Use this priority order:
+  no_change > clarify > reframe_claim > add_limitation > add_citation
+  before rewrite_text or add_analysis.
+- Only use rewrite_text when the existing text is factually wrong or misleading.
+- A strong manuscript that already addresses the concern should get action_type: no_change.
+- Do NOT suggest rewrites for stylistic preferences or minor phrasing differences.
 - Do not fabricate numeric results.
 - If ambiguity is high, set ambiguity_flag=true and keep copy_paste_text conservative.
 - Suggestions are advisory only; authors will edit manuscript manually.

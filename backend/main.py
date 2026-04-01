@@ -9,9 +9,11 @@ except Exception:
     # Optional in case python-dotenv is not installed yet.
     pass
 
-from fastapi import FastAPI, Body, Depends, Request, Response
+import secrets
+
+from fastapi import FastAPI, Body, Cookie, Depends, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from routers import intent, journals, literature, projects, settings, usage
 from services.llm_errors import (
@@ -24,7 +26,13 @@ from services.llm_errors import (
 )
 from routers.sr_pipeline import router as sr_router
 from services.db import init_db as init_db_pg
-from services.auth import login_with_google, get_current_user, AUTH_COOKIE_NAME
+from services.auth import (
+    login_with_google_code,
+    build_google_login_url,
+    get_current_user,
+    AUTH_COOKIE_NAME,
+    FRONTEND_BASE_URL,
+)
 
 
 @asynccontextmanager
@@ -90,6 +98,23 @@ async def llm_error_handler(request: Request, exc: LLMError):
     return JSONResponse(status_code=status, content=exc.to_dict())
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler ensures CORS headers are always present on error responses.
+
+    Without this, unhandled exceptions can bypass CORSMiddleware and the browser
+    reports a misleading CORS error instead of the real server error.
+    """
+    import logging
+    logging.getLogger("uvicorn.error").error(
+        "Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
+    )
+
+
 @app.get("/health", tags=["meta"])
 async def health_check():
     return {"status": "ok", "version": app.version}
@@ -97,10 +122,44 @@ async def health_check():
 
 # ── Auth routes ─────────────────────────────────────────────────────────────
 
-@app.post("/api/auth/google", tags=["auth"])
-async def auth_google(response: Response, id_token: str = Body(..., embed=True)):
-    token, profile = await login_with_google(id_token)
-    response.set_cookie(
+@app.get("/api/auth/google/login", tags=["auth"])
+async def auth_google_login():
+    """Redirect to Google OAuth consent screen."""
+    state = secrets.token_urlsafe(32)
+    url = build_google_login_url(state)
+    resp = RedirectResponse(url=url, status_code=302)
+    resp.set_cookie(
+        key="awa_oauth_state",
+        value=state,
+        httponly=True,
+        secure=os.getenv("COOKIE_SECURE", "0") == "1",
+        samesite="lax",
+        max_age=600,
+        path="/",
+    )
+    return resp
+
+
+@app.get("/api/auth/google/callback", tags=["auth"])
+async def auth_google_callback(
+    code: str = Query(None),
+    state: str = Query(None),
+    error: str = Query(None),
+    awa_oauth_state: str | None = Cookie(None),
+):
+    """Handle Google OAuth callback — exchange code, set session, redirect to frontend."""
+    if error:
+        return RedirectResponse(url=f"{FRONTEND_BASE_URL}/#/login?error={error}", status_code=302)
+    if not state or not awa_oauth_state or state != awa_oauth_state:
+        return RedirectResponse(url=f"{FRONTEND_BASE_URL}/#/login?error=csrf_failed", status_code=302)
+    if not code:
+        return RedirectResponse(url=f"{FRONTEND_BASE_URL}/#/login?error=no_code", status_code=302)
+    try:
+        token, _profile = await login_with_google_code(code)
+    except Exception:
+        return RedirectResponse(url=f"{FRONTEND_BASE_URL}/#/login?error=exchange_failed", status_code=302)
+    resp = RedirectResponse(url=f"{FRONTEND_BASE_URL}/#/dashboard", status_code=302)
+    resp.set_cookie(
         key=AUTH_COOKIE_NAME,
         value=token,
         httponly=True,
@@ -109,7 +168,8 @@ async def auth_google(response: Response, id_token: str = Body(..., embed=True))
         max_age=60 * 60 * 24 * 7,
         path="/",
     )
-    return {"user": profile}
+    resp.delete_cookie(key="awa_oauth_state", path="/")
+    return resp
 
 
 @app.get("/api/me", tags=["auth"])

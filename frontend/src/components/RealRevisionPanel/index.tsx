@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
-import type { CommentChangeSuggestion, CommentPlan, DiscussionMessage, RevisionIntakeData, RealReviewerComment, RevisionRound, ImportManuscriptResult } from '../../types/paper';
+import type { CommentChangeSuggestion, CommentPlan, DiscussionMessage, RevisionIntakeData, RealReviewerComment, RevisionRoundSummary, ImportManuscriptResult, EditorialReviewResult } from '../../types/paper';
 import {
   importManuscript,
   parseReviewerComments,
@@ -8,6 +8,7 @@ import {
   discussComment,
   finalizeComment,
   generateAllDocs,
+  generateEditorialReview,
   getRevisionRounds,
   getRevisionWip,
   saveRevisionWip,
@@ -23,7 +24,7 @@ import {
 import { fetchSettings } from '../../api/settings';
 import LoadingLottie from '../LoadingLottie';
 
-export type StepId = 'manuscript' | 'comments' | 'edit_comments' | 'responses' | 'download';
+export type StepId = 'manuscript' | 'comments' | 'edit_comments' | 'responses' | 'editor' | 'download';
 
 interface Props {
   projectId: string;
@@ -38,7 +39,8 @@ const STEPS: { id: StepId; label: string }[] = [
   { id: 'comments',      label: '2. Comments' },
   { id: 'edit_comments', label: '3. Edit Comments' },
   { id: 'responses',     label: '4. Discuss & Finalize' },
-  { id: 'download',      label: '5. Download' },
+  { id: 'editor',        label: '5. Editor Review' },
+  { id: 'download',      label: '6. Download' },
 ];
 
 function _renumberComments(list: RealReviewerComment[]): RealReviewerComment[] {
@@ -74,7 +76,7 @@ function MetaBadge({ text }: { text: string }) {
 
 export default function RealRevisionPanel({ projectId, initialData, activeStep, onStepChange }: Props) {
   // ── Round management ──────────────────────────────────────────────────────
-  const [rounds, setRounds] = useState<RevisionRound[]>([]);
+  const [rounds, setRounds] = useState<RevisionRoundSummary[]>([]);
   const [activeRound, setActiveRound] = useState(1);
 
   // ── Step state ────────────────────────────────────────────────────────────
@@ -83,6 +85,12 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
   useEffect(() => {
     if (activeStep && activeStep !== step) setStep(activeStep);
   }, [activeStep]);
+
+  useEffect(() => {
+    setEditorialReview(null);
+    setEditorialError(null);
+    setDocsReadyRound(null);
+  }, [activeRound]);
 
   function changeStep(s: StepId) { setStep(s); onStepChange?.(s); }
 
@@ -116,8 +124,13 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
   const wipSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const planSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Editor review step ────────────────────────────────────────────────────
+  const [editorialReview, setEditorialReview] = useState<EditorialReviewResult | null>(null);
+  const [editorialLoading, setEditorialLoading] = useState(false);
+  const [editorialError, setEditorialError] = useState<string | null>(null);
+
   // ── Download step ─────────────────────────────────────────────────────────
-  const [currentRound, setCurrentRound] = useState<RevisionRound | null>(null);
+  const [docsReadyRound, setDocsReadyRound] = useState<number | null>(null);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
 
@@ -146,7 +159,7 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
   // ── Load existing rounds + WIP state + comment_work on mount ────────────
   useEffect(() => {
     getRevisionRounds(projectId).then((r) => {
-      if (r.length > 0) setRounds(r as RevisionRound[]);
+      if (r.length > 0) setRounds(r);
     }).catch(() => {});
 
     // Restore in-progress state when resuming (no fresh initialData)
@@ -509,6 +522,8 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
 
     setFinalizeLoading(true);
     setDiscussError(null);
+    setEditorialReview(null);
+    setEditorialError(null);
     try {
       const resp = await finalizeComment(projectId, {
         original_comment: plan.original_comment,
@@ -537,7 +552,7 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
       if (nextIdx >= 0) {
         setActiveCommentIdx(nextIdx);
       } else if (updatedPlans.every((p) => p.is_finalized)) {
-        changeStep('download');
+        changeStep('editor');
       }
     } catch (e: any) {
       setDiscussError(e.message ?? 'Finalization failed');
@@ -548,6 +563,8 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
 
   function handleUnfinalizeComment(idx: number) {
     const plan = commentPlans[idx];
+    setEditorialReview(null);
+    setEditorialError(null);
     setCommentPlans((prev) => prev.map((p, i) =>
       i === idx ? { ...p, is_finalized: false, author_response: '', action_taken: '', manuscript_changes: '' } : p
     ));
@@ -579,25 +596,27 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
     setGenerateLoading(true);
     setGenerateError(null);
     try {
-      await generateAllDocs(projectId, {
+      const result = await generateAllDocs(projectId, {
         round_number: activeRound,
         author,
       });
-      const roundData: RevisionRound = {
+      setDocsReadyRound(activeRound);
+      const roundSummary: RevisionRoundSummary = {
         round_number: activeRound,
         journal_name: journalName,
-        raw_comments: rawComments,
-        parsed_comments: parsedComments,
-        responses: [],
-        revised_article: '',
-        point_by_point_md: '',
+        comment_count: parsedComments.length,
         created_at: new Date().toISOString(),
+        has_revised_article: Boolean(rounds.find((r) => r.round_number === activeRound)?.has_revised_article),
+        has_point_by_point_docx: true,
+        has_revised_manuscript_docx: true,
+        has_track_changes_docx: true,
+        has_revised_pdf: Boolean(result.revised_pdf_ready),
+        docs_ready: true,
       };
-      setCurrentRound(roundData);
       setRounds((prev) => {
         const idx = prev.findIndex((r) => r.round_number === activeRound);
-        if (idx >= 0) { const next = [...prev]; next[idx] = roundData; return next; }
-        return [...prev, roundData];
+        if (idx >= 0) { const next = [...prev]; next[idx] = { ...next[idx], ...roundSummary }; return next; }
+        return [...prev, roundSummary];
       });
     } catch (e: any) {
       setGenerateError(e.message ?? 'Generation failed');
@@ -612,7 +631,7 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
     setParsedComments([]);
     setCommentPlans([]);
     setRawComments('');
-    setCurrentRound(null);
+    setDocsReadyRound(null);
     autoInitTriggeredRef.current = new Set();
     changeStep('manuscript');
   }
@@ -697,7 +716,8 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
 
   // ── Computed ──────────────────────────────────────────────────────────────
 
-  const roundForDownload = currentRound ?? rounds.find((r) => r.round_number === activeRound);
+  const roundForDownload = docsReadyRound === activeRound
+    || Boolean(rounds.find((r) => r.round_number === activeRound)?.docs_ready);
   const allFinalized = commentPlans.length > 0 && commentPlans.every((p) => p.is_finalized);
   const finalizedCount = commentPlans.filter((p) => p.is_finalized).length;
   const activePlan = commentPlans[activeCommentIdx] ?? null;
@@ -729,7 +749,7 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
             {rounds.map((r) => (
               <button
                 key={r.round_number}
-                onClick={() => { setActiveRound(r.round_number); setCurrentRound(r); changeStep('download'); }}
+                onClick={() => { setActiveRound(r.round_number); setDocsReadyRound(null); changeStep('download'); }}
                 className="rev-round-btn"
                 style={activeRound === r.round_number ? { background: 'var(--gold)', borderColor: 'var(--gold)', color: '#fff' } : undefined}
               >
@@ -1557,11 +1577,11 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
                       <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Ready to generate the revision package</p>
                     </div>
                     <button
-                      onClick={() => changeStep('download')}
+                      onClick={() => changeStep('editor')}
                       className="rev-btn"
                       style={{ background: 'var(--rev-done)', color: '#fff', padding: '9px 20px', borderRadius: 10 }}
                     >
-                      Generate Documents →
+                      Editor Review →
                     </button>
                   </div>
                 )}
@@ -1570,7 +1590,193 @@ export default function RealRevisionPanel({ projectId, initialData, activeStep, 
           </div>
         )}
 
-        {/* ── Step 5: Download ───────────────────────────────────────────────── */}
+        {/* ── Step 5: Editor Review ──────────────────────────────────────────── */}
+        {step === 'editor' && (
+          <div className="rev-card animate-in delay-75 space-y-5">
+            <div>
+              <h2 className="rev-heading">Editor Review</h2>
+              <p className="rev-subheading">AI acts as a senior journal editor assessing the quality of your revision before the final response letter.</p>
+            </div>
+
+            {!editorialReview && !editorialLoading && (
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={async () => {
+                    setEditorialLoading(true);
+                    setEditorialError(null);
+                    try {
+                      const existingRound = rounds.find((r) => r.round_number === activeRound);
+                      let opts: Parameters<typeof generateEditorialReview>[1];
+                      if (existingRound?.has_revised_article) {
+                        opts = { round_number: activeRound, journal_name: journalName };
+                      } else {
+                        opts = {
+                          round_number: activeRound,
+                          journal_name: journalName,
+                          finalized_plans: commentPlans.filter((p) => p.is_finalized),
+                        };
+                      }
+                      const result = await generateEditorialReview(projectId, opts);
+                      setEditorialReview(result);
+                    } catch (err: any) {
+                      setEditorialError(err?.response?.data?.detail || err?.message || 'Editorial review failed');
+                    } finally {
+                      setEditorialLoading(false);
+                    }
+                  }}
+                  className="rev-btn"
+                  style={{ background: 'var(--rev-accent)', color: '#fff', padding: '10px 24px', borderRadius: 10 }}
+                >
+                  Generate Editorial Review
+                </button>
+                <button
+                  onClick={() => changeStep('download')}
+                  className="rev-btn"
+                  style={{ background: 'var(--bg-secondary)', color: 'var(--text-muted)', padding: '10px 24px', borderRadius: 10, border: '1px solid var(--border)' }}
+                >
+                  Skip to Download →
+                </button>
+              </div>
+            )}
+
+            {editorialLoading && (
+              <div className="flex items-center gap-3 py-8 justify-center">
+                <LoadingLottie className="w-10 h-10" />
+                <span className="text-sm" style={{ color: 'var(--text-muted)' }}>Senior editor is reviewing your revision...</span>
+              </div>
+            )}
+
+            {editorialError && (
+              <div className="rounded-xl p-4" style={{ background: '#fef2f2', border: '1px solid #fecaca' }}>
+                <p className="text-sm text-red-700">{editorialError}</p>
+                <button
+                  onClick={() => { setEditorialError(null); setEditorialReview(null); }}
+                  className="mt-2 text-xs text-red-600 underline"
+                >Retry</button>
+              </div>
+            )}
+
+            {editorialReview && (
+              <div className="space-y-5">
+                {/* Decision badge */}
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-medium" style={{ color: 'var(--text-muted)' }}>Editor Decision:</span>
+                  <span className={`text-sm font-bold px-3 py-1 rounded-full ${
+                    editorialReview.editor_decision === 'accept'
+                      ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                      : editorialReview.editor_decision === 'minor_revision'
+                      ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                      : 'bg-rose-100 text-rose-700 border border-rose-200'
+                  }`}>
+                    {editorialReview.editor_decision === 'accept' ? 'Accept' :
+                     editorialReview.editor_decision === 'minor_revision' ? 'Minor Revision' : 'Major Revision'}
+                  </span>
+                </div>
+
+                {/* Overall assessment */}
+                <div className="rounded-xl p-4" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+                  <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Overall Assessment</h3>
+                  <p className="text-sm whitespace-pre-wrap" style={{ color: 'var(--text-secondary)', lineHeight: '1.7' }}>
+                    {editorialReview.overall_assessment}
+                  </p>
+                </div>
+
+                {/* Praise */}
+                {editorialReview.praise.length > 0 && (
+                  <div className="rounded-xl p-4" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+                    <h3 className="text-sm font-semibold mb-2 text-emerald-700">What You Did Well</h3>
+                    <ul className="space-y-1">
+                      {editorialReview.praise.map((p, i) => (
+                        <li key={i} className="text-sm text-emerald-800 flex gap-2">
+                          <span className="shrink-0">+</span>
+                          <span>{p}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Suggestions table */}
+                {editorialReview.suggestions.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Editorial Suggestions</h3>
+                    <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr style={{ background: 'var(--bg-secondary)' }}>
+                            <th className="text-left p-3 font-medium" style={{ color: 'var(--text-muted)', width: '12%' }}>Category</th>
+                            <th className="text-left p-3 font-medium" style={{ color: 'var(--text-muted)', width: '10%' }}>Severity</th>
+                            <th className="text-left p-3 font-medium" style={{ color: 'var(--text-muted)', width: '15%' }}>Location</th>
+                            <th className="text-left p-3 font-medium" style={{ color: 'var(--text-muted)', width: '30%' }}>Finding</th>
+                            <th className="text-left p-3 font-medium" style={{ color: 'var(--text-muted)', width: '33%' }}>Suggestion</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {editorialReview.suggestions.map((s, i) => (
+                            <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                              <td className="p-3">
+                                <span className="text-xs font-medium px-2 py-0.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200">
+                                  {s.category.replace('_', ' ')}
+                                </span>
+                              </td>
+                              <td className="p-3">
+                                <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${
+                                  s.severity === 'critical' ? 'bg-rose-100 text-rose-700 border-rose-200' :
+                                  s.severity === 'important' ? 'bg-amber-100 text-amber-700 border-amber-200' :
+                                  'bg-slate-100 text-slate-600 border-slate-200'
+                                }`}>
+                                  {s.severity}
+                                </span>
+                              </td>
+                              <td className="p-3" style={{ color: 'var(--text-muted)' }}>{s.location}</td>
+                              <td className="p-3" style={{ color: 'var(--text-secondary)' }}>{s.finding}</td>
+                              <td className="p-3" style={{ color: 'var(--text-primary)' }}>{s.suggestion}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Remaining concerns */}
+                {editorialReview.remaining_concerns.length > 0 && (
+                  <div className="rounded-xl p-4" style={{ background: '#fff7ed', border: '1px solid #fed7aa' }}>
+                    <h3 className="text-sm font-semibold mb-2 text-amber-700">Remaining Concerns</h3>
+                    <ul className="space-y-1">
+                      {editorialReview.remaining_concerns.map((c, i) => (
+                        <li key={i} className="text-sm text-amber-800 flex gap-2">
+                          <span className="shrink-0">!</span>
+                          <span>{c}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Proceed to download */}
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    onClick={() => changeStep('download')}
+                    className="rev-btn"
+                    style={{ background: 'var(--rev-done)', color: '#fff', padding: '10px 24px', borderRadius: 10 }}
+                  >
+                    Proceed to Download →
+                  </button>
+                  <button
+                    onClick={() => { setEditorialReview(null); setEditorialError(null); }}
+                    className="rev-btn"
+                    style={{ background: 'var(--bg-secondary)', color: 'var(--text-muted)', padding: '10px 24px', borderRadius: 10, border: '1px solid var(--border)' }}
+                  >
+                    Re-run Editor Review
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Step 6: Download ───────────────────────────────────────────────── */}
         {step === 'download' && (
           <div className="rev-card animate-in delay-75 space-y-5">
             <div>

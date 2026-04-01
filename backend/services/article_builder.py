@@ -20,6 +20,7 @@ ARTICLE_SECTIONS
 from __future__ import annotations
 
 from services.journal_style_service import JournalStyle, build_article_system_prompt
+from services.manuscript_utils import extract_manuscript_packs
 from services.writing_guidelines import get_guidelines_for_sections, get_article_type_guidelines
 
 # ── Default sections per article type ─────────────────────────────────────────
@@ -374,7 +375,8 @@ def _format_one_summary(i: int, s: dict, label_prefix: str = "") -> str:
     jname        = bib.get("journal") or ""
     doi          = bib.get("doi") or ""
 
-    header = f"\n[{label_prefix}{i}] {first_author} ({year}). {title}. {jname}. {doi}\n"
+    paper_key = s.get("paper_key", "")
+    header = f"\n[{label_prefix}{i}] CITE_KEY={paper_key} | {first_author} ({year}). {title}. {jname}. {doi}\n"
     evidence_line = (
         f"  Evidence: {ca.get('evidence_grade', 'not assessed')}"
         f" ({ca.get('evidence_grade_justification', '')})\n"
@@ -594,6 +596,55 @@ def build_evidence_blocks(manuscript_packs: dict | None) -> str:
     return "\n".join(blocks)
 
 
+def build_revision_writing_requirements(
+    article_type: str,
+    journal_style: JournalStyle | None = None,
+) -> str:
+    """
+    Reuse the draft-writing rules during revision, but only for touched text.
+    """
+    sections = (
+        journal_style.get_sections(article_type)
+        if journal_style else
+        ARTICLE_SECTIONS.get(article_type, ARTICLE_SECTIONS["original_research"])
+    )
+
+    blocks: list[str] = [
+        "REVISION WRITING / STRUCTURE RULES:",
+        (
+            "When you edit a passage, the revised text must still obey the same "
+            "manuscript-writing rules used for initial draft generation. Apply "
+            "these rules ONLY inside the text spans you actually edit. Do NOT "
+            "rewrite untouched sections just to make them more elegant."
+        ),
+        f"Expected manuscript section structure for this article type: {', '.join(sections)}.",
+    ]
+
+    if journal_style:
+        blocks.append(journal_style.to_citation_instructions())
+
+    blocks.append(_ABSTRACT_NO_CITATION_RULE)
+
+    if journal_style:
+        abstract_hint = journal_style.get_abstract_instructions(article_type)
+        if abstract_hint:
+            blocks.append(abstract_hint)
+
+    type_note = _REVIEW_METHODOLOGY_NOTES.get(article_type, "")
+    if type_note:
+        blocks.append(type_note)
+
+    guidelines_block = get_guidelines_for_sections(sections)
+    if guidelines_block:
+        blocks.append(guidelines_block)
+
+    type_guidelines = get_article_type_guidelines(article_type)
+    if type_guidelines:
+        blocks.append(type_guidelines)
+
+    return "\n\n".join(blocks)
+
+
 async def build_article_prompt(
     session: dict,
     article_type: str,
@@ -660,26 +711,7 @@ async def build_article_prompt(
     )
 
     # ── Evidence packs (deep synthesis → structured per-section evidence) ───
-    # Check for manuscript packs from synthesis result or deep synthesis
-    manuscript_packs = None
-    synthesis_result = session.get("synthesis_result")
-    if isinstance(synthesis_result, str):
-        try:
-            synthesis_result = __import__("json").loads(synthesis_result)
-        except (ValueError, TypeError):
-            synthesis_result = None
-    if isinstance(synthesis_result, dict):
-        manuscript_packs = synthesis_result.get("manuscript_packs")
-    # Also check deep_synthesis_result (Phase 2+)
-    deep_result = session.get("deep_synthesis_result")
-    if isinstance(deep_result, str):
-        try:
-            deep_result = __import__("json").loads(deep_result)
-        except (ValueError, TypeError):
-            deep_result = None
-    if isinstance(deep_result, dict) and deep_result.get("manuscript_packs"):
-        manuscript_packs = deep_result["manuscript_packs"]
-
+    manuscript_packs = extract_manuscript_packs(session)
     evidence_block = build_evidence_blocks(manuscript_packs)
 
     # ── User message ─────────────────────────────────────────────────────────

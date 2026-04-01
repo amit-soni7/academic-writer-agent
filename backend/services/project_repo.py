@@ -8,17 +8,21 @@ Maintains the same JSON blob contract as session_repo, but with Projects termino
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import uuid
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from typing import Optional
 
 from sqlalchemy import select, insert, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from services.db import create_engine_async, projects, papers, summaries, journal_recs, screenings, comment_work
+from services.manuscript_citation_formatter import build_citation_map, reinject_citation_markers
 
 
 def _now() -> datetime:
@@ -160,7 +164,7 @@ async def list_projects(user_id: str) -> list[dict]:
 
 async def load_project(user_id: str, project_id: str) -> Optional[dict]:
     eng = create_engine_async()
-    async with eng.connect() as conn:
+    async with eng.begin() as conn:
         row = (await conn.execute(select(projects).where(
             (projects.c.project_id == project_id) & (projects.c.user_id == user_id)
         ))).mappings().first()
@@ -185,6 +189,35 @@ async def load_project(user_id: str, project_id: str) -> Optional[dict]:
         summaries_map = {k: _coerce(v) for k, v in sr}
         jr_first = jr.mappings().first()
         journal_list = _coerce(jr_first["data"]) if jr_first else []
+
+        article_text = str(row_dict.get("article") or "")
+        citation_map_text = row_dict.get("citation_map")
+        stored_citation_map = _coerce(citation_map_text) if citation_map_text else {}
+        if not isinstance(stored_citation_map, dict):
+            stored_citation_map = {}
+
+        updated_fields: dict = {}
+
+        if article_text and not stored_citation_map and "[CITE:" in article_text:
+            rebuilt_map = build_citation_map(article_text, list(summaries_map.values()))
+            if rebuilt_map:
+                citation_map_text = json.dumps(rebuilt_map, ensure_ascii=False)
+                row_dict["citation_map"] = citation_map_text
+                stored_citation_map = rebuilt_map
+                updated_fields["citation_map"] = citation_map_text
+
+        if article_text and stored_citation_map and "[CITE:" not in article_text:
+            restored_article = reinject_citation_markers(article_text, stored_citation_map)
+            if restored_article != article_text:
+                row_dict["article"] = restored_article
+                updated_fields["article"] = restored_article
+
+        if updated_fields:
+            await conn.execute(
+                update(projects)
+                .where(projects.c.project_id == project_id)
+                .values(**updated_fields)
+            )
 
         return {
             **row_dict,
@@ -295,14 +328,34 @@ async def save_journal_recs(project_id: str, recs: list[dict]) -> None:
         await conn.execute(update(projects).where(projects.c.project_id == project_id).values(updated_at=_now()))
 
 
-async def save_article(project_id: str, article: str, selected_journal: Optional[str] = None) -> None:
+async def save_article(
+    project_id: str,
+    article: str,
+    selected_journal: Optional[str] = None,
+    citation_map: Optional[str] = None,
+) -> None:
     eng = create_engine_async()
+    vals: dict = dict(
+        article=article,
+        selected_journal=selected_journal or projects.c.selected_journal,
+        # Always update citation_map — use empty JSON object when None
+        # to prevent stale maps from previous drafts persisting
+        citation_map=citation_map or "{}",
+        updated_at=_now(),
+    )
     async with eng.begin() as conn:
-        await conn.execute(
+        result = await conn.execute(
             update(projects)
             .where(projects.c.project_id == project_id)
-            .values(article=article, selected_journal=selected_journal or projects.c.selected_journal, updated_at=_now())
+            .values(**vals)
         )
+        if result.rowcount == 0:
+            logger.warning("save_article: no row updated for project_id=%s", project_id)
+        else:
+            logger.info(
+                "save_article: saved %d chars, citation_map=%d chars for project_id=%s",
+                len(article), len(citation_map or "{}"), project_id,
+            )
 
 
 async def save_manuscript_title(project_id: str, title: str) -> None:
@@ -672,6 +725,48 @@ async def get_revision_wip(project_id: str) -> dict:
         if row[1]:
             wip["manuscript_text"] = row[1]
         return wip
+
+
+async def get_revision_agent_state(project_id: str) -> dict:
+    """Return persisted AI revision-agent state nested inside revision_wip."""
+    eng = create_engine_async()
+    async with eng.connect() as conn:
+        row = (await conn.execute(
+            select(projects.c.revision_wip).where(projects.c.project_id == project_id)
+        )).first()
+        if not row or not row[0]:
+            return {}
+        try:
+            raw = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        state = raw.get("ai_revision_agent", {})
+        return state if isinstance(state, dict) else {}
+
+
+async def save_revision_agent_state(project_id: str, state: dict) -> None:
+    """Persist AI revision-agent state inside revision_wip without clobbering other WIP data."""
+    eng = create_engine_async()
+    async with eng.begin() as conn:
+        row = (await conn.execute(
+            select(projects.c.revision_wip).where(projects.c.project_id == project_id)
+        )).first()
+        existing: dict = {}
+        if row and row[0]:
+            try:
+                existing = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+        existing["ai_revision_agent"] = state
+        await conn.execute(
+            update(projects)
+            .where(projects.c.project_id == project_id)
+            .values(revision_wip=json.dumps(existing, ensure_ascii=False), updated_at=_now())
+        )
 
 
 async def save_revision_round(project_id: str, round_data: dict) -> None:

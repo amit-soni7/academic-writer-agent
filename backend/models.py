@@ -710,30 +710,293 @@ class DeepSynthesisResult(BaseModel):
 
 class ReviewConcern(BaseModel):
     concern:              str        = ""
-    evidence_ids:         list[str] = []   # evidence_quote claim_ids
-    paper_ids:            list[str] = []   # paper_keys
+    basis:                str        = "both"   # "manuscript_only" | "evidence_only" | "both"
+    location:             str        = ""       # "Introduction, paragraph 2" (section + paragraph)
+    quoted_passage:       str        = ""       # verbatim 50-150 chars from manuscript for exact matching
+    confidence:           str        = "high"   # "high" | "medium" | "low"
+    evidence_ids:         list[str] = []        # globally unique: {paper_key}::result_{i}
+    paper_ids:            list[str] = []        # paper_keys
     scientific_importance: str       = ""
     revision_request:     str        = ""
+    # ── New fields for enhanced review ──
+    severity:             str        = "high"   # "high" | "medium"
+    problem_type:         str        = ""       # "conceptual" | "evidentiary" | "methodological" | "structural" | "rhetorical" | "journal_fit"
+    resolvable:           bool       = True     # whether concern is likely resolvable in revision
+    satisfaction_criterion: str      = ""       # what must be true after revision for this concern to be resolved
+
+
+class SectionAssessment(BaseModel):
+    section:     str       = ""
+    rating:      str       = "adequate"   # "strong" | "adequate" | "weak" | "missing"
+    strengths:   list[str] = []
+    weaknesses:  list[str] = []
+    suggestions: list[str] = []
+    revision_advice: str   = ""            # exact revision advice for this section
+
+
+class RubricScore(BaseModel):
+    dimension:   str = ""       # e.g. "Originality/contribution"
+    score:       int = 3        # 1–5
+    rationale:   str = ""       # why this score
+
+
+class ClaimAuditItem(BaseModel):
+    claim:       str = ""       # quoted or paraphrased claim
+    location:    str = ""       # section + line range
+    problem:     str = ""       # "overgeneralized" | "under-supported" | "imprecise" | "historically under-specified" | "overclaimed"
+    fix:         str = ""       # "supported" | "narrowed" | "rephrased" | "defined" | "removed"
+    explanation: str = ""       # why this fix is needed
 
 
 class PeerReviewReport(BaseModel):
-    manuscript_summary:  str                 = ""
-    major_concerns:      list[ReviewConcern] = []
-    minor_concerns:      list[ReviewConcern] = []
-    required_revisions:  list[str]           = []
-    decision:            str                 = "major_revision"
-    decision_rationale:  str                 = ""
+    manuscript_summary:    str                      = ""
+    reviewer_expertise:    list[str]                = []   # inferred reviewer specialization domains
+    strengths:             list[str]                = []
+    section_assessments:   list[SectionAssessment]  = []
+    major_concerns:        list[ReviewConcern]      = []
+    minor_concerns:        list[ReviewConcern]      = []
+    claims_audit:          list[ClaimAuditItem]     = []   # claims audit results
+    rubric_scores:         list[RubricScore]        = []   # 10-dimension rubric
+    revision_priorities:   list[str]                = []   # top 5 most impactful revisions, ranked
+    required_revisions:    list[str]                = []
+    decision:              str                      = "major_revision"
+    decision_rationale:    str                      = ""
+    editor_note:           str                      = ""   # concise editor-facing decision note
 
 
 class ReviseAfterReviewRequest(BaseModel):
     article: str
     review: PeerReviewReport
     selected_journal: Optional[str] = None
+    action_map: Optional["RevisionActionMap"] = None  # from Stage 2
+    generate_response_letter: bool = True
+
+
+# ── Revision Action Map ──────────────────────────────────────────────────────
+
+class RevisionAction(BaseModel):
+    reviewer_comment_id:    str = ""       # e.g. "major_1" or "minor_3"
+    disposition:           str = ""       # accept | partially_accept | decline | already_addressed | editorial_optional
+    concern_title:          str = ""
+    severity:               str = "high"   # "high" | "medium" | "low"
+    manuscript_location:    str = ""       # section + paragraph reference
+    quoted_passage:         str = ""       # verbatim text from manuscript for exact matching
+    action_type:            str = ""       # "define_term" | "soften_claim" | "add_citation" | etc.
+    revision_instruction:   str = ""       # what to do
+    target_section:         str = ""       # which section to edit
+    estimated_edit_size:    str = "paragraph"  # "sentence" | "paragraph" | "multi_paragraph"
+    has_dependency:         bool = False   # depends on another edit
+    verification_criterion: str = ""       # what must be true after edit
+
+
+class RevisionActionMap(BaseModel):
+    actions:             list[RevisionAction] = []
+    total_actions:       int                  = 0
+    accepted_count:      int                  = 0
+    declined_count:      int                  = 0
+    partially_accepted:  int                  = 0
+
+
+# ── Enhanced revision result ─────────────────────────────────────────────────
+
+class RevisionRepairTelemetry(BaseModel):
+    invalid_qa_findings: int = 0
+    discarded_blockers: int = 0
+    merged_repair_groups: int = 0
+    structural_repair_invocations: int = 0
 
 
 class RevisionResult(BaseModel):
     revised_article: str = ""
     point_by_point_reply: str = ""
+    response_data: Optional[dict] = None   # structured per-comment response data for docx generation
+    action_map: Optional[RevisionActionMap] = None
+    audit: Optional[dict] = None           # post-revision quality audit
+    applied_changes: Optional[int] = None  # number of operations applied
+    failed_changes: Optional[int] = None   # number of operations that failed
+    change_justifications: list[str] = []
+    response_qc: Optional["ResponseQCResult"] = None
+    repair_telemetry: Optional[RevisionRepairTelemetry] = None
+
+
+# ── Consistency audit ────────────────────────────────────────────────────────
+
+class AuditRecommendedEdit(BaseModel):
+    edit_type: str = "replace"   # "replace" | "insert_after" | "delete"
+    find: str = ""               # Exact verbatim text from manuscript
+    replace_with: str = ""       # Replacement text ("" for delete)
+
+
+class RepairTask(BaseModel):
+    source: str = ""                  # audit | rereview | editor
+    severity: str = "advisory"        # blocking | advisory
+    section: str = ""                 # best-effort section name
+    line_span: list[int] = []         # [start_line, end_line]
+    quoted_passage: str = ""          # exact anchored passage from manuscript when available
+    issue_type: str = "other"         # structural | placeholder | corruption | citation | style | other
+    expected_outcome: str = ""        # concrete repair objective
+    safe_edit_ops: list[AuditRecommendedEdit] = []
+    rewrite_scope: str = "paragraph"  # sentence | paragraph | multi_paragraph | section
+
+
+class AuditCheck(BaseModel):
+    check:      str  = ""      # description of what was checked
+    passed:     bool = True
+    detail:     str  = ""      # explanation
+    passage:    str  = ""      # verbatim problematic text from manuscript
+    recommended_edits: list[AuditRecommendedEdit] = []  # concrete fix operations
+
+
+class ConsistencyAuditResult(BaseModel):
+    checks:             list[AuditCheck] = []
+    all_passed:         bool             = True
+    unresolved_concerns: list[str]       = []
+    new_issues:         list[str]        = []
+    blocking_issues:    list[str]        = []
+    advisory_issues:    list[str]        = []
+    repair_tasks:       list[RepairTask] = []
+    summary:            str              = ""
+
+
+# ── Re-review ────────────────────────────────────────────────────────────────
+
+class ConcernResolution(BaseModel):
+    concern_id:          str  = ""       # "major_1", "minor_2", etc.
+    original_concern:    str  = ""
+    status:              str  = ""       # "resolved" | "partially_resolved" | "unresolved"
+    explanation:         str  = ""
+    response_accurate:   bool = True     # whether the response letter accurately represents the revision
+    overstatements:      list[str] = []  # any overstatements in the author response
+
+
+class ReReviewResult(BaseModel):
+    concern_resolutions:   list[ConcernResolution] = []
+    new_issues:            list[str]               = []
+    updated_recommendation: str                    = ""   # "accept" | "minor_revision" | "major_revision" | "reject"
+    remaining_issues:      list[str]               = []
+    needs_another_round:   bool                    = False
+    blocking_issues:       list[str]               = []
+    advisory_issues:       list[str]               = []
+    repair_tasks:          list[RepairTask]        = []
+    summary:               str                     = ""
+
+
+class ConsistencyAuditRequest(BaseModel):
+    revised_article: str = ""
+    response_letter: str = ""
+    action_map: Optional["RevisionActionMap"] = None
+
+
+class ReReviewRequest(BaseModel):
+    revised_article: str = ""
+    response_letter: str = ""
+
+
+class FollowupRevisionRequest(BaseModel):
+    article: str
+    review: PeerReviewReport
+    selected_journal: Optional[str] = None
+    action_map: Optional["RevisionActionMap"] = None
+    consistency_audit: Optional[ConsistencyAuditResult] = None
+    re_review: Optional[ReReviewResult] = None
+    editorial_review: Optional["EditorialReviewResult"] = None
+
+
+class FinalizeRevisionResponseRequest(BaseModel):
+    revised_article: str
+    review: PeerReviewReport
+    selected_journal: Optional[str] = None
+    manuscript_title: str = ""
+    action_map: Optional["RevisionActionMap"] = None
+    change_justifications: list[str] = []
+
+
+# ── Editorial review (journal editor assessment) ─────────────────────────────
+
+class EditorialSuggestion(BaseModel):
+    category: str = ""      # completeness | quality | consistency | over_edit | under_edit | language | structure | references
+    severity: str = "minor"  # critical | important | minor
+    location: str = ""       # section + line hint
+    finding: str = ""        # what the editor found
+    suggestion: str = ""     # what the editor recommends
+
+
+class EditorialReviewResult(BaseModel):
+    editor_decision: str = "minor_revision"  # accept | minor_revision | major_revision
+    overall_assessment: str = ""             # 2-3 paragraph editorial assessment
+    suggestions: list[EditorialSuggestion] = []
+    praise: list[str] = []                   # what the authors did well
+    remaining_concerns: list[str] = []       # unresolved issues
+    blocking_issues: list[str] = []
+    advisory_issues: list[str] = []
+    repair_tasks: list[RepairTask] = []
+
+
+class ResponseQCResult(BaseModel):
+    checked: bool = True
+    blocking_issues: list[str] = []
+    advisory_issues: list[str] = []
+    summary: str = ""
+
+
+class RevisionAgentLedgerItem(BaseModel):
+    item_id: str = ""
+    source: str = ""            # audit | rereview | editor | response_qc
+    severity: str = "advisory"  # blocking | advisory
+    message: str = ""
+    round_number: int = 1
+    resolved: bool = False
+    justification: str = ""
+
+
+class RevisionAgentExportReadiness(BaseModel):
+    manuscript_markdown_ready: bool = False
+    manuscript_docx_ready: bool = False
+    manuscript_pdf_ready: bool | None = None
+    response_markdown_ready: bool = False
+    response_docx_ready: bool = False
+    all_required_ready: bool = False
+
+
+class RevisionAgentQaMetrics(BaseModel):
+    invalid_qa_findings: int = 0
+    discarded_blockers: int = 0
+    merged_repair_groups: int = 0
+    structural_repair_invocations: int = 0
+
+
+class RevisionAgentStatus(BaseModel):
+    status: str = "idle"  # idle | running | completed | failed | needs_user_review
+    stage: str = "idle"
+    current_round: int = 0
+    blocking_issue_count: int = 0
+    advisory_issue_count: int = 0
+    final_response_ready: bool = False
+    export_readiness: RevisionAgentExportReadiness = RevisionAgentExportReadiness()
+    completed_reason: str = ""
+    ledger_entries: list[RevisionAgentLedgerItem] = []
+    stop_requested: bool = False
+    last_error: str = ""
+    last_blocking_signature: str = ""
+    repeated_blocking_rounds: int = 0
+    action_map: Optional[RevisionActionMap] = None
+    revision: Optional[RevisionResult] = None
+    consistency_audit: Optional[ConsistencyAuditResult] = None
+    re_review: Optional[ReReviewResult] = None
+    editorial_review: Optional["EditorialReviewResult"] = None
+    baseline_article: str = ""
+    last_known_good_article: str = ""
+    qa_metrics: RevisionAgentQaMetrics = RevisionAgentQaMetrics()
+    user_guidance: str = ""  # Compiled guidance from user's choices
+
+
+class EditorialReviewRequest(BaseModel):
+    round_number: int = 1
+    journal_name: str = ""
+    revised_manuscript: str = ""
+    reviewer_comments: list[dict] = []
+    author_responses: list[dict] = []
+    finalized_plans: list[dict] = []
 
 
 # ── Real peer-review revision system ──────────────────────────────────────────

@@ -102,6 +102,33 @@
     "api": "google-generative-ai",
     "models": [
       {
+        "id": "gemini-3.1-pro",
+        "name": "Gemini 3.1 Pro",
+        "reasoning": true,
+        "input": ["text", "image"],
+        "cost": { "input": 2.50, "output": 15, "cacheRead": 0.625, "cacheWrite": 2.50 },
+        "contextWindow": 1048576,
+        "maxTokens": 65536
+      },
+      {
+        "id": "gemini-3.0-flash",
+        "name": "Gemini 3 Flash",
+        "reasoning": true,
+        "input": ["text", "image"],
+        "cost": { "input": 0.15, "output": 0.6, "cacheRead": 0.0375, "cacheWrite": 0.15 },
+        "contextWindow": 1048576,
+        "maxTokens": 65536
+      },
+      {
+        "id": "gemini-3.1-flash-lite",
+        "name": "Gemini 3.1 Flash-Lite",
+        "reasoning": false,
+        "input": ["text", "image"],
+        "cost": { "input": 0.05, "output": 0.2 },
+        "contextWindow": 1048576,
+        "maxTokens": 65536
+      },
+      {
         "id": "gemini-2.5-flash",
         "name": "Gemini 2.5 Flash",
         "reasoning": true,

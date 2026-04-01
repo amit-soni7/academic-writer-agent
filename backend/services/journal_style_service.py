@@ -92,25 +92,32 @@ class JournalStyle:
         style = self.citation_style
         name  = self.reference_format_name
 
+        key_rule = (
+            "- CRITICAL: The [CITE:key] tag MUST use the EXACT CITE_KEY value shown "
+            "in each paper's header (e.g. if the header says CITE_KEY=10.1234/abc, "
+            "write [CITE:10.1234/abc]). Do NOT invent keys like 'smith2023'.\n"
+        )
+
         if _is_numbered(style):
             if style == CitationStyle.nature:
                 in_text = "superscript numbers (e.g. ^1, ^2,3)"
                 example = (
-                    '"CBT reduced PHQ-9 scores (d=0.52) [CITE:smith2023]^1."'
+                    '"CBT reduced PHQ-9 scores (d=0.52) [CITE:10.1234/abc]^1."'
                 )
             elif style == CitationStyle.science:
                 in_text = "superscript numbers (e.g. ^1, ^2)"
                 example = (
-                    '"CBT reduced PHQ-9 scores (d=0.52) [CITE:smith2023]^1."'
+                    '"CBT reduced PHQ-9 scores (d=0.52) [CITE:10.1234/abc]^1."'
                 )
             else:
                 in_text = "numbered citations in square brackets (e.g. [1], [2,3])"
                 example = (
-                    '"CBT reduced PHQ-9 scores (d=0.52) [CITE:smith2023] [1]."'
+                    '"CBT reduced PHQ-9 scores (d=0.52) [CITE:10.1234/abc] [1]."'
                 )
             return (
                 f"CITATION STYLE — {name} ({style.value.upper()}):\n"
                 f"- Use {in_text} alongside [CITE:key] grounding markers.\n"
+                f"{key_rule}"
                 f"- Example: {example}\n"
                 f"- Number citations by first appearance in the manuscript and reuse the same number for repeat citations.\n"
                 f"- Reference list: numbered, {self.reference_sort_order.replace('_', ' ')} order.\n"
@@ -118,13 +125,11 @@ class JournalStyle:
             )
         else:
             # Author-year styles
-            if style == CitationStyle.cell:
-                example = '"CBT reduced PHQ-9 scores (d=0.52) [CITE:smith2023] (Smith et al., 2023)."'
-            else:
-                example = '"CBT reduced PHQ-9 scores (d=0.52) [CITE:smith2023] (Smith et al., 2023)."'
+            example = '"CBT reduced PHQ-9 scores (d=0.52) [CITE:10.1234/abc] (Smith et al., 2023)."'
             return (
                 f"CITATION STYLE — {name} ({style.value.upper()}):\n"
                 f"- Use author-year citations (e.g. (Smith et al., 2023)) alongside [CITE:key] grounding markers.\n"
+                f"{key_rule}"
                 f"- Example: {example}\n"
                 f"- Reference list: {self.reference_sort_order.replace('_', ' ')} order.\n"
                 f"- Do NOT use numbered citation style.\n"
@@ -399,7 +404,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         sep = ";" if vol_pages else "."
         vp = f"{sep}{vol_pages}." if vol_pages else "."
         doi_part = f" {doi_str}" if doi_str else ""
-        return f"{num}. {authors_str}. {title}.{j_part}{y_part}{vp}{doi_part}"
+        ref = f"{num}. {authors_str}. {title}.{j_part}{y_part}{vp}{doi_part}"
 
     elif style == CitationStyle.ama:
         # 1. Smith AB, Jones CD. Title. *Journal*. 2020;34(5):123-130. doi:...
@@ -408,7 +413,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         sep = ";" if vol_pages else "."
         vp = f"{sep}{vol_pages}." if vol_pages else "."
         doi_part = f" {doi_str}" if doi_str else ""
-        return f"{num}. {authors_str}. {title}.{j_part}{y_part}{vp}{doi_part}"
+        ref = f"{num}. {authors_str}. {title}.{j_part}{y_part}{vp}{doi_part}"
 
     elif style == CitationStyle.nature:
         # 1. Smith, A. B. & Jones, C. D. Title. *Nature* **34**, 123–130 (2020).
@@ -417,7 +422,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         pg_part = f", {pages}" if pages else ""
         y_part = f" ({year})."
         doi_part = f" https://doi.org/{doi}" if doi else ""
-        return f"{num}. {authors_str} {title}.{j_part}{vol_part}{pg_part}{y_part}{doi_part}"
+        ref = f"{num}. {authors_str} {title}.{j_part}{vol_part}{pg_part}{y_part}{doi_part}"
 
     elif style == CitationStyle.science:
         # 1. A. B. Smith, C. D. Jones, Title. *Science* **368**, 123-130 (2020).
@@ -426,7 +431,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         pg_part = f", {pages}" if pages else ""
         y_part = f" ({year})."
         doi_part = f" {doi_str}" if doi_str else ""
-        return f"{num}. {authors_str}, {title}.{j_part}{vol_part}{pg_part}{y_part}{doi_part}"
+        ref = f"{num}. {authors_str}, {title}.{j_part}{vol_part}{pg_part}{y_part}{doi_part}"
 
     elif style == CitationStyle.apa:
         # Smith, A. B., & Jones, C. D. (2020). Title. *Journal Name*, 34(5), 123-130.
@@ -434,7 +439,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         j_part = f" *{jname}*" if jname else ""
         vp_part = f", *{vol_issue}*{pages_str}" if vol_issue else (f", {pages}" if pages else "")
         doi_part = f" https://doi.org/{doi}" if doi else ""
-        return f"{num}. {authors_str} {y_part}{title}.{j_part}{vp_part}.{doi_part}"
+        ref = f"{num}. {authors_str} {y_part}{title}.{j_part}{vp_part}.{doi_part}"
 
     elif style == CitationStyle.harvard:
         # Smith, A.B. and Jones, C.D. (2020) 'Title', *Journal Name*, 34(5), pp.123-130.
@@ -442,7 +447,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         j_part = f" *{jname}*" if jname else ""
         vp_part = f", {vol_issue}, pp.{pages}" if vol_issue and pages else (f", {vol_issue}" if vol_issue else "")
         doi_part = f" {doi_str}" if doi_str else ""
-        return f"{num}. {authors_str} {y_part}'{title}',{j_part}{vp_part}.{doi_part}"
+        ref = f"{num}. {authors_str} {y_part}'{title}',{j_part}{vp_part}.{doi_part}"
 
     elif style == CitationStyle.cell:
         # Smith, A.B., and Jones, C.D. (2020). Title. *Cell* *34*, 123-130.
@@ -451,7 +456,7 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         vol_part = f" *{volume}*" if volume else ""
         pg_part = f", {pages}" if pages else ""
         doi_part = f" {doi_str}" if doi_str else ""
-        return f"{num}. {authors_str} {y_part}{title}.{j_part}{vol_part}{pg_part}.{doi_part}"
+        ref = f"{num}. {authors_str} {y_part}{title}.{j_part}{vol_part}{pg_part}.{doi_part}"
 
     else:
         # Default (AMA/NLM-like)
@@ -460,7 +465,17 @@ def _format_one_ref(num: int, s: dict, style: CitationStyle) -> str:
         sep = ";" if vol_pages else "."
         vp = f"{sep}{vol_pages}." if vol_pages else "."
         doi_part = f" {doi_str}" if doi_str else ""
-        return f"{num}. {authors_str}. {title}.{j_part}{y_part}{vp}{doi_part}"
+        ref = f"{num}. {authors_str}. {title}.{j_part}{y_part}{vp}{doi_part}"
+
+    # ── Clean up formatting artifacts common to all styles ────────────────
+    # Protect legitimate ellipses before cleanup
+    ref = ref.replace('...', '\x00ELLIPSIS\x00')
+    ref = re.sub(r'\.{2,}', '.', ref)        # ".." → "."
+    ref = re.sub(r'\.\s+\.', '.', ref)        # ". ." → "."
+    ref = re.sub(r'\s{2,}', ' ', ref)         # double spaces → single
+    ref = re.sub(r',\s*\.', '.', ref)         # ",." → "."
+    ref = ref.replace('\x00ELLIPSIS\x00', '...')
+    return ref
 
 
 # ── Default sections by article type ─────────────────────────────────────────

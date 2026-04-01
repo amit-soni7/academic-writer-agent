@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation, useParams } from 'react-router-dom';
-import { getMe, loginWithGoogle, logout as logoutApi } from './api/auth';
+import { getMe, logout as logoutApi } from './api/auth';
 import ArticleWriter, { type MainTab } from './components/ArticleWriter';
 import CrossReferenceDashboard from './components/CrossReferenceDashboard';
 import CitationBase from './components/CitationBase';
@@ -167,6 +167,7 @@ const STEP_TO_URL: Record<StepId, string> = {
   comments: 'comments',
   edit_comments: 'edit-comments',
   responses: 'responses',
+  editor: 'editor-review',
   download: 'download',
 };
 const URL_TO_STEP: Record<string, StepId> = {
@@ -174,6 +175,7 @@ const URL_TO_STEP: Record<string, StepId> = {
   comments: 'comments',
   'edit-comments': 'edit_comments',
   responses: 'responses',
+  'editor-review': 'editor',
   download: 'download',
 };
 
@@ -1633,28 +1635,3 @@ export default function App() {
     </AppCtx.Provider>
   );
 }
-
-// ── GIS initialization (runs once on load) ────────────────────────────────────
-
-declare global {
-  interface Window { google?: any }
-}
-
-(() => {
-  const tryInit = () => {
-    const google = (window as any).google;
-    if (!google?.accounts?.id) return;
-    google.accounts.id.initialize({
-      client_id: (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '',
-      callback: async (resp: any) => {
-        try {
-          await loginWithGoogle(resp.credential);
-          window.location.href = '/#/dashboard';   // HashRouter: hash prefix required
-        } catch {}
-      },
-    });
-    // LoginPage's useEffect handles renderButton — nothing to do here at init time
-  };
-  if (document.readyState === 'complete') tryInit();
-  else window.addEventListener('load', tryInit);
-})();

@@ -96,6 +96,7 @@ projects = Table(
     # PRISMA-P 2015 structured data (all 17 items)
     Column("prisma_p_data", _json_type, nullable=True),
     Column("visual_recommendations", _json_type, nullable=True),
+    Column("citation_map", Text, nullable=True),
 )
 
 papers = Table(
@@ -370,6 +371,7 @@ async def init_db(engine: Optional[AsyncEngine] = None) -> None:
     await _migrate_add_token_usage_table(eng)
     await _migrate_add_image_settings(eng)
     await _migrate_add_visual_recommendations(eng)
+    await _migrate_add_citation_map(eng)
 
 
 async def _migrate_sessions_to_projects(eng: AsyncEngine) -> None:
@@ -1011,6 +1013,17 @@ async def _migrate_add_image_settings(eng: AsyncEngine) -> None:
             ))
             await conn.execute(text(
                 "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_provider_profiles_json TEXT;"
+            ))
+    except Exception:
+        pass
+
+
+async def _migrate_add_citation_map(eng: AsyncEngine) -> None:
+    """Add citation_map TEXT column to projects (idempotent)."""
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS citation_map TEXT;"
             ))
     except Exception:
         pass

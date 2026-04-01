@@ -35,6 +35,8 @@ from models import (
     ApproveTitleRequest,
     CreateProjectRequest,
     DiscussCommentRequest,
+    EditorialReviewRequest,
+    EditorialReviewResult,
     FigureBuilderExportRequest,
     FigureBuilderGenerateResponse,
     FigureBuilderRefineRequest,
@@ -54,8 +56,16 @@ from models import (
     RealReviewerComment,
     ReplaceCommentsRequest,
     ReviseAfterReviewRequest,
+    RevisionActionMap,
     RevisionResult,
     RevisionRound,
+    ConsistencyAuditResult,
+    ConsistencyAuditRequest,
+    FinalizeRevisionResponseRequest,
+    FollowupRevisionRequest,
+    ReReviewResult,
+    ReReviewRequest,
+    RevisionAgentStatus,
     RevisionWipPayload,
     ScreenPapersRequest,
     SuggestChangesRequest,
@@ -93,6 +103,7 @@ from services.project_repo import (
     load_project_minimal,
     override_screening,
     get_peer_review_result,
+    get_revision_agent_state,
     get_synthesis_result,
     save_article,
     save_article_type,
@@ -106,6 +117,7 @@ from services.project_repo import (
     save_manuscript_title,
     save_peer_review_result,
     save_revision_round,
+    save_revision_agent_state,
     save_revision_wip,
     get_revision_wip,
     save_screening,
@@ -134,7 +146,12 @@ from services.article_builder import (
     build_summary_block as _build_summary_block_svc,
     build_article_prompt as _build_article_prompt_svc,
 )
-from services.manuscript_citation_formatter import normalize_numbered_citation_order
+from services.manuscript_citation_formatter import (
+    analyze_citation_status,
+    build_citation_map,
+    finalize_manuscript_for_export,
+    normalize_numbered_citation_order,
+)
 from services.cross_paper_synthesizer import synthesize
 from services.journal_recommender import recommend_journals, recommend_single_journal
 from services.paper_fetcher import FetchSettings
@@ -142,6 +159,9 @@ from services.provider_resolver import build_provider_for_user_config
 from services.paper_fetcher import ensure_saved_pdf
 from services.paper_summarizer import summarize_paper
 from services.peer_reviewer import generate_peer_review
+from services.revision_action_map import generate_revision_action_map
+from services.consistency_audit import run_consistency_audit
+from services.re_reviewer import generate_re_review
 from services.query_expander import (
     expand_query,
     generate_tentative_title,
@@ -150,7 +170,17 @@ from services.query_expander import (
     sanitize_project_title,
 )
 from services.project_storage import normalize_project_storage_for_user
-from services.revision_writer import generate_revision_package
+from services.revision_writer import (
+    apply_followup_revision,
+    generate_final_response_letter,
+    generate_revision_package,
+)
+from services.revision_agent import (
+    get_revision_agent_status as get_revision_agent_status_svc,
+    is_revision_agent_running,
+    launch_revision_agent,
+    request_revision_agent_stop,
+)
 from services.secure_settings import get_user_provider_api_key
 from services.visual_planner import plan_visuals, renumber_visuals
 from services.figure_renderer import (
@@ -177,6 +207,11 @@ router = APIRouter(prefix="/api", tags=["projects"])
 # ── In-memory background-task registry ───────────────────────────────────────
 # Maps project_id → live status dict so any endpoint can poll progress.
 _BG_TASKS: dict[str, dict] = {}
+
+
+def _serialize_citation_map(article_text: str, summaries: list[dict]) -> str:
+    citation_map = build_citation_map(article_text, summaries)
+    return json.dumps(citation_map, ensure_ascii=False) if citation_map else "{}"
 
 
 def _bg_status(project_id: str) -> dict:
@@ -1223,7 +1258,19 @@ async def write_article(project_id: str, payload: WriteArticleRequest, user=Depe
                 journal_style,
                 project_summaries,
             )
-            await save_article(project_id, article_text, payload.selected_journal)
+            citation_map_sse = _serialize_citation_map(article_text, project_summaries)
+            logger.info(
+                "write_article SSE: saving article (%d chars, %d [CITE:] markers) for project %s",
+                len(article_text),
+                len(re.findall(r'\[CITE:[^\]]+\]', article_text)),
+                project_id,
+            )
+            await save_article(
+                project_id,
+                article_text,
+                payload.selected_journal,
+                citation_map=citation_map_sse,
+            )
             await update_project_phase(project_id, 'article')
             cited_keys = set(re.findall(r'\[CITE:([^\]]+)\]', article_text))
             yield _sse({
@@ -1271,10 +1318,11 @@ async def write_article_sync(project_id: str, payload: WriteArticleRequest, user
         existing_article = (project.get("article") or "").strip()
         if existing_article:
             existing_recs = await load_visual_recommendations(project_id)
+            cached_cited_keys = set(re.findall(r'\[CITE:([^\]]+)\]', existing_article))
             return {
                 "article": existing_article,
                 "word_count": len(existing_article.split()),
-                "ref_count": 0,
+                "ref_count": len(cached_cited_keys),
                 "ref_limit": payload.max_references,
                 "word_limit": payload.word_limit,
                 "visual_recommendations": existing_recs,
@@ -1339,7 +1387,19 @@ async def write_article_sync(project_id: str, payload: WriteArticleRequest, user
         journal_style,
         project_summaries,
     )
-    await save_article(project_id, article_text, payload.selected_journal)
+    citation_map_json = _serialize_citation_map(article_text, project_summaries)
+    logger.info(
+        "write_article_sync: saving article (%d chars, %d [CITE:] markers) for project %s",
+        len(article_text),
+        len(re.findall(r'\[CITE:[^\]]+\]', article_text)),
+        project_id,
+    )
+    await save_article(
+        project_id,
+        article_text,
+        payload.selected_journal,
+        citation_map=citation_map_json,
+    )
     await update_project_phase(project_id, 'article')
     cited_keys_sync = set(re.findall(r'\[CITE:([^\]]+)\]', article_text))
 
@@ -2362,12 +2422,29 @@ async def peer_review(project_id: str, user=Depends(get_current_user)) -> PeerRe
         raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
 
     from models import PaperSummary as PS
+    from services.manuscript_utils import extract_manuscript_packs
     project_summaries = [PS(**v) for v in summaries_raw.values()]
     query   = project.get("query", "")
     article = project.get("article", "") or ""
 
+    # Resolve journal style and article type for context-rich review
+    article_type = project.get("article_type") or "review"
+    selected_journal = project.get("selected_journal") or ""
+    publisher = _get_publisher_from_project(project)
+    journal_style = await _journal_style_service.get_style(
+        journal_name=selected_journal,
+        provider=provider,
+        publisher=publisher,
+    ) if selected_journal else None
+    manuscript_packs = extract_manuscript_packs(project)
+
     async with TokenContext(project_id=project_id, user_id=user["id"], stage="peer_review"):
-        report = await generate_peer_review(provider, project_summaries, query, article)
+        report = await generate_peer_review(
+            provider, project_summaries, query, article,
+            article_type=article_type,
+            journal_style=journal_style,
+            manuscript_packs=manuscript_packs,
+        )
     await save_peer_review_result(project_id, report.model_dump())
     return report
 
@@ -2380,7 +2457,7 @@ async def revise_after_review(
     payload: ReviseAfterReviewRequest,
     user=Depends(get_current_user),
 ) -> RevisionResult:
-    """Rewrite manuscript using peer-review feedback and generate a point-by-point reply."""
+    """Revise manuscript using deterministic edit application from peer-review feedback."""
     project = await load_project(user["id"], project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -2394,8 +2471,22 @@ async def revise_after_review(
         raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
 
     from models import PaperSummary as PS
+    from services.manuscript_utils import extract_manuscript_packs
     project_summaries = [PS(**v) for v in summaries_raw.values()]
     query = project.get("query", "")
+
+    # Resolve context for high-quality revision
+    article_type = project.get("article_type") or "review"
+    selected_journal = payload.selected_journal or (project.get("selected_journal") or "")
+    word_limit = project.get("word_limit") or 4000
+    manuscript_title = project.get("manuscript_title") or ""
+    publisher = _get_publisher_from_project(project)
+    journal_style = await _journal_style_service.get_style(
+        journal_name=selected_journal,
+        provider=provider,
+        publisher=publisher,
+    ) if selected_journal else None
+    manuscript_packs = extract_manuscript_packs(project)
 
     async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision"):
         result = await generate_revision_package(
@@ -2404,25 +2495,434 @@ async def revise_after_review(
             query=query,
             article=payload.article or (project.get("article") or ""),
             review=payload.review,
-            journal=payload.selected_journal or (project.get("selected_journal") or ""),
+            journal=selected_journal,
+            article_type=article_type,
+            journal_style=journal_style,
+            manuscript_packs=manuscript_packs,
+            word_limit=word_limit,
+            manuscript_title=manuscript_title,
+            action_map=payload.action_map,
+            generate_response_letter=payload.generate_response_letter,
         )
     if result.revised_article.strip():
-        publisher = _get_publisher_from_project(project)
-        journal_style = await _journal_style_service.get_style(
-            journal_name=payload.selected_journal or (project.get("selected_journal") or ""),
-            provider=provider,
-            publisher=publisher,
-        )
-        normalized_revised_article = normalize_numbered_citation_order(
-            result.revised_article,
-            journal_style,
-            list(summaries_raw.values()),
-        )
-        result.revised_article = normalized_revised_article
+        if journal_style:
+            normalized_revised_article = normalize_numbered_citation_order(
+                result.revised_article,
+                journal_style,
+                list(summaries_raw.values()),
+            )
+            result.revised_article = normalized_revised_article
         await save_article(
             project_id,
-            normalized_revised_article,
-            payload.selected_journal or (project.get("selected_journal") or ""),
+            result.revised_article,
+            selected_journal,
+            citation_map=_serialize_citation_map(result.revised_article, list(summaries_raw.values())),
+        )
+    return result
+
+
+class ResponseLetterDocxRequest(BaseModel):
+    response_data: dict
+    journal: str = ""
+    manuscript_title: str = ""
+
+
+class ManuscriptExportTextRequest(BaseModel):
+    article_text: str = ""
+    journal_name: str = ""
+
+
+@router.post("/projects/{project_id}/response_letter_docx")
+async def response_letter_docx_endpoint(
+    project_id: str,
+    payload: ResponseLetterDocxRequest,
+    user=Depends(get_current_user),
+):
+    """Generate a formatted .docx response letter from structured response data."""
+    from fastapi.responses import Response
+    from services.revision_writer import build_response_letter_docx
+
+    if not payload.response_data or not payload.response_data.get("responses"):
+        raise HTTPException(status_code=400, detail="No response data provided.")
+
+    docx_bytes = build_response_letter_docx(
+        response_data=payload.response_data,
+        journal=payload.journal,
+        manuscript_title=payload.manuscript_title,
+    )
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": 'attachment; filename="response_letter.docx"',
+        },
+    )
+
+
+@router.post("/projects/{project_id}/manuscript_export_text")
+async def manuscript_export_text_endpoint(
+    project_id: str,
+    payload: ManuscriptExportTextRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Return export-ready manuscript markdown with resolved citations and references."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    article_text = payload.article_text or (project.get("article") or "")
+    if not article_text.strip():
+        raise HTTPException(status_code=400, detail="No manuscript text provided.")
+
+    selected_journal = (payload.journal_name or "").strip() or (project.get("selected_journal") or "").strip()
+    provider = await _get_provider_for_user(user["id"]) if selected_journal else None
+    publisher = _get_publisher_from_project(project)
+    journal_style = await _journal_style_service.get_style(
+        journal_name=selected_journal,
+        provider=provider,
+        publisher=publisher,
+    )
+
+    export_text = finalize_manuscript_for_export(
+        article_text=article_text,
+        journal_style=journal_style,
+        summaries=list((project.get("summaries") or {}).values()),
+    )
+    return {"article_text": export_text}
+
+
+class CitationStatusRequest(BaseModel):
+    article_text: str = ""
+    journal_name: str = ""
+
+
+@router.post("/projects/{project_id}/citation_status")
+async def citation_status_endpoint(
+    project_id: str,
+    payload: CitationStatusRequest,
+    user=Depends(get_current_user),
+) -> dict:
+    """Analyse citation-reference integrity for the sidebar."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    article_text = payload.article_text or (project.get("article") or "")
+    if not article_text.strip():
+        return {"citations": [], "summary": {"total": 0, "resolved": 0, "fuzzy_matched": 0, "unresolved": 0, "uncited_count": 0, "uncited_keys": []}}
+
+    summaries = list((project.get("summaries") or {}).values())
+
+    # Pass stored citation_map to improve resolution for old manuscripts
+    stored_map_str = project.get("citation_map") or ""
+    stored_map: dict[str, str] = {}
+    if stored_map_str:
+        try:
+            import json as _json
+            stored_map = _json.loads(stored_map_str)
+        except Exception:
+            pass
+
+    return analyze_citation_status(article_text, summaries, stored_citation_map=stored_map)
+
+
+@router.post("/projects/{project_id}/followup_revision", response_model=RevisionResult)
+async def followup_revision_endpoint(
+    project_id: str,
+    payload: FollowupRevisionRequest,
+    user=Depends(get_current_user),
+) -> RevisionResult:
+    """Apply a second-pass manuscript-only revision based on audit/re-review/editor findings."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
+
+    article_type = project.get("article_type") or "review"
+    selected_journal = payload.selected_journal or (project.get("selected_journal") or "")
+    publisher = _get_publisher_from_project(project)
+    journal_style = await _journal_style_service.get_style(
+        journal_name=selected_journal,
+        provider=provider,
+        publisher=publisher,
+    ) if selected_journal else None
+
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="followup_revision"):
+        result = await apply_followup_revision(
+            provider=provider,
+            article=payload.article or (project.get("article") or ""),
+            review=payload.review,
+            journal=selected_journal,
+            article_type=article_type,
+            journal_style=journal_style,
+            action_map=payload.action_map,
+            consistency_audit=payload.consistency_audit.model_dump() if payload.consistency_audit else None,
+            re_review=payload.re_review.model_dump() if payload.re_review else None,
+            editorial_review=payload.editorial_review.model_dump() if payload.editorial_review else None,
+        )
+    if result.revised_article.strip():
+        if journal_style:
+            result.revised_article = normalize_numbered_citation_order(
+                result.revised_article,
+                journal_style,
+                list((project.get("summaries") or {}).values()),
+            )
+        await save_article(
+            project_id,
+            result.revised_article,
+            selected_journal,
+            citation_map=_serialize_citation_map(result.revised_article, list((project.get("summaries") or {}).values())),
+        )
+    return result
+
+
+@router.post("/projects/{project_id}/finalize_revision_response", response_model=RevisionResult)
+async def finalize_revision_response_endpoint(
+    project_id: str,
+    payload: FinalizeRevisionResponseRequest,
+    user=Depends(get_current_user),
+) -> RevisionResult:
+    """Generate the point-by-point reply once the manuscript revision is finalized."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
+
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="finalize_revision_response"):
+        point_by_point, response_data, response_qc = await generate_final_response_letter(
+            provider=provider,
+            review=payload.review,
+            revised_article=payload.revised_article,
+            journal=payload.selected_journal or (project.get("selected_journal") or ""),
+            manuscript_title=payload.manuscript_title or (project.get("manuscript_title") or ""),
+            action_map=payload.action_map,
+            change_justifications=payload.change_justifications,
+        )
+    return RevisionResult(
+        revised_article=payload.revised_article,
+        point_by_point_reply=point_by_point,
+        response_data=response_data if response_data else None,
+        action_map=payload.action_map,
+        change_justifications=payload.change_justifications,
+        response_qc=response_qc,
+    )
+
+
+# ── AI Revision Agent ────────────────────────────────────────────────────────
+
+@router.get("/projects/{project_id}/revision_agent/status", response_model=RevisionAgentStatus)
+async def revision_agent_status_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> RevisionAgentStatus:
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return await get_revision_agent_status_svc(project_id)
+
+
+@router.post("/projects/{project_id}/revision_agent/run", response_model=RevisionAgentStatus)
+async def revision_agent_run_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> RevisionAgentStatus:
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    review_data = await get_peer_review_result(project_id)
+    if not review_data:
+        raise HTTPException(status_code=400, detail="No peer review found. Run peer review first.")
+    if not (project.get("article") or "").strip():
+        raise HTTPException(status_code=400, detail="No manuscript draft found. Draft the manuscript first.")
+
+    if is_revision_agent_running(project_id):
+        return await get_revision_agent_status_svc(project_id)
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
+
+    selected_journal = project.get("selected_journal") or ""
+    publisher = _get_publisher_from_project(project)
+    journal_style = await _journal_style_service.get_style(
+        journal_name=selected_journal,
+        provider=provider,
+        publisher=publisher,
+    ) if selected_journal else None
+
+    return await launch_revision_agent(
+        project_id=project_id,
+        user_id=user["id"],
+        provider=provider,
+        journal_style=journal_style,
+    )
+
+
+@router.post("/projects/{project_id}/revision_agent/stop", response_model=RevisionAgentStatus)
+async def revision_agent_stop_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> RevisionAgentStatus:
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return await request_revision_agent_stop(project_id)
+
+
+class RevisionAgentResumeRequest(BaseModel):
+    user_guidance: str = ""
+
+
+@router.post("/projects/{project_id}/revision_agent/resume", response_model=RevisionAgentStatus)
+async def revision_agent_resume_endpoint(
+    project_id: str,
+    payload: RevisionAgentResumeRequest = RevisionAgentResumeRequest(),
+    user=Depends(get_current_user),
+) -> RevisionAgentStatus:
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    review_data = await get_peer_review_result(project_id)
+    if not review_data:
+        raise HTTPException(status_code=400, detail="No peer review found. Run peer review first.")
+
+    if is_revision_agent_running(project_id):
+        return await get_revision_agent_status_svc(project_id)
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured. Open Settings first.")
+
+    selected_journal = project.get("selected_journal") or ""
+    publisher = _get_publisher_from_project(project)
+    journal_style = await _journal_style_service.get_style(
+        journal_name=selected_journal,
+        provider=provider,
+        publisher=publisher,
+    ) if selected_journal else None
+
+    status = await get_revision_agent_status_svc(project_id)
+    status.stop_requested = False
+    if status.status == "completed":
+        return status
+    if status.status != "failed" and status.stage != "stopped":
+        raise HTTPException(
+            status_code=400,
+            detail="Revision agent can only be resumed after failure or explicit stop.",
+        )
+
+    status.user_guidance = payload.user_guidance.strip()
+    # Reset repeated-blocking counter so the agent gets fresh rounds
+    status.repeated_blocking_rounds = 0
+    status.last_blocking_signature = ""
+    await save_revision_agent_state(project_id, status.model_dump(mode="json", exclude_none=True))
+
+    return await launch_revision_agent(
+        project_id=project_id,
+        user_id=user["id"],
+        provider=provider,
+        journal_style=journal_style,
+        user_guidance=status.user_guidance,
+    )
+
+
+# ── Revision Action Map ──────────────────────────────────────────────────────
+
+@router.post("/projects/{project_id}/revision_action_map", response_model=RevisionActionMap)
+async def revision_action_map_endpoint(
+    project_id: str,
+    user=Depends(get_current_user),
+) -> RevisionActionMap:
+    """Convert the stored peer-review report into a structured revision action map."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured.")
+
+    review_data = await get_peer_review_result(project_id)
+    if not review_data:
+        raise HTTPException(status_code=400, detail="No peer review found. Run peer_review first.")
+
+    review = PeerReviewReport(**review_data)
+    article = project.get("article", "") or ""
+
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="revision_action_map"):
+        action_map = await generate_revision_action_map(provider, article, review)
+    return action_map
+
+
+# ── Consistency Audit ────────────────────────────────────────────────────────
+
+@router.post("/projects/{project_id}/consistency_audit", response_model=ConsistencyAuditResult)
+async def consistency_audit_endpoint(
+    project_id: str,
+    payload: ConsistencyAuditRequest | None = None,
+    user=Depends(get_current_user),
+) -> ConsistencyAuditResult:
+    """Audit the revised manuscript and response letter for internal consistency."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured.")
+
+    review_data = await get_peer_review_result(project_id)
+    if not review_data:
+        raise HTTPException(status_code=400, detail="No peer review found.")
+
+    review = PeerReviewReport(**review_data)
+    revised_article = (payload.revised_article if payload and payload.revised_article else (project.get("article", "") or ""))
+    response_letter = (payload.response_letter if payload and payload.response_letter else "")
+    action_map = payload.action_map if payload else None
+
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="consistency_audit"):
+        result = await run_consistency_audit(
+            provider, review, action_map, response_letter, revised_article,
+        )
+    return result
+
+
+# ── Re-review (Concern-Resolution Verification) ─────────────────────────────
+
+@router.post("/projects/{project_id}/re_review", response_model=ReReviewResult)
+async def re_review_endpoint(
+    project_id: str,
+    payload: ReReviewRequest | None = None,
+    user=Depends(get_current_user),
+) -> ReReviewResult:
+    """Re-review a revised manuscript by verifying each original concern was resolved."""
+    project = await load_project(user["id"], project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured.")
+
+    review_data = await get_peer_review_result(project_id)
+    if not review_data:
+        raise HTTPException(status_code=400, detail="No peer review found.")
+
+    review = PeerReviewReport(**review_data)
+    revised_article = (payload.revised_article if payload and payload.revised_article else (project.get("article", "") or ""))
+    response_letter = (payload.response_letter if payload and payload.response_letter else "")
+
+    async with TokenContext(project_id=project_id, user_id=user["id"], stage="re_review"):
+        result = await generate_re_review(
+            provider, review, response_letter, revised_article,
         )
     return result
 
@@ -2782,9 +3282,124 @@ async def list_revision_rounds_endpoint(
             "comment_count": len(r.get("parsed_comments", [])),
             "created_at": r.get("created_at", ""),
             "has_revised_article": bool(r.get("revised_article", "").strip()),
+            "has_point_by_point_docx": bool(
+                proj.get("project_folder")
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "point_by_point.docx"))
+            ),
+            "has_revised_manuscript_docx": bool(
+                proj.get("project_folder")
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "revised_manuscript.docx"))
+            ),
+            "has_track_changes_docx": bool(
+                proj.get("project_folder")
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "track_changes.docx"))
+            ),
+            "has_revised_pdf": bool(
+                proj.get("project_folder")
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "revised_manuscript.pdf"))
+            ),
+            "docs_ready": bool(
+                proj.get("project_folder")
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "point_by_point.docx"))
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "revised_manuscript.docx"))
+                and os.path.isfile(os.path.join(proj["project_folder"], f"round_{r.get('round_number')}", "track_changes.docx"))
+            ),
         }
         for r in rounds
     ]
+
+
+@router.post(
+    "/projects/{project_id}/revision_rounds/editorial_review",
+    response_model=EditorialReviewResult,
+)
+async def editorial_review_endpoint(
+    project_id: str,
+    payload: EditorialReviewRequest,
+    user=Depends(get_current_user),
+) -> EditorialReviewResult:
+    """Generate an editorial review of a revision round.
+
+    Accepts either:
+    - round_number (loads from stored round)
+    - OR revised_manuscript + reviewer_comments + author_responses inline
+    - OR finalized_plans, which are applied transiently to generate a reviewable revision
+    """
+    from services.editorial_reviewer import generate_editorial_review
+    from services.real_revision_writer import generate_revision_from_plans
+
+    proj = await load_project_minimal(project_id)
+    if not proj or proj.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    journal_name = payload.journal_name
+    original_manuscript = proj.get("base_manuscript", "") or proj.get("article", "")
+    if not original_manuscript.strip():
+        raise HTTPException(status_code=400, detail="No original manuscript found for editorial review.")
+
+    provider = await _get_provider_for_user(user["id"])
+    if not provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured.")
+
+    try:
+        # If inline data provided (pre-round generation), use it directly
+        if payload.revised_manuscript.strip():
+            revised_manuscript = payload.revised_manuscript
+            reviewer_comments = payload.reviewer_comments
+            author_responses = payload.author_responses
+        elif payload.finalized_plans:
+            transient_round = await generate_revision_from_plans(
+                provider=provider,
+                manuscript_text=original_manuscript,
+                finalized_plans=payload.finalized_plans,
+                journal_name=journal_name,
+                round_number=payload.round_number,
+            )
+            revised_manuscript = transient_round.get("revised_article", "")
+            reviewer_comments = transient_round.get("parsed_comments", [])
+            author_responses = transient_round.get("responses", [])
+        else:
+            # Otherwise, load from a stored revision round
+            round_number = payload.round_number
+            rounds = await get_revision_rounds(project_id)
+            target_round = None
+            for r in rounds:
+                if r.get("round_number") == round_number:
+                    target_round = r
+                    break
+            if not target_round:
+                raise HTTPException(status_code=404, detail=f"Revision round {round_number} not found.")
+
+            revised_manuscript = target_round.get("revised_article", "")
+            if not revised_manuscript.strip():
+                raise HTTPException(status_code=400, detail="No revised manuscript found in this round.")
+            reviewer_comments = target_round.get("parsed_comments", [])
+            author_responses = target_round.get("responses", [])
+            journal_name = journal_name or target_round.get("journal_name", "")
+
+        async with TokenContext(project_id=project_id, user_id=user["id"], stage="editorial_review"):
+            return await generate_editorial_review(
+                provider=provider,
+                original_manuscript=original_manuscript,
+                revised_manuscript=revised_manuscript,
+                reviewer_comments=reviewer_comments,
+                author_responses=author_responses,
+                journal_name=journal_name,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Editorial review endpoint failed for project %s", project_id)
+        return EditorialReviewResult(
+            editor_decision="minor_revision",
+            overall_assessment=(
+                "Editorial review could not be completed automatically. "
+                f"Reason: {exc}"
+            ),
+            suggestions=[],
+            praise=[],
+            remaining_concerns=["Automatic editorial review failed for this request."],
+        )
 
 
 @router.get("/projects/{project_id}/revision_wip")
